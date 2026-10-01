@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import contextvars
 import getpass
 import io
 import json
@@ -1606,6 +1607,92 @@ class TurnState:
         return bits
 
 
+# --- the chat in context ---------------------------------------------------------------------
+#
+# jav3.2 P1: several chats run at once, one per chat panel. Everything one chat on
+# screen owns lives in a ChatState (its conversation, the turn streaming into it, the
+# queue of messages typed meanwhile, its project / agent / model / permission mode, its
+# transcript's widgets); the app has one per panel. The app's turn code was written for
+# one chat and says `self.cid`, `self.turn`, `self.busy`: those names are descriptors
+# (_PerChat) that read and write the state of "the chat in context", which is
+#   - inside a worker, the chat that started it: Jav3App.run_worker binds the chat that
+#     was in context when the worker was spawned (so a turn streaming into panel 2 goes
+#     on with panel 2's state however the focus moves meanwhile);
+#   - anywhere else (a key, a message handler, the tick), the focused panel's chat.
+# The prompt, the status row and the sidebar always show the focused chat
+# (Jav3App.focused_chat); a code path that must not follow the worker's chat asks it
+# explicitly. `with app.in_chat(chat):` switches the context for a block.
+
+_CHAT: "contextvars.ContextVar[ChatState | None]" = contextvars.ContextVar(
+    "jav3_chat", default=None)
+
+
+class ChatState:
+    """One chat panel's state. See the comment above."""
+
+    def __init__(self, number: int = 1, project: str | None = None,
+                 project_mode: str | None = None, agent: str | None = None,
+                 model: str | None = None) -> None:
+        self.number = number                  # the panel's number, 1-4
+        self.cid: int | None = None
+        self.title_text: str | None = None
+        self.project, self.project_mode = project, project_mode
+        self.agent, self.model = agent, model
+        self.shown_model: str | None = None
+        self.ephemeral = False
+        self.local = False                    # /local: the next new chat runs here
+        self.info: dict | None = None
+        self.todos: list[tuple[bool, str]] = []
+        self.busy = False
+        self.turn: TurnState | None = None
+        self.last_turn: TurnState | None = None
+        self.stop_requested = False
+        self.reconnecting = False             # the stream broke and the client is trying to get it back
+        self.queue: list[str] = []
+        self.pending: list = []               # QueuedMsg posted mid-turn, not yet delivered
+        self.orchestrator = False             # this chat is an orchestrator (/orchestration)
+        self.child_of: int | None = None      # this view is an agent under that conversation
+        self.attachments: list[str] = []
+        self.last_user: str | None = None
+        self.last_reply = ""
+        self.tools_expanded = False
+        self.perm_mode = "yolo"
+        self.unseen = 0                       # transcript items mounted while scrolled up
+        self.asks = 0                         # asks waiting on the operator for this chat
+        # the widgets, set when the panel is built
+        self.panel = None                     # the Panel frame
+        self.page = None                      # the ChatPage at the bottom of its host
+        self.log = None                       # the ChatLog (the transcript)
+        self.header = None
+        self.new_hint = None
+
+    def settings_for_new(self, number: int) -> "ChatState":
+        """A new panel's chat: nothing said yet, in the same project, as the same agent,
+        on the same model and permission mode as this one."""
+        new = ChatState(number, self.project, self.project_mode, self.agent, self.model)
+        new.perm_mode, new.ephemeral, new.local = self.perm_mode, self.ephemeral, self.local
+        return new
+
+
+class _PerChat:
+    """`app.<name>` is `<name>` of the chat in context (see above)."""
+
+    def __set_name__(self, owner, name) -> None:
+        self.name = name
+
+    def __get__(self, obj, owner=None):
+        return self if obj is None else getattr(obj.chat, self.name)
+
+    def __set__(self, obj, value) -> None:
+        setattr(obj.chat, self.name, value)
+
+
+CHAT_FIELDS = ("cid", "title_text", "project", "project_mode", "agent", "model", "shown_model",
+               "ephemeral", "local", "info", "todos", "busy", "turn", "last_turn",
+               "stop_requested", "reconnecting", "queue", "pending", "orchestrator", "child_of",
+               "attachments", "last_user", "last_reply", "tools_expanded", "perm_mode", "unseen")
+
+
 def _subsequence_gaps(q: str, t: str) -> int | None:
     """Letters of q in order inside t: how many letters of t lie between the
     first and the last hit beyond q's own (None = not all found)."""
@@ -1731,6 +1818,185 @@ def parse_page_args(arg: str) -> tuple[list[str], bool]:
     toks = (arg or "").split()
     panel = bool(toks) and toks[-1].lower() == "panel"
     return (toks[:-1] if panel else toks), panel
+
+
+# --- panels: the split tree behind the tiling ------------------------------------------------
+#
+# jav3.2 P1. The area above the prompt tiles like tmux: up to four panels, each with a
+# PageHost of its own (a chat at the bottom of its stack, pages over it). The layout is a
+# pure model, a port of the web's Work board (frontend/src/work/layout.js): a tree whose
+# leaves are panel numbers and whose splits hold two or more children side by side
+# ("row") or stacked ("col"), with a fraction of the split each. No Textual in it, so
+# tests/test_cli_panels.py runs it alone. A panel keeps its number for as long as it
+# lives and a new one takes the lowest free number, so `ctrl+x 2` and a dialog's "panel 2"
+# always mean the same panel.
+
+MAX_PANELS = 4
+PANEL_MIN_COLS = 28          # a panel's frame, border included: the narrowest that reads
+PANEL_MIN_ROWS = 8           # ...and the shortest (6 inside the border)
+PANEL_HARD_COLS = 20         # under this a panel is unusable: the tiles give way to one panel
+PANEL_HARD_ROWS = 5          # ...alone (a window shrunk after the panels were made)
+
+
+class PanelSplit:
+    """A split node: `dir` "row" (children side by side) or "col" (stacked), the
+    children (panel numbers or splits) and one fraction of the split for each."""
+
+    def __init__(self, dir: str, children, sizes=None) -> None:
+        self.dir, self.children = dir, list(children)
+        n = len(self.children)
+        self.sizes = list(sizes) if sizes else [1.0 / n] * n
+
+    def __eq__(self, other) -> bool:
+        return (isinstance(other, PanelSplit) and self.dir == other.dir
+                and self.children == other.children
+                and all(abs(a - b) < 1e-9 for a, b in zip(self.sizes, other.sizes)))
+
+    def __repr__(self) -> str:
+        return f"{self.dir}({', '.join(map(repr, self.children))})"
+
+
+def tree_leaves(node) -> list[int]:
+    """Every panel number, in reading order (depth first)."""
+    if node is None:
+        return []
+    if not isinstance(node, PanelSplit):
+        return [node]
+    return [leaf for c in node.children for leaf in tree_leaves(c)]
+
+
+def tree_normalize(node):
+    """Tidy a tree: a split with one child is that child, a split inside a split of the
+    same direction is flattened into it, the fractions add up to 1."""
+    if not isinstance(node, PanelSplit):
+        return node
+    children, sizes = [], []
+    for c, s in zip(node.children, node.sizes):
+        n = tree_normalize(c)
+        if n is None:
+            continue
+        s = s if s > 0 else 1.0 / len(node.children)
+        if isinstance(n, PanelSplit) and n.dir == node.dir:
+            children += n.children
+            sizes += [s * x for x in n.sizes]
+        else:
+            children.append(n)
+            sizes.append(s)
+    if not children:
+        return None
+    if len(children) == 1:
+        return children[0]
+    total = sum(sizes) or 1.0
+    return PanelSplit(node.dir, children, [s / total for s in sizes])
+
+
+def tree_split(root, target: int, new: int, dir: str = "row", before: bool = False):
+    """Put panel `new` beside `target`: to its right (below it, for "col"), or the other
+    side with `before`. The two share the space `target` had."""
+    if root is None:
+        return new
+    if target not in tree_leaves(root):
+        target = tree_leaves(root)[-1]
+
+    def rec(node):
+        if not isinstance(node, PanelSplit):
+            if node != target:
+                return node
+            return PanelSplit(dir, [new, node] if before else [node, new])
+        i = next((k for k, c in enumerate(node.children) if c == target), -1)
+        if i >= 0 and node.dir == dir:
+            children, sizes = list(node.children), list(node.sizes)
+            children.insert(i if before else i + 1, new)
+            half = sizes[i] / 2
+            sizes[i:i + 1] = [half, half]
+            return PanelSplit(node.dir, children, sizes)
+        return PanelSplit(node.dir, [rec(c) for c in node.children], node.sizes)
+
+    return tree_normalize(rec(root))
+
+
+def tree_close(root, leaf: int):
+    """Take panel `leaf` out: its space goes to the sibling before it (after it, if it
+    was first). Closing the last panel gives None."""
+    def rec(node):
+        if not isinstance(node, PanelSplit):
+            return None if node == leaf else node
+        i = next((k for k, c in enumerate(node.children) if c == leaf), -1)
+        if i >= 0:
+            children = [c for k, c in enumerate(node.children) if k != i]
+            sizes = [s for k, s in enumerate(node.sizes) if k != i]
+            sizes[i - 1 if i > 0 else 0] += node.sizes[i]
+            return PanelSplit(node.dir, children, sizes)
+        return PanelSplit(node.dir, [rec(c) for c in node.children], node.sizes)
+
+    return tree_normalize(rec(root)) if root is not None else None
+
+
+def _spans(total: int, sizes) -> list[tuple[int, int]]:
+    """`total` cells cut by the fractions: (start, length) for each, exactly covering."""
+    edges, acc = [0], 0.0
+    for s in sizes:
+        acc += s
+        edges.append(int(total * acc + 0.5))
+    edges[-1] = total
+    return [(edges[i], edges[i + 1] - edges[i]) for i in range(len(sizes))]
+
+
+def tree_rects(root, w: int, h: int) -> dict[int, tuple[int, int, int, int]]:
+    """Where every panel sits in a w x h area, in whole cells: {number: (x, y, w, h)}."""
+    out: dict[int, tuple[int, int, int, int]] = {}
+
+    def rec(node, x, y, ww, hh):
+        if not isinstance(node, PanelSplit):
+            out[node] = (x, y, ww, hh)
+            return
+        if node.dir == "row":
+            for c, (off, n) in zip(node.children, _spans(ww, node.sizes)):
+                rec(c, x + off, y, n, hh)
+        else:
+            for c, (off, n) in zip(node.children, _spans(hh, node.sizes)):
+                rec(c, x, y + off, ww, n)
+
+    if root is not None:
+        rec(root, 0, 0, w, h)
+    return out
+
+
+def tree_neighbor(root, leaf: int, direction: str, w: int, h: int) -> int | None:
+    """The panel next to `leaf` across an edge ("left" | "right" | "up" | "down"): the
+    nearest one whose edge faces it, the one sharing the most of that edge on a tie."""
+    rects = tree_rects(root, w, h)
+    if leaf not in rects:
+        return None
+    x, y, ww, hh = rects[leaf]
+    horiz = direction in ("left", "right")
+    best, best_score = None, None
+    for n, (nx, ny, nw, nh) in rects.items():
+        if n == leaf:
+            continue
+        overlap = (min(y + hh, ny + nh) - max(y, ny)) if horiz else \
+            (min(x + ww, nx + nw) - max(x, nx))
+        if overlap <= 0:
+            continue
+        gap = {"right": nx - (x + ww), "left": x - (nx + nw),
+               "down": ny - (y + hh), "up": y - (ny + nh)}[direction]
+        if gap < 0:
+            continue
+        score = gap * 1000 - overlap
+        if best_score is None or score < best_score:
+            best, best_score = n, score
+    return best
+
+
+def panel_split_dir(w: int, h: int) -> str | None:
+    """How to cut a w x h panel in two, or None when neither half would be big enough.
+    The longer side, a cell being about twice as tall as wide; the other way when the
+    first would leave a half under the minimum."""
+    first = "row" if w >= 2 * h else "col"
+    fits = {"row": w >= 2 * PANEL_MIN_COLS and h >= PANEL_MIN_ROWS,
+            "col": h >= 2 * PANEL_MIN_ROWS and w >= PANEL_MIN_COLS}
+    other = "col" if first == "row" else "row"
+    return first if fits[first] else other if fits[other] else None
 
 
 def not_in_terminal(name: str) -> str:
@@ -2411,6 +2677,7 @@ def build_tui(base: str, token: str, **kw):
     from textual.message import Message
     from textual.screen import ModalScreen
     from textual.theme import Theme
+    from textual.widget import Widget
     from textual.widgets import Button, Input, Markdown, OptionList, Static, TextArea
     from textual.widgets._markdown import MarkdownFence
     from textual.widgets.option_list import Option
@@ -2619,9 +2886,14 @@ def build_tui(base: str, token: str, **kw):
         """
 
         def on_click(self) -> None:
-            self.app.log_view.scroll_end(animate=False)
-            self.app.unseen = 0
-            self.app._refresh_new_hint()
+            app = self.app
+            chat = next((c for c in app.chats.values() if c.new_hint is self), None)
+            if chat is None:
+                return
+            with app.in_chat(chat):
+                chat.log.scroll_end(animate=False)
+                chat.unseen = 0
+            app._refresh_new_hint()
 
     class ChatLog(VerticalScroll):
         """The transcript. It follows the bottom until you scroll up. Tab from
@@ -3075,9 +3347,9 @@ def build_tui(base: str, token: str, **kw):
                     Binding("a", "answer('always')", show=False),
                     Binding("n,escape", "answer('no')", show=False)]
 
-        def __init__(self, kind: str, summary: str) -> None:
+        def __init__(self, kind: str, summary: str, panel: int | None = None) -> None:
             super().__init__()
-            self.kind, self.summary = kind, summary
+            self.kind, self.summary, self.panel = kind, summary, panel
             self._opened()
 
         def compose(self) -> ComposeResult:
@@ -3093,7 +3365,9 @@ def build_tui(base: str, token: str, **kw):
                 lines.append(f"[{style}]{_esc(ln)}[/]")
             with Vertical(id="dialog"):
                 yield Static(f"[b]{_esc(what)}[/]  [$text-muted]the agent wants to "
-                             f"{_esc(self.kind)} on this machine[/]")
+                             f"{_esc(self.kind)} on this machine[/]"
+                             + (f"  [$accent b]panel {self.panel}[/]"
+                                if self.panel is not None else ""))
                 with VerticalScroll(id="approve-body"):
                     yield Static("\n".join(lines))
                 always = ("[$primary]a[/] always for this folder" if self.kind == "read" else
@@ -3129,9 +3403,10 @@ def build_tui(base: str, token: str, **kw):
         #ask-foot { margin-top: 1; }
         """
 
-        def __init__(self, ev: dict, who: str = "", waiting: int = 0) -> None:
+        def __init__(self, ev: dict, who: str = "", waiting: int = 0,
+                     panel: int | None = None) -> None:
             super().__init__()
-            self.ev, self.who, self.waiting = ev, who, waiting
+            self.ev, self.who, self.waiting, self.panel = ev, who, waiting, panel
             self.qs = [q for q in ev.get("questions") or [] if isinstance(q, dict)]
             self.free_label = ev.get("free_text_label") or "Type something…"
             self.i, self.answers = 0, []
@@ -3212,7 +3487,8 @@ def build_tui(base: str, token: str, **kw):
 
         @staticmethod
         def markup(ev: dict, qs: list, i: int, cur: int, sel: set, typed: str,
-                   free_label: str, who: str = "", waiting: int = 0) -> tuple[str, str]:
+                   free_label: str, who: str = "", waiting: int = 0,
+                   panel: int | None = None) -> tuple[str, str]:
             """(head, options) markup for question i; pure, for tests."""
             q = qs[i]
             opts = [str(o) for o in q.get("options") or []]
@@ -3225,6 +3501,8 @@ def build_tui(base: str, token: str, **kw):
                     title += f"  [$text-muted]{_esc(str(ev['reason']))}[/]"
             else:
                 title = "[$accent b]The agent asks[/]"
+            if panel is not None:
+                title += f"  [$accent b]panel {panel}[/]"
             if len(qs) > 1:
                 title += f"  [$text-muted]{i + 1}/{len(qs)}[/]"
             head = title
@@ -3264,7 +3542,8 @@ def build_tui(base: str, token: str, **kw):
 
         def _draw(self) -> None:
             head, rows = self.markup(self.ev, self.qs, self.i, self.cur, self.sel,
-                                     self._text(), self.free_label, self.who, self.waiting)
+                                     self._text(), self.free_label, self.who, self.waiting,
+                                     self.panel)
             self.query_one("#ask-head", Static).update(head)
             self.query_one("#ask-opts", Static).update(rows)
             self.query_one("#ask-foot", Static).update(f"[$text-muted]{_esc(self._foot_text())}[/]")
@@ -4108,11 +4387,27 @@ def build_tui(base: str, token: str, **kw):
             return next((a for a in widget.ancestors_with_self if isinstance(a, Page)), None)
 
     class ChatPage(Page, can_focus=False):
-        """The chat itself: the page at the bottom of every host's stack. The prompt
-        under the host types into it; focus belongs to the prompt, never to the page."""
+        """The chat itself: the page at the bottom of every host's stack, one per panel.
+        It owns the transcript (its ChatState holds the widgets and everything the chat
+        is doing). The prompt under the panels types into the focused panel's chat; focus
+        belongs to the prompt, never to the page."""
 
         NAME = "work"
         FOCUS_ON_CLICK = False
+
+        def __init__(self, chat: ChatState, **kw) -> None:
+            super().__init__(**kw)
+            self.chat = chat
+            chat.page = self
+
+        def compose(self) -> ComposeResult:
+            chat = self.chat
+            chat.header = Static(id="header")
+            chat.log = ChatLog(Home(), id="log")
+            chat.new_hint = NewHint(id="new-hint")
+            yield chat.header
+            yield chat.log
+            yield chat.new_hint
 
         @property
         def page_title(self) -> str:
@@ -4199,7 +4494,16 @@ def build_tui(base: str, token: str, **kw):
             self.call_after_refresh(self._focus, page)    # and again once it is laid out
             self.post_message(self.Changed(page))
 
+        @property
+        def panel(self):
+            return Panel.of(self)
+
         def _focus(self, page: Page) -> None:
+            # only the focused panel's host takes the keyboard: a page opened in another
+            # panel (a worker finishing, a click elsewhere) must not steal it
+            panel = self.panel
+            if panel is not None and self.app.focused_panel is not panel:
+                return
             if page is self.current and page.is_attached:
                 target = page.focus_target()
                 if target is not None and target.is_attached:
@@ -4216,8 +4520,143 @@ def build_tui(base: str, token: str, **kw):
 
         def on_page_open_page(self, message) -> None:
             message.stop()
-            self.run_worker(self.app.open_page(message.name, " ".join(message.args)),
-                            group="nav")
+            # a page asks for another page in ITS panel, whichever panel has the focus
+            self.run_worker(self.app.open_page(message.name, " ".join(message.args),
+                                               target=self.panel), group="nav")
+
+    class Panel(Vertical, can_focus=False):
+        """One tile of the area above the prompt: a PageHost (its own back stack, a chat
+        at the bottom of it) in a frame. With one panel there is no frame, the terminal
+        looks as it always did; with more, each has a border and a title bar that says its
+        number, what it shows and what it is doing, and the focused one's border is the
+        solid accent. The layout (which panel sits where) is the app's: PanelArea sets the
+        size and place of every panel from the split tree."""
+
+        DEFAULT_CSS = """
+        Panel { position: absolute; width: 100%; height: 100%; border: none;
+                background: $background; }
+        PanelArea.-multi Panel { border: round $panel-lighten-2;
+                                 border-title-color: $text; border-title-style: none; }
+        PanelArea.-multi Panel.-focused { border: double $primary;
+                                          border-title-color: $primary;
+                                          border-title-style: bold; }
+        """
+
+        def __init__(self, chat: ChatState, **kw) -> None:
+            super().__init__(**kw)
+            self.chat = chat
+            chat.panel = self
+            self.host = PageHost(ChatPage(chat))
+            self._shown_title: str | None = None
+
+        @property
+        def number(self) -> int:
+            return self.chat.number
+
+        def compose(self) -> ComposeResult:
+            yield self.host
+
+        @staticmethod
+        def of(widget) -> "Panel | None":
+            return next((a for a in widget.ancestors_with_self if isinstance(a, Panel)), None)
+
+        def what(self) -> str:
+            """What the panel shows: the chat, or the page over it."""
+            page = self.host.current
+            if isinstance(page, ChatPage):
+                return f"chat #{self.chat.cid}" if self.chat.cid else "chat (new)"
+            return "/" + page.NAME + "".join(" " + a for a in page.args)
+
+        def status(self) -> tuple[str, str]:
+            """(plain, markup) of what the chat under the panel is doing, or empty."""
+            chat = self.chat
+            if chat.asks:
+                return "needs input", "[$warning b]needs input[/]"
+            if chat.busy and chat.reconnecting:
+                return "● reconnecting", "[$warning]● reconnecting[/]"
+            if chat.busy:
+                return "● running", "[$accent]● running[/]"
+            return "", ""
+
+        def refresh_title(self) -> None:
+            """The title bar, fitted to the width: what the panel shows gives way (with an
+            ellipsis) so its number and its status stay."""
+            if not self.is_attached:
+                return
+            plain, markup = self.status()
+            extra = " · zoomed" if self.app.zoomed and self.app.focused_panel is self else ""
+            room = max(6, self.size.width - 6 - len(str(self.number)) - len(extra)
+                       - (len(plain) + 1 if plain else 0))
+            what = _short(self.what(), room)
+            title = f"{self.number} {_esc(what)}{extra}" + (f" {markup}" if markup else "")
+            if title != self._shown_title:
+                self._shown_title = title
+                self.border_title = title
+
+        def on_resize(self, event) -> None:
+            self._shown_title = None
+            self.refresh_title()
+
+        def on_click(self, event) -> None:
+            self.app.focus_panel(self.number, refocus=False)
+
+        def on_descendant_focus(self, event) -> None:
+            # a page inside took the focus (a click on it, tab): this panel is the focused one
+            if event.widget is not self.app.editor:
+                self.app.focus_panel(self.number, refocus=False)
+
+    class PanelArea(Widget):
+        """The area above the prompt: every Panel, tiled by the app's split tree. The
+        panels are absolutely placed (a widget cannot be moved between containers, and a
+        panel keeps its transcript when the layout changes), sized in whole cells from
+        `tree_rects`."""
+
+        DEFAULT_CSS = "PanelArea { width: 1fr; height: 1fr; overflow: hidden hidden; }"
+
+        def compose(self) -> ComposeResult:
+            for chat in self.app.chats.values():
+                yield Panel(chat)
+
+        def on_resize(self, event) -> None:
+            self.relayout()
+
+        def relayout(self) -> None:
+            """Place every panel: the tiles of the tree, or the focused panel alone when
+            zoomed (or when the window is too small for the tiles to read)."""
+            app = self.app
+            w, h = self.size
+            chats = list(app.chats.values())
+            multi = len(chats) > 1
+            self.set_class(multi, "-multi")
+            rects = tree_rects(app.tree, w, h) if multi and w and h else {}
+            cramped = bool(rects) and any(
+                r[2] < PANEL_HARD_COLS or r[3] < PANEL_HARD_ROWS for r in rects.values())
+            if cramped != app.cramped:
+                app.cramped = cramped
+                if cramped:
+                    app.notify(f"too small for {len(chats)} panels at this size: showing "
+                               "panel %d alone (enlarge the window, or ctrl+x 0 closes one)"
+                               % app.focus_no, severity="warning")
+            alone = not multi or app.zoomed or cramped
+            for chat in chats:
+                panel = chat.panel
+                if panel is None:
+                    continue
+                panel.set_class(chat.number == app.focus_no, "-focused")
+                shown = chat.number == app.focus_no if alone else True
+                panel.display = shown
+                if not shown:
+                    continue
+                if alone or chat.number not in rects:
+                    panel.styles.offset = (0, 0)
+                    panel.styles.width = "100%"
+                    panel.styles.height = "100%"
+                else:
+                    x, y, ww, hh = rects[chat.number]
+                    panel.styles.offset = (x, y)
+                    panel.styles.width = ww
+                    panel.styles.height = hh
+                panel.refresh_title()
 
     class AgentRow(Static):
         """One row of the agents screen: a project header, a root, or a descendant."""
@@ -7651,6 +8090,11 @@ def build_tui(base: str, token: str, **kw):
            /page commands (the chat's meta row has nothing to say there) */
         #bottom.paged #prompt { margin-top: 0; padding: 0 2; }
         #bottom.paged #meta { display: none; }
+        /* two or more panels: the prompt is one line under them, its meta row kept (no
+           margins) while the focused panel shows a chat */
+        #bottom.multi #prompt { margin-top: 0; padding: 0 2; }
+        #bottom.multi #meta { margin: 0; }
+        #bottom.multi.paged #meta { display: none; }
         Editor { height: auto; max-height: 12; min-height: 1; border: none; padding: 0;
                  background: $surface; }
         Editor:focus { border: none; }
@@ -7716,13 +8160,14 @@ def build_tui(base: str, token: str, **kw):
             super().__init__()
             self.base, self.token, self.server_override = base, token, server_override
             self.transport = transport       # tests hand in an httpx mock transport
-            self.cid: int | None = None
-            self.title_text: str | None = None
-            self.project, self.project_mode = project, ("pin" if project else None)
-            self.agent, self.model = agent, model
-            self.shown_model: str | None = None
-            self.ephemeral = False
-            self.local = False                         # /local: the next new chat runs here
+            # the panels: one ChatState each (see "the chat in context"), tiled by `tree`;
+            # a panel's number is its key. `self.cid` and the rest are the chat in context's
+            self.chats: dict[int, ChatState] = {
+                1: ChatState(1, project, "pin" if project else None, agent, model)}
+            self.tree = 1                       # the split tree (PanelSplit | a panel number)
+            self.focus_no = 1                   # the focused panel
+            self.zoomed = False                 # the focused panel fills the area
+            self.cramped = False                # the window is too small for the tiles
             self.local_execs: dict[int, LocalExecutor] = {}
             self.local_cids: set[int] = set()         # chats this client opened as /local
             self.whoami = "?"
@@ -7733,19 +8178,6 @@ def build_tui(base: str, token: str, **kw):
             self.dnd: dict | None = None          # the server's do-not-disturb, while on
             self.options: dict = {}
             self.convs: list[dict] = []
-            self.info: dict | None = None
-            self.todos: list[tuple[bool, str]] = []
-            self.busy = False
-            self.turn: TurnState | None = None
-            self.last_turn: TurnState | None = None
-            self.stop_requested = False
-            self.queue: list[str] = []
-            self.pending: list = []          # QueuedMsg posted mid-turn, not yet delivered
-            self.orchestrator = False        # this chat is an orchestrator (/orchestration)
-            self.child_of: int | None = None   # this view is an agent under that conversation
-            self.attachments: list[str] = []
-            self.last_user: str | None = None
-            self.last_reply = ""
             self.leader = False
             self._leader_timer = None
             self._status_tall = False        # the status row grown for the leader keys
@@ -7754,7 +8186,6 @@ def build_tui(base: str, token: str, **kw):
             self.ctrl_c_at = 0.0
             self.sidebar_pref: bool | None = None     # None = follow the width
             self._yolo_armed = -100.0                 # when shift+tab last stopped short of yolo
-            self.tools_expanded = False
             self.history: list[str] = []
             self.hist_pos: int | None = None
             self.hist_draft = ""
@@ -7773,11 +8204,7 @@ def build_tui(base: str, token: str, **kw):
         def compose(self) -> ComposeResult:
             with Horizontal(id="main"):
                 with Vertical(id="left"):
-                    with PageHost(id="host"):
-                        with ChatPage(id="chat-page"):
-                            yield Static(id="header")
-                            yield ChatLog(Home(), id="log")
-                            yield NewHint(id="new-hint")
+                    yield PanelArea(id="panels")
                     with Vertical(id="bottom"):
                         yield OptionList(id="popup")
                         with Vertical(id="prompt"):
@@ -7797,28 +8224,78 @@ def build_tui(base: str, token: str, **kw):
                     yield Static(id="sb-notes")
                     yield Static(id="sb-foot")
 
+        # -- panels and the chat in context --------------------------------------------------
+
+        @property
+        def chat(self) -> ChatState:
+            """The chat in context: the worker's own (Jav3App.run_worker binds it), else the
+            focused panel's. `self.cid`, `self.turn` and the rest of CHAT_FIELDS are this
+            chat's."""
+            return _CHAT.get() or self.chats[self.focus_no]
+
+        @property
+        def focused_chat(self) -> ChatState:
+            return self.chats[self.focus_no]
+
+        @property
+        def focused_panel(self) -> "Panel":
+            return self.chats[self.focus_no].panel
+
+        @property
+        def panel_area(self) -> "PanelArea":
+            return self.query_one("#panels", PanelArea)
+
+        @contextlib.contextmanager
+        def in_chat(self, chat: ChatState):
+            """Run a block as `chat` (its cid, turn, transcript...) whatever has the focus."""
+            token = _CHAT.set(chat)
+            try:
+                yield chat
+            finally:
+                _CHAT.reset(token)
+
+        def run_worker(self, work, *args, unbound: bool = False, **kw):
+            """Textual's, with the chat in context bound to the coroutine: a turn streaming
+            into panel 2 keeps reading and writing panel 2's state when the focus moves
+            on. `unbound`: app-wide loops (notices, startup) that belong to no chat."""
+            chat = self.chat
+            if asyncio.iscoroutine(work):
+                work = self._bound(None if unbound else chat, work)
+            worker = super().run_worker(work, *args, **kw)
+            worker.chat = None if unbound else chat
+            return worker
+
+        @staticmethod
+        async def _bound(chat, work):
+            _CHAT.set(chat)
+            return await work
+
         @property
         def host(self):
-            return self.query_one("#host", PageHost)
+            """The PageHost of the chat in context's panel: the focused panel's, unless a
+            worker of another panel's chat is asking."""
+            return self.chat.panel.host
 
         @property
         def page(self):
-            """The page showing in the host (the chat, unless another page is over it)."""
+            """The page showing in that host (the chat, unless another page is over it)."""
             return self.host.current
 
         @property
         def top(self):
-            """What the operator is looking at: the dialog over everything, else the page."""
-            return self.screen if isinstance(self.screen, ModalScreen) else self.page
+            """What the operator is looking at: the dialog over everything, else the
+            focused panel's page."""
+            return self.screen if isinstance(self.screen, ModalScreen) \
+                else self.focused_panel.host.current
 
         @property
         def paged(self) -> bool:
-            """A page other than the chat is showing."""
+            """A page other than the chat is showing in that panel."""
             return not isinstance(self.page, ChatPage)
 
         @property
         def log_view(self):
-            return self.query_one("#log", VerticalScroll)
+            return self.chat.log
 
         @property
         def editor(self):
@@ -7864,8 +8341,9 @@ def build_tui(base: str, token: str, **kw):
             self.editor.focus()
             self.set_interval(0.1, self._tick)
             self.refresh_chrome()
+            self.focus_panel(1)
             self.run_worker(self._startup(), group="startup")
-            self.run_worker(check_for_update(self), group="update-check")
+            self.run_worker(check_for_update(self), group="update-check", unbound=True)
 
         async def _startup(self) -> None:
             self.client = self._new_client()
@@ -7916,7 +8394,8 @@ def build_tui(base: str, token: str, **kw):
         async def _after_login(self) -> None:
             await asyncio.gather(self.refresh_options(), self.refresh_convs())
             if is_session(self.token):
-                self.run_worker(self._notice_loop(), group="notices", exclusive=True)
+                self.run_worker(self._notice_loop(), group="notices", exclusive=True,
+                                unbound=True)
             self.refresh_chrome()
 
         @property
@@ -7992,13 +8471,18 @@ def build_tui(base: str, token: str, **kw):
                 self.crit_unread += 1
             self.push_notice(text, "error" if crit else "warn",
                              timeout=20 if crit else 5, dnd_break=True)
-            if crit and self.busy and self.turn is not None and self._in_this_turn(ev, proj):
+            if crit:
                 from textual.css.query import NoMatches
-                try:
-                    await self.mount_log(Note(_esc(f"security: {text} — /security to review"),
-                                              classes="error"))
-                except NoMatches:
-                    pass
+                for chat in list(self.chats.values()):
+                    with self.in_chat(chat):
+                        if not (self.busy and self.turn is not None
+                                and self._in_this_turn(ev, proj)):
+                            continue
+                        try:
+                            await self.mount_log(Note(_esc(f"security: {text} — /security to "
+                                                           "review"), classes="error"))
+                        except NoMatches:
+                            pass
 
         def _in_this_turn(self, ev: dict, proj) -> bool:
             """Does a live event belong to the turn on screen? Its conversation
@@ -8111,7 +8595,9 @@ def build_tui(base: str, token: str, **kw):
         # -- notifications ---------------------------------------------------------------------
 
         def sidebar_shown(self) -> bool:
-            return bool(self.sidebar_pref) and self.size.width >= SIDEBAR_MIN_COLS
+            # hidden while there is more than one panel: the panels need the width
+            return (bool(self.sidebar_pref) and self.size.width >= SIDEBAR_MIN_COLS
+                    and len(self.chats) == 1)
 
         def push_notice(self, text: str, kind: str = "info", toast: bool = True,
                         timeout: float = 5, dnd_break: bool = False) -> None:
@@ -8276,13 +8762,13 @@ def build_tui(base: str, token: str, **kw):
 
         # -- transcript -------------------------------------------------------------------------
 
-        unseen = 0                     # transcript items mounted while scrolled up
-
         async def mount_log(self, widget) -> None:
-            home = self.query(Home)
+            lv = self.log_view
+            if lv is None or not lv.is_attached:
+                return                         # its panel was closed
+            home = lv.query(Home)
             if home:
                 await home.remove()
-            lv = self.log_view
             if not self._following():
                 self.unseen += 1               # "↓ n new" until they scroll back down
             await lv.mount(widget)
@@ -8295,16 +8781,20 @@ def build_tui(base: str, token: str, **kw):
                                             and not getattr(lv, "_anchor_released", False))
 
         def _refresh_new_hint(self) -> None:
-            hint = self.query_one(NewHint)
-            if self.unseen and self._following():
-                self.unseen = 0
-            show = bool(self.unseen)
-            if hint.display != show:
-                hint.display = show
-            if show:
-                text = f"↓ {self.unseen} new below · pgdn, or click here"
-                if str(hint.render()) != text:
-                    hint.update(text)
+            for chat in list(self.chats.values()):
+                if chat.new_hint is None or not chat.new_hint.is_attached:
+                    continue
+                with self.in_chat(chat):
+                    hint = chat.new_hint
+                    if self.unseen and self._following():
+                        self.unseen = 0
+                    show = bool(self.unseen)
+                    if hint.display != show:
+                        hint.display = show
+                    if show:
+                        text = f"↓ {self.unseen} new below · pgdn, or click here"
+                        if str(hint.render()) != text:
+                            hint.update(text)
 
         async def note(self, text: str, kind: str = "info") -> None:
             await self.mount_log(Note(_esc(text), classes=kind))
@@ -8358,8 +8848,31 @@ def build_tui(base: str, token: str, **kw):
             return (self.info or {}).get("project") or (self.options or {}).get("active_project")
 
         def refresh_chrome(self) -> None:
+            """The prompt's meta row, the status row, the sidebar and the panel titles. Always
+            the FOCUSED chat's (a turn streaming into another panel calls this too)."""
             if not self.is_mounted:
                 return
+            with self.in_chat(self.focused_chat):
+                self._chrome()
+            self._refresh_titles()
+
+        def _refresh_titles(self) -> None:
+            for chat in list(self.chats.values()):
+                if chat.panel is not None:
+                    chat.panel.refresh_title()
+
+        def _placeholder(self) -> str:
+            """What the empty prompt says: with several panels, which one it types into."""
+            if len(self.chats) == 1:
+                return ("/ for a command · /work back to the chat" if self.paged
+                        else f'Ask anything… "{self.example}"')
+            n = self.chat.number
+            if self.paged:
+                return f"panel {n} · / for a command · /work back to its chat"
+            return (f"ask #{self.cid}… or /page [args] [panel]" if self.cid
+                    else f"ask a new chat (panel {n})… or /page [args] [panel]")
+
+        def _chrome(self) -> None:
             try:
                 prompt = self.query_one("#prompt")
             except Exception:  # noqa: BLE001 — a dialog is on top
@@ -8368,9 +8881,11 @@ def build_tui(base: str, token: str, **kw):
             prompt.set_class(self.ephemeral, "temp")
             prompt.set_class(self.busy, "busy")
             paged = self.paged
-            self.query_one("#bottom").set_class(paged, "paged")
-            self.editor.placeholder = ("/ for a command · /work back to the chat" if paged
-                                       else f'Ask anything… "{self.example}"')
+            multi = len(self.chats) > 1
+            bottom = self.query_one("#bottom")
+            bottom.set_class(paged, "paged")
+            bottom.set_class(multi, "multi")
+            self.editor.placeholder = self._placeholder()
             who = f"[$secondary b]{_esc(self.agent)}[/]" if self.agent else "[$primary b]Jav3[/]"
             model = self._model_label()
             bits = [who, f"[$text]{_esc(model.split('/')[-1])}[/]"]
@@ -8392,39 +8907,65 @@ def build_tui(base: str, token: str, **kw):
             self.query_one("#meta", Static).update("  ".join(bits))
             self._refresh_status()
             self._refresh_sidebar()
-            try:
-                home_hints = self.query_one("#home-hints", Static)
-            except Exception:  # noqa: BLE001
-                home_hints = None
-            if home_hints is not None:
-                who = (f"[$text-muted]{_esc(self.whoami)} @ {_esc(self.base)} · "
-                       f"{self._access_label()}[/]" if self.logged_in else
-                       "[$warning]not logged in[/] [$text-muted]— /login[/]"
-                       if self.logged_in is False else f"[$text-muted]{_esc(self.base)}[/]")
-                proj = self._project_label()
-                where = (f"\n[$text-muted]files and chats go to ⌂ {_esc(proj)}[/]"
-                         if proj and not self._here() else "")
-                home_hints.update(
-                    f"{who}{where}\n\n"
-                    "[$text]/help[/]       [$text-muted]commands and keys[/]\n"
-                    "[$text]←[/]           [$text-muted]agents: what is running, on an empty "
-                    "prompt[/]\n"
-                    "[$text]ctrl+j[/]      [$text-muted]new line (enter sends)[/]\n"
-                    "[$text]shift+tab[/]   [$text-muted]permissions: yolo → auto → ask · "
-                    "ctrl+x u picks[/]\n"
-                    "[$text]ctrl+x l[/]    [$text-muted]sessions · [/][$text]ctrl+x m[/] "
-                    "[$text-muted]models[/]\n"
-                    "[$text]ctrl+p[/]      [$text-muted]command palette[/]")
+            for chat in list(self.chats.values()):
+                if chat.log is None or not chat.log.is_attached:
+                    continue
+                with self.in_chat(chat):
+                    self._home_hints()
             show = self.sidebar_shown()        # hidden unless the operator opened it
             self.query_one("#sidebar").display = show
-            header = self.query_one("#header", Static)
-            header.display = not show
+            for chat in list(self.chats.values()):
+                if chat.header is None or not chat.header.is_attached:
+                    continue
+                with self.in_chat(chat):
+                    self._header(show)
+
+        def _home_hints(self) -> None:
+            """The empty chat's hints (this chat's own Home, in its own panel)."""
+            try:
+                home_hints = self.log_view.query_one("#home-hints", Static)
+            except Exception:  # noqa: BLE001 — the transcript has begun
+                return
+            who = (f"[$text-muted]{_esc(self.whoami)} @ {_esc(self.base)} · "
+                   f"{self._access_label()}[/]" if self.logged_in else
+                   "[$warning]not logged in[/] [$text-muted]— /login[/]"
+                   if self.logged_in is False else f"[$text-muted]{_esc(self.base)}[/]")
+            proj = self._project_label()
+            where = (f"\n[$text-muted]files and chats go to ⌂ {_esc(proj)}[/]"
+                     if proj and not self._here() else "")
+            panels = ("\n[$text]ctrl+x ←↑↓→[/]  [$text-muted]move between panels · 1-4 jump · "
+                      "z zoom · 0 close[/]" if len(self.chats) > 1 else "")
+            home_hints.update(
+                f"{who}{where}\n\n"
+                "[$text]/help[/]       [$text-muted]commands and keys[/]\n"
+                "[$text]←[/]           [$text-muted]agents: what is running, on an empty "
+                "prompt[/]\n"
+                "[$text]ctrl+j[/]      [$text-muted]new line (enter sends)[/]\n"
+                "[$text]shift+tab[/]   [$text-muted]permissions: yolo → auto → ask · "
+                "ctrl+x u picks[/]\n"
+                "[$text]ctrl+x l[/]    [$text-muted]sessions · [/][$text]ctrl+x m[/] "
+                "[$text-muted]models[/]\n"
+                "[$text]ctrl+p[/]      [$text-muted]command palette[/]" + panels)
+
+        def _header(self, sidebar: bool) -> None:
+            """The chat's title row: shown while the sidebar is not, and only with one
+            panel (with several the panel's own title bar says it)."""
+            header = self.chat.header
+            header.display = not sidebar and len(self.chats) == 1
             header.update(f"[b]{_esc(self.title_text or 'New chat')}[/]"
                           + (f"  [$text-muted]#{self.cid}[/]" if self.cid else "")
                           + ("  [$text-muted]ctrl+b notifications[/]"
                              if self.size.width >= SIDEBAR_MIN_COLS else ""))
 
         def _status_parts(self) -> list[tuple[str, str, int]]:
+            parts = self._status_parts_of_panel()
+            if len(self.chats) > 1:
+                n = self.chat.number
+                text = f"panel {n} · ctrl+x ←↑↓→ 1-4 z 0"
+                parts = parts + [(text, f"[$text-muted]{text}[/]", 3)]
+            return parts
+
+        def _status_parts_of_panel(self) -> list[tuple[str, str, int]]:
             """The left side while a page is showing: its name, then its way out (a turn
             running in the chat behind it keeps its own line, without the esc that
             would interrupt it); the chat's own row otherwise."""
@@ -8506,6 +9047,11 @@ def build_tui(base: str, token: str, **kw):
                 widget.update(text, **kw)
 
         def _refresh_status(self) -> None:
+            """The status row: the focused chat's, whichever chat's stream calls this."""
+            with self.in_chat(self.focused_chat):
+                self._status_row()
+
+        def _status_row(self) -> None:
             left = self.query_one("#status-left", Static)
             right = self.query_one("#status-right", Static)
             # the leader's key list is longer than one row even at 140 columns:
@@ -8529,6 +9075,10 @@ def build_tui(base: str, token: str, **kw):
             self._set_status(right, rm)
 
         def _refresh_sidebar(self) -> None:
+            with self.in_chat(self.focused_chat):
+                self._sidebar()
+
+        def _sidebar(self) -> None:
             info = self.info or {}
             title = self.title_text or ("New chat" if self.cid is None else f"Chat #{self.cid}")
             sub = [f"#{self.cid}"] if self.cid else []
@@ -8595,13 +9145,17 @@ def build_tui(base: str, token: str, **kw):
                 # every unfinished row, the turn's and a local `!command`'s alike
                 for tv in list(self.__dict__.get("live_tools", ())):
                     tv.spin(SPINNER[self.frame % len(SPINNER)])
-                t = self.turn
-                if self.busy and t is not None and t.cid is not None \
-                        and time.monotonic() - t.polled > 10:
-                    t.polled = time.monotonic()
-                    self.run_worker(self._poll_cost(t), group="cost", exclusive=True)
+                for chat in list(self.chats.values()):
+                    t = chat.turn
+                    if chat.busy and t is not None and t.cid is not None \
+                            and time.monotonic() - t.polled > 10:
+                        t.polled = time.monotonic()
+                        with self.in_chat(chat):
+                            self.run_worker(self._poll_cost(t), group=f"cost-{chat.number}",
+                                            exclusive=True)
                 self._refresh_status()
                 self._refresh_new_hint()
+                self._refresh_titles()
             except NoMatches:
                 pass          # shutting down, or a screen without the status row
 
@@ -9163,8 +9717,6 @@ def build_tui(base: str, token: str, **kw):
         PERM_HINT = {"yolo": "everything runs in the VM without asking (the default)",
                      "auto": "a cheap judge reviews each write/run; risky ones ask you",
                      "ask": "every write/run asks you first"}
-        perm_mode = "yolo"
-        reconnecting = False       # the stream broke and the client is trying to get it back
 
         async def _explain_permissions(self) -> None:
             """Once, the first time a turn starts with the default: what the chip in
@@ -9240,7 +9792,8 @@ def build_tui(base: str, token: str, **kw):
             (the server names it) and id."""
             n = ev.get("conversation_id")
             if n in (None, cid):
-                return "this chat"
+                # with several panels "this chat" could be any of them: name it
+                return "this chat" if len(self.chats) == 1 else f"chat #{cid}"
             title = " ".join(str(ev.get("agent") or "").split())
             return f"{_short(title, 50)} #{n}" if title else f"agent #{n}"
 
@@ -9273,6 +9826,8 @@ def build_tui(base: str, token: str, **kw):
                 return
             ent = asks[aid] = {"ev": ev, "scr": None, "gone": False}
             self._ask_recount()
+            chat = self.chat
+            chat.asks += 1                  # the panel's title bar says "needs input"
             lock = self.__dict__.setdefault("_ask_lock", asyncio.Lock())
             settled = False
             try:
@@ -9283,7 +9838,7 @@ def build_tui(base: str, token: str, **kw):
                     who = self._ask_who(ev, cid)
                     if ev.get("conversation_id") not in (None, cid):
                         await self.note(f"? {who} is asking you")
-                    scr = AskUser(ev, who)
+                    scr = AskUser(ev, who, panel=self._panel_label())
                     ent["scr"] = scr
                     self._ask_recount()
                     self.bell()
@@ -9301,6 +9856,7 @@ def build_tui(base: str, token: str, **kw):
                         # the server still holds the ask: a re-attached view gets it again
                         await self.note(f"answer not delivered: {e}", "error")
             finally:
+                chat.asks = max(0, chat.asks - 1)
                 asks.pop(aid, None)
                 if settled:
                     self._asks_done()[aid] = time.monotonic()
@@ -9327,7 +9883,18 @@ def build_tui(base: str, token: str, **kw):
 
         async def local_approve(self, kind: str, summary: str):
             """yes / always / no (None: closed with ctrl+c) from the operator."""
-            return await self.push_screen_wait(LocalApprove(kind, summary))
+            chat = self.chat
+            chat.asks += 1
+            try:
+                return await self.push_screen_wait(
+                    LocalApprove(kind, summary, panel=self._panel_label()))
+            finally:
+                chat.asks = max(0, chat.asks - 1)
+
+        def _panel_label(self) -> int | None:
+            """The number a dialog names the chat it is about by: the chat in context's
+            panel, once there is more than one (a dialog covers every panel)."""
+            return self.chat.number if len(self.chats) > 1 else None
 
         async def _close_seg(self) -> None:
             turn = self.turn
@@ -9398,7 +9965,8 @@ def build_tui(base: str, token: str, **kw):
             """This chat is the one on screen and the terminal has the focus (a
             reply that lands in front of you needs no toast and no unread count).
             A terminal that reports no focus changes always has it."""
-            return cid == self.cid and self.app_focus and not self.paged
+            return (cid == self.cid and self.app_focus and not self.paged
+                    and self.chat is self.focused_chat)
 
         async def _end_turn(self) -> None:
             t = self.turn
@@ -9881,7 +10449,9 @@ def build_tui(base: str, token: str, **kw):
             """Stop watching the turn on screen (it keeps running server-side)."""
             if not self.busy:
                 return
-            workers = [w for w in self.workers if w.group == "turn" and w.is_running]
+            chat = self.chat
+            workers = [w for w in self.workers if w.group == "turn" and w.is_running
+                       and getattr(w, "chat", chat) is chat]
             for w in workers:
                 w.cancel()
             for w in workers:
@@ -9909,7 +10479,7 @@ def build_tui(base: str, token: str, **kw):
 
         def action_toggle_tools(self) -> None:
             self.tools_expanded = not self.tools_expanded
-            for tv in self.query(ToolView):
+            for tv in self.chat.page.query(ToolView):
                 tv.expanded = self.tools_expanded
                 tv.redraw()
 
@@ -10518,9 +11088,12 @@ def build_tui(base: str, token: str, **kw):
                     f"Stop {n} running turn{'s' * (n != 1)} {what}?", detail)):
                 return
             d = await self.api("POST", path, json=body)
-            mine = self.turn.cid if self.turn and self.turn.cid else self.cid
-            if self.busy and mine in (d.get("conversations") or []):
-                self.interrupt()
+            stopped = d.get("conversations") or []
+            for chat in list(self.chats.values()):
+                with self.in_chat(chat):
+                    mine = self.turn.cid if self.turn and self.turn.cid else self.cid
+                    if self.busy and mine in stopped:
+                        self.interrupt()
             self.notify(f"stopped {d.get('count', 0)}")
 
         async def c_stop_all(self, arg: str) -> None:
@@ -11036,8 +11609,14 @@ def build_tui(base: str, token: str, **kw):
         async def c_exit(self, arg: str = "") -> None:
             self.exit()
 
-    # for the next steps (panels host pages of their own) and for tests
+    # `app.cid`, `app.turn`, `app.busy`...: the chat in context's (see ChatState)
+    for _field in CHAT_FIELDS:
+        _desc = _PerChat()
+        _desc.name = _field
+        setattr(Jav3App, _field, _desc)
+    # for the next steps (drawers, the panels' pages) and for tests
     Jav3App.Page, Jav3App.PageHost, Jav3App.ChatPage = Page, PageHost, ChatPage
+    Jav3App.Panel, Jav3App.PanelArea = Panel, PanelArea
     return Jav3App(base, token, **kw)
 
 
