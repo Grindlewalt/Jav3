@@ -3916,6 +3916,18 @@ def build_tui(base: str, token: str, **kw):
         def __init__(self, markup: str, kind: str, nid=None, depth: int = 0) -> None:
             super().__init__(markup, classes=kind)
             self.kind, self.nid, self.depth = kind, nid, depth
+            self.markup, self.picked = markup, False
+
+        def show(self, markup: str) -> None:
+            self.markup = markup
+            self.update(on_the_bar(markup) if self.picked else markup)
+
+        def pick(self) -> None:
+            """The selected row: the bar gets the row's plain form. Its muted grey,
+            accent spinner and purple icon are 1-1.7:1 against the bar in 256 colours."""
+            self.picked = True
+            self.add_class("-sel")
+            self.update(on_the_bar(self.markup))
 
         def on_click(self) -> None:
             if self.nid is not None:
@@ -4154,7 +4166,7 @@ def build_tui(base: str, token: str, **kw):
                         row.add_class("current")
                     if row.nid == self.sel and (row.kind == "child") == self.in_kids \
                             and row.kind in ("root", "child", "link"):
-                        row.add_class("-sel")
+                        row.pick()
                         target = row
                 lst = self.query_one("#ag-list", VerticalScroll)
                 with self.app.batch_update():
@@ -4170,7 +4182,7 @@ def build_tui(base: str, token: str, **kw):
                 nd = self.tree.by_id.get(row.nid)
                 if nd is not None and (row.kind == "root" and self.tree.root_status(
                         row.nid) == "running" or node_status(nd) == "running"):
-                    row.update(self.row_markup(nd, row.depth, row.kind == "root"))
+                    row.show(self.row_markup(nd, row.depth, row.kind == "root"))
 
         # -- keys -------------------------------------------------------------------------
 

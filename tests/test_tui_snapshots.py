@@ -50,21 +50,28 @@ PAGES = {
     "vms": ([], "type:/vms|key:enter|waitfor:RAM 1280|waitfor:shared kvm"),
     "security": ([], "type:/security|key:enter|waitfor:Secrets 2|waitfor:registry.npmjs.org"),
     "help": ([], "type:/help|key:enter|waitfor:Keys"),
-    # TODO: "agents" (the left-arrow screen). Its layout is being changed; add it
-    # as ([], "key:left|waitfor:Agents") once that lands.
+    # the left-arrow screen: the first root selected (and unfolded), then an agent inside
+    # a plan (its failed item), then the Finished view
+    "agents": ([], "key:left|waitfor:Agents@10|waitfor:morning quotes|wait:0.3"),
+    "agents-in": ([], "key:left|waitfor:Agents@10|waitfor:morning quotes|key:right|key:down*2"
+                      "|wait:0.3"),
+    "agents-finished": ([], "key:left|waitfor:Agents@10|waitfor:morning quotes|key:down*3"
+                            "|key:enter|waitfor:homelab|wait:0.3"),
 }
 
 
 def normalise(text: str) -> str:
     """What differs per run, at the same width: the fake's free port (the home page shows
-    it) and the throw-away config dir (/help shows where themes go)."""
+    it), the throw-away config dir (/help shows where themes go) and the spinner frame."""
     text = re.sub(r"127\.0\.0\.1:\d{5}", "127.0.0.1:NNNNN", text)
+    # a spinner frame depends on when the screen was read: every frame reads as the first
+    text = re.sub("[\u2800-\u28ff]", "\u280b", text)
     return re.sub(r"/tmp/tui-\w{8}/", "/tmp/tui-XXXXXXXX/", text)
 
 
 # Text under 3:1 contrast in the 256-colour palette is a bug (grey on the teal selection once
 # was). /help is left out: its backdrop is the page behind it, dimmed on purpose.
-CONTRAST_PAGES = ("home", "chat", "vms", "security")
+CONTRAST_PAGES = ("home", "chat", "vms", "security", "agents", "agents-in", "agents-finished")
 
 
 def capture(page: str, cols: int, rows: int) -> tuple[str, list[str]]:

@@ -279,6 +279,28 @@ def agent_nodes(scope: str) -> tuple[list[dict], int]:
         {"id": 6, "parent_id": None, "title": "Release checklist", "kind": "orchestrator",
          "project": "notes", "model": MODEL, "status": "running", "running": True,
          "started_at": iso(-40 * 60)},
+        # the orchestrator's plan, one item in each state the ← screen can show
+        {"id": 10, "parent_id": 6, "title": "Ship the 2.4 release", "kind": "head",
+         "role": "plan", "project": "notes", "model": None, "status": "running",
+         "running": True, "started_at": iso(-39 * 60)},
+        {"id": 11, "parent_id": 10, "title": "Bump the version", "kind": "agent",
+         "role": "item i1", "project": "notes", "model": MODEL, "status": "done",
+         "running": False, "started_at": iso(-38 * 60), "ended_at": iso(-34 * 60)},
+        {"id": 12, "parent_id": 10, "title": "Run the migration dry-run", "kind": "agent",
+         "role": "item i2", "project": "notes", "model": MODEL, "status": "failed",
+         "running": False, "started_at": iso(-33 * 60), "ended_at": iso(-30 * 60)},
+        {"id": 13, "parent_id": 10, "title": "Publish the tarball", "kind": "agent",
+         "role": "item i3", "project": "notes", "model": MODEL, "status": "stopped",
+         "running": False, "started_at": iso(-29 * 60), "ended_at": iso(-28 * 60)},
+        {"id": 14, "parent_id": 10, "title": "Write the changelog", "kind": "agent",
+         "role": "item i4", "project": "notes", "model": MODEL, "status": "running",
+         "running": True, "started_at": iso(-12 * 60)},
+        # a schedule run that waits on the operator
+        {"id": 9, "parent_id": None, "title": "Fetch the morning quotes", "kind": "agent",
+         "role": "@morning-stocks", "agent_slug": "morning-stocks", "project": "home",
+         "model": MODEL, "status": "needs_you", "running": False,
+         "needs": "approval pending: egress to api.example.com",
+         "started_at": iso(-3 * 3600)},
     ], 3
 
 
