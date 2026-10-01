@@ -4628,7 +4628,7 @@ def build_tui(base: str, token: str, **kw):
             chats = list(app.chats.values())
             multi = len(chats) > 1
             self.set_class(multi, "-multi")
-            rects = tree_rects(app.tree, w, h) if multi and w and h else {}
+            rects = tree_rects(app.panel_tree, w, h) if multi and w and h else {}
             cramped = bool(rects) and any(
                 r[2] < PANEL_HARD_COLS or r[3] < PANEL_HARD_ROWS for r in rects.values())
             if cramped != app.cramped:
@@ -4715,6 +4715,7 @@ def build_tui(base: str, token: str, **kw):
             Binding("shift+down", "root(1)", show=False),
             Binding("tab", "group", show=False),
             Binding("enter", "open", show=False),
+            Binding("p", "open_panel", show=False),
             Binding("r", "reload", show=False),
             Binding("pageup", "page(-1)", show=False),
             Binding("pagedown", "page(1)", show=False),
@@ -4899,7 +4900,8 @@ def build_tui(base: str, token: str, **kw):
                         + (f"[$warning]{need} need you[/]" if need else
                            "[$text-muted]nothing needs you[/]"))
                 foot = ("[$primary]↑↓[/] move   [$primary]→ ←[/] into / out of its agents   "
-                        "[$primary]enter[/] open   [$primary]esc[/] back   "
+                        "[$primary]enter[/] open   [$primary]p[/] open in a new panel   "
+                        "[$primary]esc[/] back   "
                         "[$primary]r[/] refresh   [$success]■[/] where you were")
             else:
                 total = self.total_finished or 0
@@ -4907,7 +4909,8 @@ def build_tui(base: str, token: str, **kw):
                         f"[b]{self.group_by}[/]")
                 foot = (f"[$primary]tab[/] group by {'time' if self.group_by == 'project' else 'project'}"
                         "   [$primary]↑↓[/] move   [$primary]→ ←[/] into / out of its agents   "
-                        "[$primary]enter[/] open   [$primary]esc[/] back to active")
+                        "[$primary]enter[/] open   [$primary]p[/] new panel   "
+                        "[$primary]esc[/] back to active")
             if self.error:
                 head += f"   [$error]{_esc(self.error)}[/]"
             self.query_one("#ag-head", Static).update(head)
@@ -5031,6 +5034,12 @@ def build_tui(base: str, token: str, **kw):
             else:
                 self.leave()
 
+        async def action_open_panel(self) -> None:
+            """p: the highlighted agent's chat in a NEW panel (this page stays where it is)."""
+            node = self.tree.by_id.get(self.sel)
+            if node is not None and self.sel != "finished":
+                self.app.run_worker(self.app.open_node(node, new_panel=True), group="agents")
+
         async def action_open(self) -> None:
             if self.sel == "finished":
                 self.mode, self.in_kids = "finished", False
@@ -5044,7 +5053,8 @@ def build_tui(base: str, token: str, **kw):
             node = self.tree.by_id.get(self.sel)
             if node is None:
                 return
-            self.app.run_worker(self.app.open_node(node), group="agents")
+            # into THIS page's panel (a click may land in a panel that is not focused yet)
+            self.app.run_worker(self.app.open_node(node, panel=Panel.of(self)), group="agents")
 
         def click_row(self, row) -> None:
             if row.kind == "link":
@@ -8164,7 +8174,7 @@ def build_tui(base: str, token: str, **kw):
             # a panel's number is its key. `self.cid` and the rest are the chat in context's
             self.chats: dict[int, ChatState] = {
                 1: ChatState(1, project, "pin" if project else None, agent, model)}
-            self.tree = 1                       # the split tree (PanelSplit | a panel number)
+            self.panel_tree = 1                       # the split tree (PanelSplit | a panel number)
             self.focus_no = 1                   # the focused panel
             self.zoomed = False                 # the focused panel fills the area
             self.cramped = False                # the window is too small for the tiles
@@ -10098,16 +10108,17 @@ def build_tui(base: str, token: str, **kw):
                             severity="warning")
                 return
             arg = arg.strip()
+            panel = False
             if cmd.page:
                 # `/page [args] [panel]`: the page gets its args; a trailing `panel`
-                # asks for a new panel (the next step), so for now it opens in place
+                # opens it in a new panel beside the focused one instead of over it
                 words, panel = parse_page_args(arg)
                 arg = " ".join(words)
-                if panel:
-                    await self.say(f"/{name}: panels arrive in the next step — opening "
-                                   "it in place")
             try:
-                await cmd.fn(arg)
+                if panel:
+                    await self.open_page(cmd.page, arg, panel=True)
+                else:
+                    await cmd.fn(arg)
             except CliError as e:
                 await self.note(str(e), "error")
             except Exception as e:      # noqa: BLE001 - one bad command must not take the app down
@@ -10353,6 +10364,20 @@ def build_tui(base: str, token: str, **kw):
             if key == "b":
                 self.action_toggle_sidebar()
                 return
+            # the panels: arrows move the focus, 1-4 jump, z zooms, 0 closes (no command
+            # uses a digit, an arrow or z)
+            if key in ("left", "right", "up", "down"):
+                self.move_focus(key)
+                return
+            if key in ("1", "2", "3", "4"):
+                self.jump_panel(int(key))
+                return
+            if key == "z":
+                self.toggle_zoom()
+                return
+            if key == "0":
+                self.run_worker(self.close_panel(), group="panels", unbound=True)
+                return
             for name, cmd in self.unique_commands():
                 if cmd.leader == key:
                     self.dispatch(f"/{name}")
@@ -10417,9 +10442,19 @@ def build_tui(base: str, token: str, **kw):
             """← on an empty prompt (a drawer in the next step): /agents."""
             self.run_worker(self.open_page("agents"), group="nav")
 
-        async def open_node(self, node: dict) -> None:
+        async def open_node(self, node: dict, panel=None, new_panel: bool = False) -> None:
             """Open an agents-page node here: its transcript, and if it is
-            running, its live stream (typing then messages it mid-turn)."""
+            running, its live stream (typing then messages it mid-turn). In `panel`'s
+            chat (the focused one by default), or in a new panel beside the focused one."""
+            if new_panel:
+                chat = await self.new_panel()
+                if chat is None:
+                    return
+                panel = chat.panel
+            if panel is not None and panel.chat is not self.chat:
+                with self.in_chat(panel.chat):
+                    await self.open_node(node)
+                return
             await self.host.home()
             await self._leave_turn()
             try:
@@ -10517,6 +10552,10 @@ def build_tui(base: str, token: str, **kw):
                 "new": Command(self.c_new, "start a fresh chat", leader="n"),
                 "sessions": Command(self.c_sessions, "switch to another chat (the → drawer "
                                     "lists them all)", "[id]", takes_arg=True, leader="l"),
+                "new-panel": Command(self.c_new_panel, "split this panel: a new chat beside "
+                                     "it (/page [args] panel opens a page there; at most "
+                                     f"{MAX_PANELS}; ctrl+x ←↑↓→ 1-4 z 0 move, zoom, close)",
+                                     busy_ok=True),
                 "models": Command(self.c_model, "pick the model (full access: switch "
                                   "models on/off, set the default)", "[provider/id]",
                                   takes_arg=True, leader="m"),
@@ -10733,7 +10772,21 @@ def build_tui(base: str, token: str, **kw):
             self.orchestrator = False
             await self.show_home()
 
-        async def c_sessions(self, arg: str) -> None:
+        async def c_sessions(self, arg: str, panel: bool = False) -> None:
+            cid = await self._pick_session(arg)
+            if cid is None:
+                return
+            if panel:
+                chat = await self.new_panel()
+                if chat is None:
+                    return
+                with self.in_chat(chat):
+                    await self.open_conversation(cid)
+                return
+            await self.open_conversation(cid)
+
+        async def _pick_session(self, arg: str) -> int | None:
+            """/sessions [id|words]: the chat to open (a picker when nothing is given)."""
             convs = await self.refresh_convs()
             if not arg:
                 rows = []
@@ -10758,13 +10811,13 @@ def build_tui(base: str, token: str, **kw):
                 arg = await self.pick("Sessions", rows, str(self.cid) if self.cid else None,
                                       wide=True) or ""
                 if not arg:
-                    return
+                    return None
             if not arg.isdigit():
                 hits = [cv for cv in convs if arg.lower() in (cv.get("summary") or "").lower()]
                 if not hits:
                     raise CliError(f"no chat matches {arg!r}")
                 arg = str(hits[0]["id"])
-            await self.open_conversation(int(arg))
+            return int(arg)
 
         async def open_conversation(self, cid: int, running: bool = False,
                                     parent: int | None = None) -> None:
@@ -11571,6 +11624,124 @@ def build_tui(base: str, token: str, **kw):
             self.refresh_chrome()
             self.send(dump)
 
+        # -- panels ----------------------------------------------------------------------------
+        #
+        # The model is `self.chats` (panel number -> ChatState, which holds the Panel widget),
+        # `self.panel_tree` (the split tree over the numbers), `self.focus_no` and `self.zoomed`;
+        # PanelArea.relayout puts the widgets where the tree says. What drawers and other
+        # callers use: new_panel(name?, arg?) (a new panel, a new chat, the page over it),
+        # focus_panel(n), close_panel(n), open_page(name, arg, panel=True|target=Panel),
+        # open_node(node, panel=|new_panel=) and `with self.in_chat(chat):` to act as a chat.
+
+        def focus_panel(self, number: int, refocus: bool = True) -> bool:
+            """Make panel `number` the focused one: the prompt types into its chat, the status
+            row, sidebar and meta row follow it, and (`refocus`) the keyboard goes to what its
+            page wants it to (the prompt for a chat). False if there is no such panel."""
+            if number not in self.chats:
+                return False
+            self.focus_no = number
+            self.panel_area.relayout()
+            if refocus:
+                host = self.chats[number].panel.host
+                host._focus(host.current)
+            self.refresh_chrome()
+            return True
+
+        def move_focus(self, direction: str) -> None:
+            """ctrl+x + an arrow: the panel next to the focused one in that direction."""
+            if len(self.chats) == 1:
+                self.notify("one panel: /new-panel (or /vms panel...) splits it")
+                return
+            w, h = self.panel_area.size
+            n = tree_neighbor(self.panel_tree, self.focus_no, direction, w, h)
+            if n is None:
+                self.notify(f"no panel to the {direction}" if direction in ("left", "right")
+                            else f"no panel {'above' if direction == 'up' else 'below'}")
+                return
+            self.focus_panel(n)
+
+        def jump_panel(self, number: int) -> None:
+            """ctrl+x + 1-4."""
+            if not self.focus_panel(number):
+                self.notify(f"no panel {number}" if len(self.chats) > 1
+                            else "one panel: /new-panel splits it")
+
+        def toggle_zoom(self) -> None:
+            """ctrl+x z: the focused panel fills the area, and back."""
+            if len(self.chats) == 1:
+                self.notify("zoom needs two panels")
+                return
+            self.zoomed = not self.zoomed
+            self.panel_area.relayout()
+            self.refresh_chrome()
+
+        async def new_panel(self, name: str | None = None, arg: str = ""):
+            """Split the focused panel along its longer side: a new panel with a NEW chat (in
+            the same project, as the same agent, on the same model), taking the focus, with
+            the page `name` over the chat when given. Returns its ChatState, or None when
+            refused (four panels already, or no room at this size; a one-line note says so)."""
+            if len(self.chats) >= MAX_PANELS:
+                await self.say(f"{MAX_PANELS} panels is the most — ctrl+x 0 closes the focused one",
+                               "warn")
+                return None
+            area = self.panel_area
+            here = self.focus_no
+            self.zoomed = False
+            w, h = area.size
+            rect = tree_rects(self.panel_tree, w, h).get(here, (0, 0, w, h))
+            cut = panel_split_dir(rect[2], rect[3])
+            if cut is None:
+                await self.say(f"no room for another panel at this size ({rect[2]}x{rect[3]}): "
+                               "enlarge the window, or ctrl+x z zooms the one you are in",
+                               "warn")
+                return None
+            number = next(n for n in range(1, MAX_PANELS + 1) if n not in self.chats)
+            chat = self.focused_chat.settings_for_new(number)
+            self.chats[number] = chat
+            self.panel_tree = tree_split(self.panel_tree, here, number, cut)
+            await area.mount(Panel(chat))
+            area.relayout()
+            self.focus_panel(number)
+            if name:
+                with self.in_chat(chat):
+                    await self.open_page(name, arg)
+            return chat
+
+        async def close_panel(self, number: int | None = None) -> bool:
+            """ctrl+x 0: close a panel (the focused one). Its chat keeps running on the server;
+            this client just stops watching it. Never the last one."""
+            number = number or self.focus_no
+            if number not in self.chats:
+                return False
+            if len(self.chats) == 1:
+                self.notify("the last panel can't be closed")
+                return False
+            chat = self.chats[number]
+            order = tree_leaves(self.panel_tree)
+            i = order.index(number)
+            nxt = order[i - 1] if i > 0 else order[1]
+            with self.in_chat(chat):
+                await self._leave_turn()
+            mine = [w for w in self.workers if getattr(w, "chat", None) is chat and w.is_running]
+            for w in mine:
+                w.cancel()
+            for w in mine:
+                with contextlib.suppress(Exception):
+                    await w.wait()
+            self.panel_tree = tree_close(self.panel_tree, number)
+            self.zoomed = False
+            if self.focus_no == number:
+                self.focus_no = nxt
+            del self.chats[number]
+            if chat.panel is not None:
+                await chat.panel.remove()
+            self.panel_area.relayout()
+            self.focus_panel(self.focus_no)
+            return True
+
+        async def c_new_panel(self, arg: str = "") -> None:
+            await self.new_panel()
+
         # -- pages: the router -----------------------------------------------------------------
 
         def _page_fn(self, name: str):
@@ -11578,26 +11749,43 @@ def build_tui(base: str, token: str, **kw):
                 await self.open_page(name, arg)
             return go
 
-        async def open_page(self, name: str, arg: str = "") -> None:
-            """/name args: show a page in the host. The page showing already is told its new
-            args; one lower in the stack gives way to a fresh one on top. `work` is the
-            chat; a page the terminal does not have yet says where it lives."""
+        async def open_page(self, name: str, arg: str = "", *, target=None,
+                            panel: bool = False) -> None:
+            """/name args [panel]: show a page in a host. The page showing already is told its
+            new args; one lower in the stack gives way to a fresh one on top. `work` is the
+            chat; a page the terminal does not have yet says where it lives. In the focused
+            panel, or in `target` (a Panel: a page asking for another page opens it in its
+            own), or, with `panel`, in a NEW panel beside the focused one (`/sessions panel`
+            opens the chat you pick there; `/work panel` is a new chat)."""
             spec = PAGES[name]
             args = (arg or "").split()
             if spec.kind == "web":
                 await self.say(not_in_terminal(name), "warn")
                 return
             self.hide_popup()
+            legacy = (name == "agents" and args and args[0] not in AGENTS_VIEW_BLURB
+                      and args[0] != "active")
+            if legacy:
+                # the old spelling: /agents <slug> starts a chat as that agent preset
+                await self.c_agent(arg)
+                return
+            if panel:
+                if name == "sessions":
+                    await self.c_sessions(arg, panel=True)
+                elif spec.kind == "chat":
+                    await self.new_panel()
+                else:
+                    await self.new_panel(name, arg)
+                return
+            if target is not None and target is not self.chat.panel:
+                with self.in_chat(target.chat):
+                    await self.open_page(name, arg)
+                return
             if name == "sessions":
                 await self.c_sessions(arg)
                 return
             if spec.kind == "chat":
                 await self.host.home()
-                return
-            if (name == "agents" and args and args[0] not in AGENTS_VIEW_BLURB
-                    and args[0] != "active"):
-                # the old spelling: /agents <slug> starts a chat as that agent preset
-                await self.c_agent(arg)
                 return
             cls = self.page_classes[name]
             if type(self.page) is cls:
