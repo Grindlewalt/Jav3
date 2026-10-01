@@ -1491,21 +1491,17 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     """Run one desk action for the current turn; the tools' only entry point.
     Returns the tool result string (with the screenshot inline when there is
     one). Every refusal is `error: …` with the reason the model can act on."""
-    out = await _act(verb, params, want)
     try:
         d = resolve(want)
-    except DeskError:
-        return out
+    except DeskError as e:
+        return f"error: {e}"
+    out = await _act(d, verb, params)
     if d.used_by_operator_s and d.operator_since is None:
         out = _operator_note(d, out)          # the operator used it since the agent last looked
     return out
 
 
-async def _act(verb: str, params: dict, want: str | None) -> str:
-    try:
-        d = resolve(want)
-    except DeskError as e:
-        return f"error: {e}"
+async def _act(d: Desk, verb: str, params: dict) -> str:
     op = _op_key()
     cap = CAPABILITY.get(verb)
     if cap is None:
