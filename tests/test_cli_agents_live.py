@@ -81,6 +81,10 @@ def rows(scr):
     return [(r.kind, r.nid, str(r.render())) for r in scr.query("AgentRow")]
 
 
+def head(scr) -> str:
+    return str(scr.query_one("#ag-head").render())
+
+
 def titles(scr, *needles):
     """The text of each root row that mentions one of `needles`."""
     return [t for k, _, t in rows(scr) if k == "root" and any(n in t for n in needles)]
@@ -133,7 +137,7 @@ async def test_a_chat_started_in_the_web_app_shows_under_left():
         assert await wait_for(lambda: titles(scr, "fix the invoice export"))
         assert section_of(scr, "fix the invoice export") == "Active"
         assert "old chat" not in " ".join(t for _, _, t in rows(scr))   # idle chats stay out
-        assert "1 running" in str(scr.query_one("#ag-head").render())
+        assert await wait_for(lambda: "1 running" in head(scr))
         assert "⌂ shop" in titles(scr, "fix the invoice export")[0]
 
 
@@ -163,8 +167,7 @@ async def test_plan_item_schedule_and_sub_agent_all_show_with_the_web_chat():
             assert section_of(scr, needle) == "Active", needle
         # the chat appears once, not once from the tree and again from /running
         assert len(titles(scr, "refactor billing")) == 1
-        head = str(scr.query_one("#ag-head").render())
-        assert "3 running" in head
+        assert await wait_for(lambda: "3 running" in head(scr))
         # the plan unfolds to its item, the sub-agent hangs under its chat
         tr = scr.tree
         assert [k["id"] for k, _ in tr.descendants(10)] == [11, 12, 13]
@@ -184,7 +187,7 @@ async def test_a_chat_started_after_the_screen_opened_appears_without_a_key():
         srv.running = [50]
         # the screen reloads by itself; no key pressed
         assert await wait_for(lambda: titles(scr, "late chat"), tries=70, step=0.05)
-        assert "1 running" in str(scr.query_one("#ag-head").render())
+        assert await wait_for(lambda: "1 running" in head(scr))
         assert "nothing is running" not in " ".join(t for _, _, t in rows(scr))
 
 
@@ -207,8 +210,9 @@ async def test_a_run_that_finishes_leaves_the_running_group_on_reload():
         srv.active, srv.running = [], []
         assert await wait_for(lambda: not titles(scr, "web chat", "Fetch the morning"),
                               tries=70, step=0.05)
-        assert "0 running" in str(scr.query_one("#ag-head").render())
-        assert "nothing is running" in " ".join(t for _, _, t in rows(scr))
+        assert await wait_for(lambda: "0 running" in head(scr))
+        assert await wait_for(lambda: "nothing is running" in " ".join(
+            t for _, _, t in rows(scr)))
         # the count behind the Finished row follows, without pressing r
         assert await wait_for(lambda: " 2" in rows(scr)[-1][2], tries=70, step=0.05)
         # and opening it lists the full finished page, not the one-row count fetch
@@ -262,6 +266,11 @@ async def test_the_chat_you_came_from_is_selected_and_marked():
         assert order == [20, 41]
         await pilot.press("escape")
         assert await wait_for(lambda: type(app.screen).__name__ != "AgentsScreen")
+        # the resumed chat is attached to its live turn: end it so the app can close
+        assert await wait_for(lambda: srv.streams.get(41))
+        srv.streams[41][-1].put({"type": "final", "content": "ok", "conversation_id": 41})
+        srv.streams[41][-1].close()
+        assert await wait_for(lambda: not app.busy)
 
 
 async def test_servers_without_running_or_conversations_routes_still_list_the_tree():
