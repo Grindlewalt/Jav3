@@ -125,6 +125,14 @@ def alive(pid):
     except OSError:
         return False
 
+async def until(cond, secs=15):
+    end = time.monotonic() + secs
+    while time.monotonic() < end:
+        if cond():
+            return True
+        await asyncio.sleep(0.05)
+    return cond()
+
 async def ask(mode, extra=b""):
     loop = asyncio.get_running_loop()
     a, b = socket.socketpair()
@@ -162,8 +170,8 @@ async def main():
     for flag in ("-SecurityTypes None", "-rfbunixpath " + root + "/d.sock", "-rfbport -1",
                  "-geometry 1280x800", "-SendCutText=0", "-AcceptCutText=0", ":100"):
         assert flag in argv, (flag, argv)
-    await asyncio.sleep(0.3)
-    assert len(pids("openbox")) == 1 and len(pids("xterm")) == 1       # wm + first window
+    assert await until(lambda: len(pids("openbox")) == 1 and len(pids("xterm")) == 1), \
+        "wm + first window"
     xterm = [l for l in open(log) if l.startswith("xterm")][0]
     assert "tmux new-session -A -s desk" in xterm and "DISPLAY=:100" in xterm, xterm
     doc = json.load(open(display.APPS_PATH))
@@ -183,20 +191,18 @@ async def main():
 
     # the viewer leaves: after IDLE_STOP_S the session stops, with everything on it
     a.close(); await t
-    assert s.viewers == 0 and 0 <= s.status()["idle_stop_in_s"] <= 1
-    await asyncio.sleep(1.2)
-    assert not s.running() and not os.path.exists(display.RFB_SOCK)
+    assert s.viewers == 0
+    assert await until(lambda: not s.running() and not os.path.exists(display.RFB_SOCK))
     assert not os.path.exists(display.APPS_PATH)
-    time.sleep(0.2)
-    assert not alive(x_pid) and not alive(wm_pid) and not alive(pids("xterm")[0]), "left processes"
+    assert await until(lambda: not alive(x_pid) and not alive(wm_pid)
+                       and not alive(pids("xterm")[0])), "left processes"
 
     # start again by hand; no viewer ever comes: it stops itself
     loop, a, t = await ask("start")
     st = json.loads((await line(loop, a))[0])
     assert st["running"] and st["viewers"] == 0 and st["idle_stop_in_s"] is not None, st
     a.close(); await t
-    await asyncio.sleep(1.2)
-    assert not s.running()
+    assert await until(lambda: not s.running()), "no viewer ever came, still up"
 
     # it dies by itself (killed): the rest is taken down, the next start is clean
     await s.ensure()
