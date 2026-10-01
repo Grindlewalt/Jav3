@@ -4599,6 +4599,7 @@ def build_tui(base: str, token: str, **kw):
 
         def on_resize(self, event) -> None:
             self._shown_title = None
+            self.set_class(self.size.height < 22, "-short")
             self.refresh_title()
 
         def on_click(self, event) -> None:
@@ -4623,6 +4624,8 @@ def build_tui(base: str, token: str, **kw):
         PanelArea.-multi Panel.-focused { border: double $primary;
                                           border-title-color: $primary;
                                           border-title-style: bold; }
+        /* a short tile has no room for the logo above the empty chat's hints */
+        PanelArea.-multi Panel.-short #logo { display: none; }
         """
 
         def compose(self) -> ComposeResult:

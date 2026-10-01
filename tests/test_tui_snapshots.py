@@ -60,6 +60,13 @@ PAGES = {
                                 "|wait:0.5"),
     # a page the web has and the terminal does not: the answer where it lives
     "stub": ([], "type:/memory|wait:0.4|key:enter|waitfor:not in the terminal yet@10|wait:0.3"),
+    # panels (jav3.2 P1): two chats side by side, three (the second split across), and a
+    # page in a new panel beside the chat
+    "panels-2": ([], "type:/new-panel|wait:0.4|key:enter|waitfor:2 chat (new)@10|wait:0.5"),
+    "panels-3": ([], "type:/new-panel|wait:0.4|key:enter|waitfor:2 chat (new)@10"
+                     "|type:/new-panel|wait:0.4|key:enter|waitfor:3 chat (new)@10|wait:0.5"),
+    "panels-page": ([], "type:/vms panel|wait:0.4|key:enter|waitfor:RAM 1280@10"
+                        "|waitfor:shared kvm|wait:0.5"),
     "agents": ([], "key:left|waitfor:Agents@10|waitfor:morning quotes|wait:0.3"),
     "agents-in": ([], "key:left|waitfor:Agents@10|waitfor:morning quotes|key:right|key:down*2"
                       "|wait:0.3"),
@@ -80,7 +87,8 @@ def normalise(text: str) -> str:
 # Text under 3:1 contrast in the 256-colour palette is a bug (grey on the teal selection once
 # was). /help is left out: its backdrop is the page behind it, dimmed on purpose.
 CONTRAST_PAGES = ("home", "chat", "vms", "security", "agents", "agents-in", "agents-finished",
-                  "security-calls", "vms-images", "agents-cmd-finished", "stub")
+                  "security-calls", "vms-images", "agents-cmd-finished", "stub", "panels-2",
+                  "panels-3", "panels-page")
 
 
 def capture(page: str, cols: int, rows: int) -> tuple[str, list[str]]:
