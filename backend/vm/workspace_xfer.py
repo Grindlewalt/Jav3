@@ -126,6 +126,10 @@ def build_merged_tar(slug: str) -> bytes:
             ti = tarfile.TarInfo(rel)
             ti.size = len(data)
             ti.mode = 0o644
+            # the real mtime: without it every file in the guest is 1970-01-01 and
+            # make, pytest's cache, rsync -u and anything comparing times misjudge
+            # (BUILD-14)
+            ti.mtime = int(p.stat().st_mtime)
             tar.addfile(ti, io.BytesIO(data))
             shipped[rel] = _sha(data)
     _shipped[slug] = shipped

@@ -24,6 +24,11 @@ Network policy allows (a proxy 403 = refused or queued: report the exact hosts,
 do not probe the sandbox); with it off they fail by design. `node`, `npm` and
 (in current images) `pytest` are installed: run and test in place.
 
+`command` runs under /bin/sh, which is dash: no arrays, `${PIPESTATUS[0]}`,
+`pipefail`, `[[ ]]` or `<( )`; wrap bash-isms as `bash -c '...'`. The interpreter
+is `python3`; there is no `python`. The working directory is already the project,
+so do not prefix commands with `cd "$(pwd)" &&`.
+
 Background jobs: redirect output (`cmd > /tmp/x.log 2>&1 &`) and kill what you
 start; an unredirected one is detached after ~2 s but keeps running, and keeps
 its port for everyone on the shared box.
