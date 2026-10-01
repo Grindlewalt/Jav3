@@ -23,8 +23,14 @@ import NotFound from './pages/NotFound.jsx'
 // first run only, so never prefetched
 function OpenChat() {
   const { id } = useParams()
+  const step = new URLSearchParams(useLocation().search).get('step')
   if (/^\d+$/.test(id || '')) {
     try { localStorage.setItem('jarvis.chat.last', id) } catch { /* private mode */ }
+    // /c/<id>?step=<n>: a security card's "Open chat at step". Chat scrolls to it
+    // once the transcript is loaded (pages/Chat.jsx), then forgets it.
+    try {
+      if (/^\d+$/.test(step || '')) sessionStorage.setItem('jarvis.chat.step', `${id}:${step}`)
+    } catch { /* private mode */ }
   }
   return <Navigate to="/" replace />
 }

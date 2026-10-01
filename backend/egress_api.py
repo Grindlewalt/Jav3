@@ -11,7 +11,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from . import egress, egress_auto, lanaccess, secctx, security, sse
+from . import egress, egress_auto, lanaccess, secactions, secctx, secruns, security, sse
 from .auth import require_user
 from .db import get_db
 
@@ -389,6 +389,50 @@ async def security_events(unacknowledged: bool = False, limit: int = 100,
         await db.close()
 
 
+@security_router.get("/runs")
+async def security_runs(queue: bool = True, events: int = 0):
+    """The Queue as cards, one per run (backend/secruns.py): counts per kind,
+    the worst tier on top, running or finished. Resolves the info-only groups
+    whose run has ended first. `events=N` puts each card's newest N events in it."""
+    db = await get_db()
+    try:
+        return await secruns.list_runs(db, queue=queue, events=max(0, min(events, 50)))
+    finally:
+        await db.close()
+
+
+@security_router.get("/runs/{key:path}")
+async def security_run(key: str):
+    """One card with its events, each with what the agent was doing (untrusted
+    text, labelled as such) and the one-liners of what rules filed as normal work."""
+    db = await get_db()
+    try:
+        out = await secruns.run_detail(db, key)
+        if out is None:
+            raise HTTPException(status_code=404, detail="no such group (it may have been resolved)")
+        return out
+    finally:
+        await db.close()
+
+
+class GroupAckBody(BaseModel):
+    only: str | None = None         # reports | alerts | (both)
+
+
+@security_router.post("/runs/{key:path}/ack")
+async def ack_run(key: str, body: GroupAckBody | None = None):
+    """Acknowledge what waits in one card (Acknowledge / Resolve group): the
+    agent reports (`only: reports`), the alerts (`alerts`), or everything."""
+    only = body.only if body else None
+    if only not in (None, "reports", "alerts"):
+        raise HTTPException(status_code=400, detail="only must be reports or alerts")
+    db = await get_db()
+    try:
+        return await secruns.acknowledge_group(db, key, only=only)
+    finally:
+        await db.close()
+
+
 @security_router.get("/events/{eid}/context")
 async def event_context(eid: int):
     """The evidence board for one alert — the flagged code in place, the diff,
@@ -411,6 +455,61 @@ async def ack(eid: int):
         return await security.acknowledge(db, eid)
     finally:
         await db.close()
+
+
+# --- what to DO about an event (backend/secactions.py) -----------------------------
+
+async def _acting(eid: int, fn, *args, **kw):
+    """Run one secactions function on event `eid`: 404 for no such event, 409 with
+    the sentence it refused with (the operator reads it as is)."""
+    db = await get_db()
+    try:
+        ev = await security.get_event(db, eid)
+        if ev is None:
+            raise HTTPException(status_code=404, detail="no such event")
+        try:
+            return {"ok": True, **await fn(db, ev, *args, **kw)}
+        except secactions.ActionRefused as e:
+            raise HTTPException(status_code=409, detail=str(e))
+    finally:
+        await db.close()
+
+
+@security_router.post("/events/{eid}/revert")
+async def revert_file(eid: int):
+    """Put a flagged file back to git HEAD (or delete it when the agent created it).
+    Refused when the file changed since the alert, or there is nothing committed."""
+    return await _acting(eid, secactions.revert_file)
+
+
+@security_router.post("/events/{eid}/uncut")
+async def uncut_host(eid: int):
+    """Lift an anomaly cut: the proxy's block and the nftables drop."""
+    return await _acting(eid, secactions.uncut_host)
+
+
+class KillBody(BaseModel):
+    sig: str = "TERM"               # TERM | KILL
+
+
+@security_router.post("/events/{eid}/kill")
+async def kill_process(eid: int, body: KillBody | None = None):
+    """Signal the process an alert named: only if it still is that process."""
+    return await _acting(eid, secactions.kill_process, body.sig if body else "TERM")
+
+
+class StopBody(BaseModel):
+    scope: str = "agent"            # agent: that conversation | run: everything under its root
+    confirm: bool = False           # a whole run only stops with this
+    dry_run: bool = False
+
+
+@security_router.post("/events/{eid}/stop")
+async def stop_agent(eid: int, body: StopBody | None = None):
+    """Stop the agent that raised the event, or (scope=run, confirm=true) the whole
+    run it belongs to. Without confirm, or with dry_run, it only says what it would stop."""
+    b = body or StopBody()
+    return await _acting(eid, secactions.stop, b.scope, confirm=b.confirm, dry_run=b.dry_run)
 
 
 class BaselineBody(BaseModel):

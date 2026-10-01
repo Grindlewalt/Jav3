@@ -27,6 +27,7 @@ into the workspace .staging/ tarball for turn-end reconcile — which also funne
 through apply_write here, so guest-authored files get the same scan + refusal.
 """
 import asyncio
+import hashlib
 import os
 import time
 from pathlib import Path
@@ -280,7 +281,10 @@ async def apply_write(slug: str, rel: str, content: bytes) -> list[str]:
         await _raise_flag(slug, rel, f["trigger"],
                           {**f["detail"], "bytes": len(content),
                            "line_count": new_text.count("\n") + 1,
-                           "new_file": not old_text}, rule=reason)
+                           "new_file": not old_text,
+                           # the file as this write left it: Revert file refuses
+                           # when what is on disk is no longer this
+                           "sha": hashlib.sha256(content).hexdigest()}, rule=reason)
     return [f["trigger"] for f in flags]
 
 

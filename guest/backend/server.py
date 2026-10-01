@@ -118,6 +118,20 @@ async def _handle(loop, conn) -> None:
                 await send({"type": "ps", "ok": False,
                             "error": f"{type(e).__name__}: {e}"[:300]})
             return
+        # kill one process the host's last ps snapshot named: only if /proc still
+        # shows the same program and start time (procwatch.kill_pid); a pid that
+        # was reused is refused, never killed
+        if mode == "kill_pid":
+            try:
+                from . import procwatch
+                out = await asyncio.to_thread(
+                    procwatch.kill_pid, spec.get("pid"), spec.get("exe"),
+                    spec.get("start_ticks"), spec.get("cmd"), spec.get("sig"))
+                await send({"type": "kill", **out})
+            except Exception as e:  # noqa: BLE001 — answer, never kill the server
+                await send({"type": "kill", "ok": False, "why": "error",
+                            "error": f"{type(e).__name__}: {e}"[:300]})
+            return
         if mode == "pull":
             slug = spec.get("active_slug")
             await send({"type": "staged", "slug": slug,

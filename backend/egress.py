@@ -21,6 +21,7 @@ raises a security_event and a `cut`, which this module records so the proxy
 refuses the host immediately.
 """
 import json
+import time
 
 import aiosqlite
 
@@ -865,6 +866,40 @@ def mark_cut(slug: str | None, host: str) -> None:
 
 def clear_cut(slug: str | None, host: str) -> None:
     _cut.discard((slug or GENERAL, host))
+
+
+# Un-cut (the Security queue's "Un-cut host"). Taking a cut back must stick: the
+# volume and cadence detectors judge the hours BEFORE a host's latest hit, so the
+# very next request would trip the same detector and cut it again. A host the
+# operator un-cut is not re-judged by the anomaly detectors for this long (in
+# memory: a restart forgets it, the way it forgets the cut).
+UNCUT_GRACE_S = 3600
+_uncut_until: dict[tuple[str, str], float] = {}
+
+
+def uncut(slug: str | None, host: str) -> bool:
+    """Lift an auto-cut and start the grace. True when the host was cut here (the
+    nft drop is the caller's to undo: backend/vm/egress_proxy.nft_undrop)."""
+    was = False
+    for h in {host, _norm(host)}:
+        for s in {slug or GENERAL, GENERAL}:
+            if (s, h) in _cut:
+                was = True
+            _cut.discard((s, h))
+        _uncut_until[(slug or GENERAL, h)] = time.monotonic() + UNCUT_GRACE_S
+    return was
+
+
+def in_uncut_grace(slug: str | None, host: str) -> bool:
+    until = _uncut_until.get((slug or GENERAL, host)) or _uncut_until.get(
+        (slug or GENERAL, _norm(host)))
+    if until is None:
+        return False
+    if time.monotonic() >= until:
+        _uncut_until.pop((slug or GENERAL, host), None)
+        _uncut_until.pop((slug or GENERAL, _norm(host)), None)
+        return False
+    return True
 
 
 # --- secret grants (B1; profiles (d)) -----------------------------------------

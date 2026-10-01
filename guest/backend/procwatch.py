@@ -332,3 +332,60 @@ def snapshot(root: str = "/", self_pid: int | None = None,
             "clk_tck": os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100,
             "page_size": page,
             "procs": procs, "socks": socks, "truncated": truncated, "errors": errors}
+
+
+# --- kill one process the host's snapshot named ---------------------------------
+
+SIGNALS = {"TERM": 15, "KILL": 9}
+
+
+def kill_pid(pid, exe, start_ticks=None, cmd=None, sig="TERM", root="/",
+             self_pid=None, _kill=None) -> dict:
+    """Signal `pid` only if it still is the process the host saw in its last ps
+    snapshot: same program (exe) and the same start time (`start_ticks`), or,
+    when the host has no start time, the same command line. A pid can be reused
+    within seconds: a mismatch is refused, never killed ("changed"); a pid that
+    is gone is "gone". PID 1, this server and kernel threads are refused.
+    Returns {"ok": True, "pid": n, "sig": name} or {"ok": False, "why": code,
+    "error": text}."""
+    def no(why: str, text: str) -> dict:
+        return {"ok": False, "why": why, "error": text}
+    name = str(sig or "TERM").upper().removeprefix("SIG")
+    if name not in SIGNALS:
+        return no("bad_signal", f"signal must be one of {', '.join(SIGNALS)}")
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 2 or pid > 4194304:
+        return no("bad_pid", "not a killable process id")
+    me = os.getpid() if self_pid is None else self_pid
+    if pid == me:
+        return no("protected", "that is this box's own agent server")
+    if not isinstance(exe, str) or not exe:
+        return no("bad_args", "the program path is required")
+    if start_ticks is None and not cmd:
+        return no("bad_args", "a start time or a command line is required")
+    pdir = os.path.join(root, "proc", str(pid))
+    raw = _read(os.path.join(pdir, "stat"), 4096)
+    st = parse_stat(raw.decode("utf-8", "replace")) if raw else None
+    if st is None:
+        return no("gone", f"process {pid} is no longer running")
+    if st["flags"] & PF_KTHREAD:
+        return no("protected", "that is a kernel thread")
+    live_exe = _exe(pdir)
+    if live_exe != exe:
+        return no("changed", f"pid {pid} is now {live_exe or 'another program'}, "
+                             f"not {exe}: not killing it")
+    if start_ticks is not None:
+        if st["start_ticks"] != start_ticks:
+            return no("changed", f"pid {pid} was started again since the snapshot: "
+                                 "not killing it")
+    else:
+        live_cmd = parse_cmdline(_read(os.path.join(pdir, "cmdline"), 8192) or b"")
+        if live_cmd != cmd:
+            return no("changed", f"pid {pid} runs a different command line now: "
+                                 "not killing it")
+    try:
+        (_kill or os.kill)(pid, SIGNALS[name])
+    except ProcessLookupError:
+        return no("gone", f"process {pid} is no longer running")
+    except PermissionError:
+        return no("denied", f"not allowed to signal process {pid}")
+    return {"ok": True, "pid": pid, "sig": name}

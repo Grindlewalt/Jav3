@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from './api.js'
 import SecurityBoard from './SecurityBoard.jsx'
 import { sevClass, ts } from './format.js'
@@ -6,7 +7,8 @@ import { sevClass, ts } from './format.js'
 // The Security log's recent past, acknowledged rows included: the one place a
 // row filed already acknowledged ("by you", or a kind set to Record only) can be
 // found, since it never reaches the queue or a toast. Collapsed until opened.
-// Every string is the server's or an agent's: plain text nodes only.
+// Every string is the server's or an agent's: plain text nodes only. Rows stay one
+// per event here (the Queue groups them by run); a row names its chat when it has one.
 
 const FILTERS = [
   ['all', 'Everything'],
@@ -62,6 +64,9 @@ export default function SecurityHistory() {
                   <span className="mono small">{e.kind}</span>
                   {e.project_slug && <span className="tag">{e.project_slug}</span>}
                   {e.count > 1 && <span className="tag">×{e.count}</span>}
+                  {e.conversation_id && (
+                    <Link className="small" to={`/c/${e.conversation_id}`}
+                          title="the chat this happened in">chat #{e.conversation_id}</Link>)}
                   {e.actor === 'operator' && <span className="tag by-you">by you</span>}
                   {e.quiet === 'kind' && <span className="tag">recorded only</span>}
                   {e.quiet === 'rule' && <span className="tag" title={e.rule || ''}>normal work</span>}

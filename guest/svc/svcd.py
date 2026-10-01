@@ -396,6 +396,20 @@ def op_ps() -> dict:
         return {"type": "ps", "ok": False, "error": f"{type(e).__name__}: {e}"[:300]}
 
 
+def op_kill_pid(req: dict) -> dict:
+    """{"mode":"kill_pid","pid","exe","start_ticks","cmd","sig"}: the run-turn
+    server's verb of the same name, for a service box (procwatch.kill_pid refuses
+    a pid that no longer is the process the host's snapshot named)."""
+    try:
+        from backend import procwatch
+        return {"type": "kill", **procwatch.kill_pid(
+            req.get("pid"), req.get("exe"), req.get("start_ticks"), req.get("cmd"),
+            req.get("sig"))}
+    except Exception as e:  # noqa: BLE001 — answer, never kill svcd
+        return {"type": "kill", "ok": False, "why": "error",
+                "error": f"{type(e).__name__}: {e}"[:300]}
+
+
 OPS = {"ping": op_ping, "mount_srv": op_mount_srv, "import_read": op_import_read,
        "apply": op_apply, "logs": op_logs}
 
@@ -440,6 +454,9 @@ def handle(conn: socket.socket) -> None:
             # server's `ps` mode, so procview.rpc_ps serves both box kinds
             out = op_ps()
             conn.sendall((json.dumps(out) + "\n").encode())
+            return
+        if isinstance(req, dict) and req.get("mode") == "kill_pid":
+            conn.sendall((json.dumps(op_kill_pid(req)) + "\n").encode())
             return
         if op == "tunnel":
             port = int(req.get("port"))

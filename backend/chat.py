@@ -561,7 +561,9 @@ async def get_messages(conversation_id: int):
         except json.JSONDecodeError:
             args = {}
         result = c["result"] or ""
-        return {"name": c["tool"], "args": args, "result": result,
+        # `step`: the tool_calls row, so a link can open the chat AT this step
+        # (a security card's "Open chat at step")
+        return {"name": c["tool"], "args": args, "result": result, "step": c["id"],
                 "ok": not result.startswith(("error:", "duplicate call:")),
                 "done": True}
 
@@ -1088,7 +1090,7 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
                                                      event.get("args") or {})
                 elif event["type"] == "tool_result":
                     nm, ar = pending_tool.pop(event.get("id"), (event.get("name"), {}))
-                    await sink(nm, ar, event.get("result", ""))
+                    await sink(nm, ar, event.get("result", ""), event.get("id"))
                 bus.publish(chan, event)
         finally:
             # guest_turn holds a per-slug workspace-push token that its OWN

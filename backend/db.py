@@ -782,6 +782,7 @@ async def init_db() -> None:
         await _migrate_boxes(db)
         await _migrate_secsettings(db)
         await _migrate_secrules(db)
+        await _migrate_secruns(db)
         await _migrate_peer_trust(db)
         await _migrate_narration(db)
         await _migrate_turnstats(db)
@@ -1026,6 +1027,27 @@ async def _migrate_secrules(db: aiosqlite.Connection) -> None:
         " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
         " PRIMARY KEY (project_slug, conversation_id, path))")
     await db.execute("DELETE FROM write_created WHERE created_at < datetime('now', '-30 days')")
+
+
+async def _migrate_secruns(db: aiosqlite.Connection) -> None:
+    """Which run an event belongs to (backend/secruns.py). `conversation_id` is
+    the conversation the event happened in, `run_root` the top of that
+    conversation's tree (a chat, or a plan/funnel job head: one card per run in
+    the Queue), `call_id` the model's id for the tool call it happened in,
+    `box_id` / `boot_id` the box (and its boot) for a process event no turn is
+    bound to. All attribution only: nothing here decides who the actor was.
+    NULL on every row from before; those group by their detail or the box.
+    tool_calls gains `call_id` so "open the chat at that step" can find the row.
+    Idempotent and additive."""
+    await _add_columns(db, "security_events", (
+        ("conversation_id", "INTEGER"), ("run_root", "INTEGER"), ("call_id", "TEXT"),
+        ("box_id", "TEXT"), ("boot_id", "TEXT"),
+    ))
+    await _add_columns(db, "tool_calls", (("call_id", "TEXT"),))
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_security_events_run "
+                     "ON security_events(run_root)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_tool_calls_callid "
+                     "ON tool_calls(call_id)")
 
 
 async def _migrate_boxlog(db: aiosqlite.Connection) -> None:
