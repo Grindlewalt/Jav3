@@ -11,7 +11,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from . import egress, egress_auto, lanaccess, secctx, security, sse
+from . import egress, egress_auto, lanaccess, secctx, secruns, security, sse
 from .auth import require_user
 from .db import get_db
 
@@ -385,6 +385,50 @@ async def security_events(unacknowledged: bool = False, limit: int = 100,
     try:
         return {"events": await security.list_events(
             db, unacknowledged_only=unacknowledged, limit=limit, queue_only=queue)}
+    finally:
+        await db.close()
+
+
+@security_router.get("/runs")
+async def security_runs(queue: bool = True):
+    """The Queue as cards, one per run (backend/secruns.py): counts per kind,
+    the worst tier on top, running or finished. Resolves the info-only groups
+    whose run has ended first."""
+    db = await get_db()
+    try:
+        return await secruns.list_runs(db, queue=queue)
+    finally:
+        await db.close()
+
+
+@security_router.get("/runs/{key:path}")
+async def security_run(key: str):
+    """One card with its events, each with what the agent was doing (untrusted
+    text, labelled as such) and the one-liners of what rules filed as normal work."""
+    db = await get_db()
+    try:
+        out = await secruns.run_detail(db, key)
+        if out is None:
+            raise HTTPException(status_code=404, detail="no such group (it may have been resolved)")
+        return out
+    finally:
+        await db.close()
+
+
+class GroupAckBody(BaseModel):
+    only: str | None = None         # reports | alerts | (both)
+
+
+@security_router.post("/runs/{key:path}/ack")
+async def ack_run(key: str, body: GroupAckBody | None = None):
+    """Acknowledge what waits in one card (Acknowledge / Resolve group): the
+    agent reports (`only: reports`), the alerts (`alerts`), or everything."""
+    only = body.only if body else None
+    if only not in (None, "reports", "alerts"):
+        raise HTTPException(status_code=400, detail="only must be reports or alerts")
+    db = await get_db()
+    try:
+        return await secruns.acknowledge_group(db, key, only=only)
     finally:
         await db.close()
 
