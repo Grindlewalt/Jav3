@@ -301,7 +301,7 @@ async def import_persist(slug: str, body: ImportPersist,
         raise HTTPException(status_code=400, detail="import requires confirm=true")
     try:
         out = await services.import_persist(
-            slug, by=user.get("username") or "operator")
+            slug, by=user.get("username") or "operator", by_operator=True)
     except services.ServiceError as e:
         raise HTTPException(status_code=e.status, detail=str(e)) from None
     return {**(await _persist_view(slug)), **out}

@@ -856,3 +856,49 @@ async def test_import_refused_while_attached(client):
         assert r.status_code == 409
     finally:
         persist.forget()
+
+
+# --- the operator's own decision is quiet, an agent-path call is not ----------------------
+
+async def _alert_state(kind: str) -> list[tuple]:
+    return [(e["acknowledged"], e["actor"]) for e in await _events(kind)]
+
+
+async def test_service_decisions_from_the_routes_are_by_you_but_unmarked_calls_alert(
+        client, monkeypatch):
+    Runtime(monkeypatch)
+    # unmarked (any caller that is not an operator route): still an alert to ack
+    a = (await services.file_request("demo", _req()))["id"]
+    await services.approve(a, placement="per_project", expose_ports=[])
+    b = (await services.file_request("demo", _req(name="b")))["id"]
+    await services.reject(b, "no")
+    assert await _alert_state("service_approved") == [(0, None)]
+    assert await _alert_state("service_rejected") == [(0, None)]
+    await services.revoke(a)
+    assert await _alert_state("service_revoked") == [(0, None)]
+    # the same decisions through the operator routes: quiet, "by you"
+    c = (await services.file_request("demo", _req(name="c")))["id"]
+    r = await client.post(f"/api/services/{c}/approve",
+                          json={"acknowledge": True, "placement": "per_project",
+                                "expose_ports": []})
+    assert r.status_code == 200, r.text
+    d = (await services.file_request("demo", _req(name="d")))["id"]
+    assert (await client.post(f"/api/services/{d}/reject",
+                              json={"reason": "no"})).status_code == 200
+    assert (await client.post(f"/api/services/{c}/revoke",
+                              json={"confirm": True})).status_code == 200
+    for kind in ("service_approved", "service_rejected", "service_revoked"):
+        assert await _alert_state(kind) == [(0, None), (1, "operator")], kind
+
+
+async def test_persist_import_by_the_route_is_by_you_and_a_direct_call_alerts(
+        client, monkeypatch):
+    Runtime(monkeypatch)
+    monkeypatch.setattr(services, "_spawn", lambda coro: coro.close())
+    persist.disk_dir().mkdir(parents=True, exist_ok=True)
+    persist.disk_path("demo").write_bytes(b"qcow")
+    await services.import_persist("demo")                      # unmarked
+    await _approve_legacy()
+    r = await client.post("/api/projects/demo/persist/import", json={"confirm": True})
+    assert r.status_code == 200, r.text
+    assert await _alert_state("persist_imported") == [(0, None), (1, "operator")]
