@@ -46,5 +46,11 @@ export function terminalCommandNames(source) {
   const names = new Set()
   for (const m of body.matchAll(/^ {16}"([a-z][a-z0-9-]*)": Command\(/gm)) names.add(m[1])
   for (const m of body.matchAll(/\("([a-z][a-z0-9-]*)", "([a-z][a-z0-9-]*)"\)/g)) names.add(m[1])
+  // pages (jav3.2) are commands too, registered from PAGE_SPECS rather than the table
+  const pages = source.slice(source.indexOf('PAGE_SPECS = ('), source.indexOf('PAGES = {'))
+  for (const m of pages.matchAll(/PageSpec\("([a-z][a-z0-9-]*)"([^)]*?aliases=\(([^)]*)\))?/g)) {
+    names.add(m[1])
+    for (const a of (m[3] || '').matchAll(/"([a-z][a-z0-9-]*)"/g)) names.add(a[1])
+  }
   return [...names]
 }

@@ -441,6 +441,27 @@ export const COMMANDS = [
     help: 'the Memory page',
     run: (_, env) => { env.navigate('/memory') },
   },
+  // the terminal client's pages (jav3.2) by the same names
+  {
+    name: 'work', aliases: ['chat'], busyOk: true,
+    help: 'the Work page: chats and windows',
+    run: (_, env) => { env.navigate('/') },
+  },
+  {
+    name: 'logs', busyOk: true,
+    help: 'the security logs (Security → Logs)',
+    run: (_, env) => { env.navigate('/security/logs') },
+  },
+  {
+    name: 'schedules', busyOk: true,
+    help: 'the Schedules page',
+    run: (_, env) => { env.navigate('/schedules') },
+  },
+  {
+    name: 'artifacts', busyOk: true,
+    help: 'the Artifacts page',
+    run: (_, env) => { env.navigate('/artifacts') },
+  },
   {
     name: 'git', usage: '[project]', busyOk: true,
     help: 'the Git page: agent pull requests, branches, history, who can open the repo',
