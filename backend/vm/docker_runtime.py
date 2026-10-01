@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..config import settings
-from . import boxes, transport_unix
+from . import boxes, deathnote, transport_unix
 from .transport_unix import UnixListener, UnixTransport, connect_checked
 
 GUEST_UID = 10001                    # the image's only user (vm/docker/Dockerfile)
@@ -250,6 +250,20 @@ def image_for(box: "boxes.Box") -> str:
     return {"service": settings.docker_image_svc,
             "builder": settings.docker_image_builder}.get(box.kind,
                                                           settings.docker_image_turn)
+
+
+def no_variant_image_message(box: "boxes.Box") -> str:
+    """A box that asks for an image variant (`desktop`, `dev`, ...) no Docker image
+    exists for. Variants are KVM layers; nothing here builds a Docker one, so the
+    old advice ("run docker-setup") could never help. It is a refusal, not a
+    fall-back to `main`: the operator asked for chromium and Xvfb, and a box that
+    quietly lacks them sends the model (and the `screenshot` tool's own "set the
+    profile's image to desktop") round in a circle."""
+    variant = box.image[0]
+    return (f"this box asks for the `{variant}` image variant, which has no Docker image "
+            f"({image_for(box)} is not built on this host, and only KVM layers are built "
+            f"for variants). Run the project in a KVM box instead (the project's Runs in, "
+            f"or its security profile's runtime), or set the image to `main`.")
 
 
 # --- the run spec -------------------------------------------------------------------
@@ -615,6 +629,13 @@ class DockerBox:
         self._to("starting")
         self.error = None
         try:
+            if self.box.image[0] != "main":
+                # a variant has no Docker image unless someone built one by hand:
+                # say so before any socket or proxy is set up for the box
+                rc, _, err = await cli.run("image", "inspect", "--format", "{{.Id}}",
+                                           image_for(self.box), timeout=20)
+                if rc != 0 and "no such image" in err.lower():     # (a down daemon is probe()'s)
+                    raise DockerError(no_variant_image_message(self.box))
             info = await probe()
             try:
                 iso = plan_isolation(info)
@@ -679,6 +700,8 @@ class DockerBox:
     def _run_failed(self, err: str) -> str:
         err = err.strip()
         if "Unable to find image" in err or "No such image" in err:
+            if self.box.image[0] != "main":
+                return no_variant_image_message(self.box)
             return (f"image {image_for(self.box)} is not built on this host: "
                     "run `python -m backend.cli docker-setup`")
         return f"docker run failed: {err[:300]}"
@@ -693,6 +716,26 @@ class DockerBox:
             return ""
         lines = [ln.strip() for ln in (out + err).splitlines() if ln.strip()]
         return " | ".join(lines)[-400:]
+
+    async def death_note(self) -> str:
+        """Why a turn lost this box's guest, read BEFORE anything removes the
+        container: its state (exit code, whether a process was OOM-killed) and
+        last output. '' when docker will not say. guest_turn puts it in the
+        turn's error and the box's history; the container's logs are otherwise
+        lost with it (2026-10-01: no trace of why a guest closed mid-turn)."""
+        name = container_name(self.box)
+        rc, out, err = await cli.run("inspect", "--format", "{{json .State}}", name,
+                                     timeout=10)
+        state = None
+        if rc == 0:
+            try:
+                state = json.loads(out.strip())
+            except ValueError:
+                return ""
+        elif "no such" not in err.lower():
+            return ""
+        return deathnote.docker_note(state, int(self.box.mem_mb),
+                                     await self._logs_tail(6) if state is not None else "")
 
     async def _start_listeners(self) -> None:
         t = self.box.transport

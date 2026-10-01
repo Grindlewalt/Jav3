@@ -33,6 +33,9 @@ _COPY_MODULES = {
     # the loop decides both, so a guest turn must decide them the same way
     "backend/agent/tools/toolsections.py": "backend/agent/tools/toolsections.py",
     "backend/navplaybook.py": "backend/navplaybook.py",
+    # the memory cgroup + OOM priority run_code and screenshot start their
+    # processes under, so a runaway command cannot take the box down with it
+    "backend/memguard.py": "backend/memguard.py",
 }
 
 # IN_GUEST_TOOLS and BOX_ONLY_TOOLS live in backend/agent/tools/inguest.py (imported

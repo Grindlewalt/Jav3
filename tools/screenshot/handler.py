@@ -31,6 +31,8 @@ import socket
 import time
 from urllib.parse import urlsplit
 
+from backend import memguard
+
 MAX_W = 1280
 MAX_H = 4096
 MAX_BYTES = 1_000_000
@@ -184,9 +186,11 @@ def chromium_argv(binary: str, url: str, out: str, width: int, height: int,
 
 async def _exec(argv: list[str], *, timeout: float, env: dict | None = None,
                 cwd: str | None = None) -> int:
+    memguard.setup()        # chromium is what outgrew a desktop box (2026-10-01)
     proc = await asyncio.create_subprocess_exec(
         *argv, env=env, cwd=cwd, stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+        stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
+        preexec_fn=memguard.confine)
     try:
         return await asyncio.wait_for(proc.wait(), timeout)
     except asyncio.TimeoutError:
@@ -246,10 +250,12 @@ class _Xvfb:
         if self.running() and self.geom == (w, h):
             return
         await self.stop()
+        memguard.setup()
         self.proc = await asyncio.create_subprocess_exec(
             "Xvfb", DISPLAY, "-screen", "0", f"{w}x{h}x24", "-nolisten", "tcp",
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
+            preexec_fn=memguard.confine)
         self.geom = (w, h)
         sock = f"/tmp/.X11-unix/X{DISPLAY[1:]}"
         for _ in range(50):
@@ -356,7 +362,7 @@ async def _app_mode(command, wait_ms: int, width: int, height: int) -> str:
     proc = await asyncio.create_subprocess_exec(
         *command, env=env, cwd=str(cwd), stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL, stdin=asyncio.subprocess.DEVNULL,
-        start_new_session=True)
+        start_new_session=True, preexec_fn=memguard.confine)
     raw = _out_path("raw.png")
     try:
         await asyncio.sleep(wait_ms / 1000)

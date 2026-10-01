@@ -21,7 +21,7 @@ import signal
 import tempfile
 import time
 
-from backend import writes
+from backend import memguard, writes
 from backend.agent.tools import toolctx
 from backend.config import settings
 
@@ -72,10 +72,9 @@ def _limits(cpu_seconds: int) -> None:
     # No RLIMIT_AS on purpose. It caps *virtual* address space, and V8 (node,
     # npm, and anything that embeds it — esbuild, vite) reserves far more
     # virtual memory than it ever commits; a 512MB AS cap made `npm` abort with
-    # SIGABRT while bare `node` only just fit. On a fixed-RAM guest that cap
-    # bought almost nothing beyond physical RAM anyway — real memory is bounded
-    # by the guest's RAM ceiling + the OOM killer, which only touches this
-    # disposable guest. CPU time is the responsiveness guard instead, and it
+    # SIGABRT while bare `node` only just fit. Real (resident) memory is bounded
+    # below, by a memory cgroup under the guest's RAM, not by an address-space
+    # rlimit. CPU time is the responsiveness guard instead, and it
     # tracks the run's own wall-clock timeout (times a few cores of headroom) so
     # a legitimate long build isn't SIGXCPU'd early while a runaway still can't
     # outlast its deadline.
@@ -88,6 +87,11 @@ def _limits(cpu_seconds: int) -> None:
             resource.setrlimit(limit, (val, val))
         except (ValueError, OSError):
             pass
+    # Memory is the one limit the VM boundary does not give: a command that
+    # outgrew the box took the run-turn server's vsock down with it (the
+    # 2026-10-01 chromium crash). It joins the work cgroup (a ceiling below the
+    # box's RAM) and becomes the OOM killer's first pick; see backend/memguard.py.
+    memguard.confine()
     os.setsid()                     # own process group, so timeout kills all of it
 
 
@@ -268,6 +272,8 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
         before = None               # no project: nothing to stage artifacts into
 
     argv = (["python3", "-c", code] if code else ["/bin/sh", "-c", command])
+    memguard.setup()                # the work cgroup, made once (None off a KVM guest)
+    kills_before = memguard.oom_kills()
     script = None
     if command:
         # Run the command from a script file, not `sh -c <command>`: with -c the
@@ -392,6 +398,9 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
         lines.append("(no output)")
     if detached:
         lines.append(detached)
+    kills_after = memguard.oom_kills()
+    if kills_before is not None and kills_after is not None and kills_after > kills_before:
+        lines.append(memguard.oom_note(kills_after - kills_before))
 
     # network failures here are almost always the monitored-egress gate, not a
     # permanent wall — surface the fix instead of letting the model give up.
