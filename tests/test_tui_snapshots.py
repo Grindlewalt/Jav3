@@ -11,11 +11,14 @@ failure prints the diff. After an intended change:
 
 and look at `git diff tests/tui_snapshots` before committing it.
 
-Why pexpect + pyte and not Textual's run_test(size=...): run_test is headless with its own
-colour system, so it cannot tell a 256-colour terminal's rounding from truecolor, and it
-never emits the escape codes Terminal.app receives. Here the client picks its colours from
-TERM like it does for the operator, and a truecolor code in the output fails the test.
-(~3 s per page, one process each; the 10 run in parallel under -n.)
+Why pexpect + pyte and not Textual's run_test(size=...): run_test builds the app on a
+truecolor console whatever TERM says (app.truecolor is True), so the client would draw its
+truecolor themes; TEXTUAL_COLOR_SYSTEM=256 fixes that and starts in 0.5 s instead of ~2.5 s,
+but it still reports Rich's colours before they are rounded to the 256 indexes the terminal
+receives, which is where grey-on-grey and blended accents show up. Here the client picks its
+colours from TERM like it does for the operator, the snapshot holds the indexes, and a
+truecolor code in the output fails the test. (~2 s per page, one process each: ~23 s serial,
+~8 s under -n 6.)
 """
 import difflib
 import os

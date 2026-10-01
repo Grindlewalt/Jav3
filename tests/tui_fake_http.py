@@ -527,7 +527,7 @@ class SeededServer(FakeServer):
             return logged(J(messages_of(cid)))
         if m := re.fullmatch(r"/api/conversations/(\d+)/info", path):
             return logged(J(info_of(int(m[1]))))
-        if path == "/api/chat" and method == "POST":
+        if path == "/api/chat" and method == "POST" and not (self.post_status or self.post_error):
             body = json.loads(request.content)
             self.posts.append(body)
             cid = body.get("conversation_id") or self.next_cid
