@@ -120,3 +120,57 @@ async def test_post_into_a_live_agent_node_is_refused(client, monkeypatch):
     monkeypatch.setitem(agents_run._active_runs, cid, object())
     r = await client.post("/api/chat", json={"message": "hey", "conversation_id": cid})
     assert r.status_code == 409
+
+
+# --- ROBUST-09: a failing turn says why, in the stream, the log and the transcript
+
+
+async def _fail_turn(client, monkeypatch, exc):
+    monkeypatch.setattr(chat_mod, "guest_turn", _raising(exc))
+    seen = []
+    orig = chat_mod.bus.publish
+    monkeypatch.setattr(chat_mod.bus, "publish",
+                        lambda chan, ev: (seen.append(ev), orig(chan, ev))[1])
+    post = asyncio.create_task(client.post("/api/chat", json={"message": "hello"}))
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        if chat_mod._active_turns:
+            break
+    cid = max(chat_mod._active_turns)
+    await _settle(cid)
+    await asyncio.gather(post, return_exceptions=True)
+    return cid, [e for e in seen if e.get("type") == "error"]
+
+
+@pytest.mark.parametrize("exc", [asyncio.TimeoutError(), AssertionError(),
+                                 httpx.ReadTimeout("")])
+async def test_blank_exception_still_reads_as_something(client, monkeypatch, caplog, exc):
+    with caplog.at_level(logging.ERROR, logger="jav3.chat"):
+        cid, errs = await _fail_turn(client, monkeypatch, exc)
+    assert len(errs) == 1 and errs[0]["message"]
+    assert type(exc).__name__ in errs[0]["message"]
+    assert any(str(cid) in r.getMessage() and r.exc_info for r in caplog.records)
+
+
+async def test_failed_turn_is_in_the_transcript(client, monkeypatch):
+    cid, errs = await _fail_turn(client, monkeypatch, RuntimeError("the guest went away"))
+    assert errs[0]["message"] == "the guest went away"
+    rows = await _roles(client, cid)
+    assert [r for r, _ in rows] == ["user", "assistant"]
+    assert rows[-1][1] == "(turn failed: the guest went away)"
+
+
+async def test_incognito_failure_leaves_nothing(client, monkeypatch):
+    monkeypatch.setattr(chat_mod, "guest_turn", _raising(RuntimeError("boom")))
+    r = await client.post("/api/chat", json={"message": "secret", "ephemeral": True})
+    assert r.status_code == 200
+    for _ in range(100):
+        if not chat_mod._active_turns:
+            break
+        await asyncio.sleep(0.05)
+    db = await get_db()
+    try:
+        async with db.execute("SELECT COUNT(*) AS n FROM messages") as cur:
+            assert (await cur.fetchone())["n"] == 0
+    finally:
+        await db.close()

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import shutil
 import uuid
 from typing import Literal
@@ -29,6 +30,7 @@ from .vm.guest_turn import guest_turn
 # require_actor: the operator's cookie OR an enrolled device's Bearer token, so
 # a paired CLI can drive chat. Sensitive control-plane routers stay require_user.
 router = APIRouter(prefix="/api", tags=["chat"], dependencies=[Depends(require_actor)])
+log = logging.getLogger("jav3.chat")
 
 
 class ChatRequest(BaseModel):
@@ -1054,10 +1056,17 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         bus.publish(chan, _final_event(conversation_id, content, late))
         raise
     except Exception as exc:  # surfaced to any tail rather than lost
-        err = {"type": "error", "message": str(exc)}
+        msg = _error_text(exc)
+        # a turn is a detached task: with nobody watching, this line is the
+        # only trace of why it ended (str(exc) is blank for a timeout)
+        log.exception("chat turn %s failed: %s", conversation_id, msg)
+        err = {"type": "error", "message": msg}
         late = late + await agentmsg.close_operator_inbox(conversation_id)
         if late:
             err["undelivered"] = late
+        if db is not None and not ephemeral:
+            await _persist_failure(db, conversation_id, msg, model_name,
+                                   tools_before, rec)
         bus.publish(chan, err)
     finally:
         # normally already closed above; this covers a path that raised
@@ -1135,6 +1144,33 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         localexec.cancel_conversation(conversation_id)
         operator_ask.cancel_conversation(conversation_id)
         bus.close_job(chan)
+
+
+def _error_text(exc: BaseException) -> str:
+    """What the operator reads when a turn fails. str() of a timeout, an
+    assert or a dropped stream is "" (the TUI then shows just "error"), so fall
+    back to the repr, which names the type."""
+    return str(exc).strip() or repr(exc)
+
+
+async def _persist_failure(db, conversation_id: int, msg: str, model_name,
+                           tools_before: int | None, rec) -> None:
+    """Leave the failure in the transcript, the way a stop leaves its marker:
+    a turn that dies while nobody watches would otherwise reload as a user
+    message with no reply, and the tool calls it already ran would attach to
+    the NEXT reply's activity. Best-effort — the error event still goes out."""
+    try:
+        cur = await db.execute(
+            "INSERT INTO messages (conversation_id, role, content, model) "
+            "VALUES (?, 'assistant', ?, ?)",
+            (conversation_id, f"(turn failed: {msg[:500]})", model_name))
+        await _link_tool_calls(db, conversation_id, tools_before, cur.lastrowid)
+        await db.commit()
+        if rec is not None:
+            await rec.link(cur.lastrowid)
+    except Exception:  # noqa: BLE001 — the transcript row is best-effort
+        log.warning("could not record the failure of chat turn %s", conversation_id,
+                    exc_info=True)
 
 
 def _final_event(conversation_id: int, content: str, late: list[str]) -> dict:
