@@ -85,6 +85,11 @@ _starting: set[str] = set()                  # slugs inside start_run, before _r
 _driving: set[str] = set()
 _drive_began: set[str] = set()
 _live_items: dict[int, dict] = {}            # conversation id -> {project, item_id, title}
+# (project, item id) -> its port block number. Handed out round-robin and kept for
+# the process's life, so a retry reuses its block and a server an item left
+# running is not handed to the next item (PLANS-09)
+_port_blocks: dict[tuple[str, str], int] = {}
+_port_cursor = 0
 
 
 def _now() -> str:
@@ -619,7 +624,24 @@ don't wait for a reply. send_message to="?" lists the addresses. Messages to you
 arrive between your reasoning rounds."""
 
 
-def _item_task(plan: dict, it: dict, deps: list[dict]) -> str:
+def item_ports(slug: str, item_id: str) -> tuple[int, int]:
+    """The block of ports this item may bind, first and last (PLANS-09). All
+    items of all projects share the shared box's network namespace; with no
+    allocation they picked the same ports (8099 held by a teammate's server,
+    8000 by an earlier item's) and nothing reaped what they started."""
+    global _port_cursor
+    key = (slug, item_id)
+    n = _port_blocks.get(key)
+    if n is None:
+        n = _port_cursor % max(1, settings.plan_port_blocks)
+        _port_cursor += 1
+        _port_blocks[key] = n
+    first = settings.plan_port_base + n * settings.plan_port_block
+    return first, first + settings.plan_port_block - 1
+
+
+def _item_task(plan: dict, it: dict, deps: list[dict],
+               ports: tuple[int, int] | None = None) -> str:
     parts = [f"[item {it['id']}] {it['title']}",
              f"\nYou are working item {it['id']} of the plan \"{plan['title']}\". "
              "Do exactly this item, nothing more.",
@@ -645,6 +667,14 @@ def _item_task(plan: dict, it: dict, deps: list[dict]) -> str:
             if h.get("progress"):
                 line += f"\n  got to: {h['progress']}"
             parts.append(line)
+    if ports:
+        parts.append(
+            f"\n# Ports\nThis item owns ports {ports[0]}\u2013{ports[1]} on the shared box; "
+            "teammates have their own blocks. If you start a server, bind one of these "
+            "(never a fixed port like 8000, 8080 or 8099), run it in the background with "
+            "its output sent to a file, and stop it before you call plan_report: save "
+            "its PID when you start it and kill that. A server left running keeps its "
+            "port until the box is scrubbed.")
     rounds = plan.get("max_iterations") or settings.plan_item_max_iterations
     parts.append(f"\n# Budget\nYou have about {rounds} tool rounds (several calls can go in "
                  "one round). Spend at most a fifth of them looking around, then build. "
@@ -1099,7 +1129,7 @@ async def _run_item(slug: str, job_id: str, root_id: int, plan: dict, it: dict,
                     deps: list[dict], m: dict) -> dict:
     """One attempt of one item, as a headless agent run under the plan's head."""
     from . import agents_run
-    task = _item_task(plan, it, deps)
+    task = _item_task(plan, it, deps, item_ports(slug, it["id"]))
     item_id, title = it["id"], it["title"]
 
     async def on_open(cid: int) -> None:

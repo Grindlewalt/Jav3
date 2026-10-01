@@ -284,6 +284,13 @@ class Settings(BaseSettings):
     # call counts as hung.
     plan_stall_call_seconds: int = 1800
     plan_tick_seconds: float = 5.0
+    # Every plan item owns a block of plan_port_block ports on the shared box
+    # (one network namespace for all items and projects), handed out round-robin
+    # from plan_port_base so a server an item leaves running does not collide with
+    # the next item's. Keep the range below the kernel's ephemeral ports (32768+).
+    plan_port_base: int = 20000
+    plan_port_block: int = 10
+    plan_port_blocks: int = 500
     # While items run, the runner pulls their guest writes home this often (and
     # after every settle), so the host sees the files and a guest crash loses
     # at most this much (orchestrator.flush_workspace).

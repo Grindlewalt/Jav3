@@ -987,3 +987,37 @@ async def test_peer_messages_inside_a_plan_run_taint_only_from_a_tainted_sender(
     # the head's stall nudge is fixed plan text, not model output
     await plan_mod._nudge(head, {"id": "i2"}, {"cid": i2})
     assert await drained_taint(i2) is False, "the plan head's own nudge tainted the item"
+
+
+async def test_each_item_gets_its_own_port_block_in_its_brief(client, monkeypatch):
+    """PLANS-09: items on the shared box share one network namespace and each
+    picked its own port (8099 held by a teammate, 8000 by an earlier item's
+    server), so they collided and leaked. Every item now owns a block of ports
+    (stable across its retries) and its brief says to use only those, send the
+    server's output to a file and stop what it starts."""
+    import re
+    await _put(client, [{"title": "a", "brief": "a"}, {"title": "b", "brief": "b"},
+                        {"title": "c", "brief": "c", "depends_on": ["i1"]}], max_concurrent=3)
+    seen: dict = {}
+
+    async def done(cid, attempt, text):
+        await _report(cid, "failed" if (attempt == 1 and "[item i1]" in text) else "done", "x")
+        return "ok"
+    monkeypatch.setattr(agents_run, "run_agent_turn", _scripted(
+        {"i1": done, "i2": done, "i3": done}, seen))
+    monkeypatch.setattr(plan_mod, "complete_text", lambda *a, **k: _const("R"))
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+
+    def block(text):
+        m = re.search(r"ports (\d+)–(\d+)", text)
+        assert m, text[-1500:]
+        return int(m.group(1)), int(m.group(2))
+    b1, b2, b3 = block(seen["i1"][0]), block(seen["i2"][0]), block(seen["i3"][0])
+    assert len({b1, b2, b3}) == 3, "items shared a port block"
+    ranges = sorted([b1, b2, b3])
+    assert all(a[1] < b[0] for a, b in zip(ranges, ranges[1:])), "port blocks overlap"
+    assert len(seen["i1"]) == 2 and block(seen["i1"][1]) == b1, "a retry kept its block"
+    ports_rule = seen["i2"][0].split("# Ports", 1)[1].split("\n#", 1)[0]
+    assert "stop" in ports_rule and "output" in ports_rule
