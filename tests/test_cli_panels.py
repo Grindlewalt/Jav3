@@ -334,8 +334,10 @@ async def test_a_dialog_for_an_unfocused_panels_turn_opens_over_everything_with_
         await split(pilot, app, "/new-panel", want=2)           # focus on 2
         srv.feeds[0].put(ask("a1", 4, "Delete the build dir?", kind="permission"))
         assert await wait_for(lambda: type(app.screen).__name__ == "AskUser")
-        head = " ".join(str(w.render()) for w in app.screen.query("Static"))
-        assert "panel 1" in head and "chat #4" in head
+        def head() -> str:
+            return " ".join(str(w.render()) for w in app.screen.query("Static"))
+        assert await wait_for(lambda: "panel 1" in head())      # drawn once it is mounted
+        assert "chat #4" in head()
         assert "needs input" in titles(app)[1] and "needs input" not in titles(app)[2]
         type(app.screen).GRACE = 0                              # no settling time for the keys
         await pilot.press("1")                                  # the first option
@@ -470,6 +472,15 @@ async def test_new_chat_and_other_commands_act_on_the_focused_panel_only():
         assert await wait_for(lambda: app.chats[1].cid is None)
         assert app.chats[2].cid == 7
         assert list(app.chats[2].log.query("UserMsg")) and not list(app.chats[1].log.query("UserMsg"))
+
+
+def test_the_panel_keys_are_free_in_the_leader_table():
+    """ctrl+x + an arrow / 1-4 / z / 0 belong to the panels: no command or page may use them."""
+    app = jav3.build_tui("http://h:1", "jvd_x")
+    taken = {c.leader for _, c in app.unique_commands() if c.leader}
+    taken |= {s.leader for s in jav3.PAGE_SPECS if s.leader}
+    assert not taken & {"z", "0", "1", "2", "3", "4", "left", "right", "up", "down"}
+    assert "new-panel" in app.commands and app.commands["new-panel"].busy_ok
 
 
 async def test_tab_from_the_prompt_picks_rows_in_the_focused_panels_transcript():

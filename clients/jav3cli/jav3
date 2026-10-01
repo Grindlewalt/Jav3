@@ -1752,9 +1752,8 @@ class Command:
 # in a PageHost, with a back stack: esc returns to the page before, the chat by
 # default). A page is a registry entry (below) and, for the ones the terminal has, a
 # `Page` widget class inside build_tui. The line is parsed once, in
-# `Jav3App.run_command`: the arguments the page gets, and a trailing `panel` that asks
-# for a new panel instead of replacing the view (panels arrive in the next step; for
-# now it opens in place and says so).
+# `Jav3App.run_command`: the arguments the page gets, and a trailing `panel` that opens
+# it in a new panel instead of replacing the view (see "panels" below).
 
 SECURITY_TABS = ("queue", "network", "logs", "secrets", "persistent", "profiles", "rules",
                  "calls")
@@ -4285,7 +4284,8 @@ def build_tui(base: str, token: str, **kw):
     # page may assume it owns the terminal: it sizes itself from its container, has no
     # bindings of the app's, and leaves by asking its host (`leave()`, `go_home()`,
     # `open_page()` post a message the host handles) rather than calling the app. A
-    # host keeps a back stack of its pages; the chat is the page at the bottom of it.
+    # host keeps a back stack of its pages; the chat is the page at the bottom of it. Each
+    # panel has a host of its own.
     # Modal dialogs stay ModalScreens: they sit over whatever page is showing.
 
     class Page(Vertical, can_focus=True):
@@ -4443,11 +4443,14 @@ def build_tui(base: str, token: str, **kw):
         def __init__(self, *children, **kw) -> None:
             super().__init__(*children, **kw)
             self.stack: list[Page] = []
+            # known from the start: a new panel's host is asked what it shows before its
+            # children have mounted
+            self._base = next((c for c in children if isinstance(c, Page)), None)
 
         @property
         def current(self) -> Page:
             if not self.stack:           # the app asks before this widget has mounted
-                base = next(iter(self.query(Page)))
+                base = self._base or next(iter(self.query(Page)))
                 self.stack = [base]
                 base.set_visible(True)
             return self.stack[-1]
@@ -10462,7 +10465,8 @@ def build_tui(base: str, token: str, **kw):
             self.dispatch("/new")
 
         def action_agents_view(self) -> None:
-            """← on an empty prompt (a drawer in the next step): /agents."""
+            """← on an empty prompt (a drawer in the next step): /agents, in the focused
+            panel."""
             self.run_worker(self.open_page("agents"), group="nav")
 
         async def open_node(self, node: dict, panel=None, new_panel: bool = False) -> None:
@@ -10768,6 +10772,9 @@ def build_tui(base: str, token: str, **kw):
                          ("ctrl+c", "clear prompt · interrupt · twice to quit"),
                          ("ctrl+x then a key", "leader: see the table above; "
                                                "b = notifications"),
+                         ("panels", f"/new-panel splits this one (at most {MAX_PANELS}); "
+                                    "/vms panel opens a page in a new one. ctrl+x then "
+                                    "←↑↓→ moves, 1-4 jumps, z zooms, 0 closes"),
                          ("ctrl+p", "command palette"),
                          ("ctrl+n", "new chat"),
                          ("ctrl+b", "notifications sidebar (● n = unread)"),
@@ -11730,6 +11737,10 @@ def build_tui(base: str, token: str, **kw):
             self.chats[number] = chat
             self.panel_tree = tree_split(self.panel_tree, here, number, cut)
             await area.mount(Panel(chat))
+            for _ in range(100):            # its transcript composes just after it mounts
+                if chat.log is not None and chat.log.is_attached and chat.new_hint is not None:
+                    break
+                await asyncio.sleep(0.02)
             area.relayout()
             self.focus_panel(number)
             if name:
