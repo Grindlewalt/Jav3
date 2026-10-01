@@ -118,6 +118,14 @@ async def test_error_object_in_the_stream_is_an_error(wire):
     assert ei.value.status == 503 and calls["n"] == 3     # 5xx: retried
 
 
+async def test_deepseek_insufficient_resource_finish_is_retried(wire):
+    replies, calls = wire
+    replies += [_resp([_chunk({"content": "x"}), _chunk({}, finish="insufficient_system_resource")]),
+                _resp([_chunk({"content": "x done"}), _chunk({}, finish="stop"), DONE])]
+    out = await _run()
+    assert out[-1]["content"] == "x done" and calls["n"] == 2
+
+
 async def test_error_object_with_a_4xx_code_is_not_retried(wire):
     replies, calls = wire
     err = 'data: {"error": {"message": "context too long", "code": 400}}\n\n'

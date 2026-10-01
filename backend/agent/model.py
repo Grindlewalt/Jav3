@@ -310,9 +310,11 @@ class ModelClient:
                         continue
                     if choices[0].get("finish_reason"):
                         finish = choices[0]["finish_reason"]
-                        if finish == "error":   # OpenRouter's way to say it broke mid-stream
+                        # the provider broke mid-stream (OpenRouter: error, DeepSeek:
+                        # insufficient_system_resource): a retry may get through
+                        if finish in ("error", "insufficient_system_resource"):
                             raise ModelError("model API stream error: the provider "
-                                             "ended the reply with finish_reason error",
+                                             f"ended the reply with finish_reason {finish}",
                                              retryable=True)
                     delta = choices[0].get("delta") or {}
                     if delta.get("content"):
