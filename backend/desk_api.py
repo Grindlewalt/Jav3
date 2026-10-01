@@ -114,7 +114,7 @@ async def put_grants(device_id: int, body: GrantsBody):
 @router.post("/{device_id:int}/stop")
 async def stop_desk(device_id: int, user: dict = Depends(require_user)):
     await _desk_or_404(device_id)
-    return await desk.stop(device_id, by=user["username"])
+    return await desk.stop(device_id, by=user["username"], by_operator=True)
 
 
 @router.get("/{device_id:int}/actions")

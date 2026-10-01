@@ -11,7 +11,7 @@ import json
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from . import egress, egress_auto, lanaccess, secctx, security, sse
+from . import egress, egress_auto, lanaccess, secactions, secctx, secruns, security, sse
 from .auth import require_user
 from .db import get_db
 
@@ -196,14 +196,16 @@ class RevokeBody(BaseModel):
 
 
 @router.post("/allowlist/revoke")
-async def revoke(body: RevokeBody):
+async def revoke(body: RevokeBody, user: dict = Depends(require_user)):
     db = await get_db()
     try:
         if body.id is not None:
             res = await egress.revoke_auto(db, body.id)
         else:
             res = await egress.remove_host(db, body.project, body.host,
-                                           which="deny" if body.list == "deny" else "allow")
+                                           which="deny" if body.list == "deny" else "allow",
+                                           actor=str(user.get("username") or "operator"),
+                                           by_operator=True)
     finally:
         await db.close()
     if not res.get("ok"):
@@ -271,13 +273,15 @@ async def get_policy(slug: str):
 
 
 @router.put("/policy/{slug}")
-async def put_policy(slug: str, body: PolicyBody):
+async def put_policy(slug: str, body: PolicyBody, user: dict = Depends(require_user)):
     db = await get_db()
     try:
         if body.allow is None and body.deny is None and body.mode is not None:
             res = await egress.set_policy(db, slug, mode=body.mode,
                                           inherit_general=body.inherit_general,
-                                          hosts=body.hosts or [])
+                                          hosts=body.hosts or [],
+                                          actor=str(user.get("username") or "operator"),
+                                          by_operator=True)
         else:
             res = await egress.set_lists(db, slug, allow=body.allow, deny=body.deny)
     finally:
@@ -302,7 +306,7 @@ async def promote_to_profile(slug: str, body: PromoteBody, user: dict = Depends(
         res = await egress.promote_to_profile(
             db, slug, body.host, body.profile_id,
             which="deny" if body.list == "deny" else "allow",
-            actor=str(user.get("username") or "operator"))
+            actor=str(user.get("username") or "operator"), by_operator=True)
     finally:
         await db.close()
     if not res.get("ok"):
@@ -336,7 +340,8 @@ async def put_lan(slug: str, body: LanBody, user: dict = Depends(require_user)):
     db = await get_db()
     try:
         res = await lanaccess.set_(db, slug, enabled=body.enabled, allow=body.allow,
-                                   actor=str(user.get("username") or "operator"))
+                                   actor=str(user.get("username") or "operator"),
+                                   by_operator=True)
     finally:
         await db.close()
     if not res.get("ok"):
@@ -372,11 +377,58 @@ async def set_grant(slug: str, body: GrantBody):
 # --- security alerts ---------------------------------------------------------
 
 @security_router.get("/events")
-async def security_events(unacknowledged: bool = False, limit: int = 100):
+async def security_events(unacknowledged: bool = False, limit: int = 100,
+                          queue: bool = False):
+    """`queue` is what the Review Queue shows: waiting rows without the record
+    tier (those stay in the history, which lists everything)."""
     db = await get_db()
     try:
         return {"events": await security.list_events(
-            db, unacknowledged_only=unacknowledged, limit=limit)}
+            db, unacknowledged_only=unacknowledged, limit=limit, queue_only=queue)}
+    finally:
+        await db.close()
+
+
+@security_router.get("/runs")
+async def security_runs(queue: bool = True, events: int = 0):
+    """The Queue as cards, one per run (backend/secruns.py): counts per kind,
+    the worst tier on top, running or finished. Resolves the info-only groups
+    whose run has ended first. `events=N` puts each card's newest N events in it."""
+    db = await get_db()
+    try:
+        return await secruns.list_runs(db, queue=queue, events=max(0, min(events, 50)))
+    finally:
+        await db.close()
+
+
+@security_router.get("/runs/{key:path}")
+async def security_run(key: str):
+    """One card with its events, each with what the agent was doing (untrusted
+    text, labelled as such) and the one-liners of what rules filed as normal work."""
+    db = await get_db()
+    try:
+        out = await secruns.run_detail(db, key)
+        if out is None:
+            raise HTTPException(status_code=404, detail="no such group (it may have been resolved)")
+        return out
+    finally:
+        await db.close()
+
+
+class GroupAckBody(BaseModel):
+    only: str | None = None         # reports | alerts | (both)
+
+
+@security_router.post("/runs/{key:path}/ack")
+async def ack_run(key: str, body: GroupAckBody | None = None):
+    """Acknowledge what waits in one card (Acknowledge / Resolve group): the
+    agent reports (`only: reports`), the alerts (`alerts`), or everything."""
+    only = body.only if body else None
+    if only not in (None, "reports", "alerts"):
+        raise HTTPException(status_code=400, detail="only must be reports or alerts")
+    db = await get_db()
+    try:
+        return await secruns.acknowledge_group(db, key, only=only)
     finally:
         await db.close()
 
@@ -403,6 +455,61 @@ async def ack(eid: int):
         return await security.acknowledge(db, eid)
     finally:
         await db.close()
+
+
+# --- what to DO about an event (backend/secactions.py) -----------------------------
+
+async def _acting(eid: int, fn, *args, **kw):
+    """Run one secactions function on event `eid`: 404 for no such event, 409 with
+    the sentence it refused with (the operator reads it as is)."""
+    db = await get_db()
+    try:
+        ev = await security.get_event(db, eid)
+        if ev is None:
+            raise HTTPException(status_code=404, detail="no such event")
+        try:
+            return {"ok": True, **await fn(db, ev, *args, **kw)}
+        except secactions.ActionRefused as e:
+            raise HTTPException(status_code=409, detail=str(e))
+    finally:
+        await db.close()
+
+
+@security_router.post("/events/{eid}/revert")
+async def revert_file(eid: int):
+    """Put a flagged file back to git HEAD (or delete it when the agent created it).
+    Refused when the file changed since the alert, or there is nothing committed."""
+    return await _acting(eid, secactions.revert_file)
+
+
+@security_router.post("/events/{eid}/uncut")
+async def uncut_host(eid: int):
+    """Lift an anomaly cut: the proxy's block and the nftables drop."""
+    return await _acting(eid, secactions.uncut_host)
+
+
+class KillBody(BaseModel):
+    sig: str = "TERM"               # TERM | KILL
+
+
+@security_router.post("/events/{eid}/kill")
+async def kill_process(eid: int, body: KillBody | None = None):
+    """Signal the process an alert named: only if it still is that process."""
+    return await _acting(eid, secactions.kill_process, body.sig if body else "TERM")
+
+
+class StopBody(BaseModel):
+    scope: str = "agent"            # agent: that conversation | run: everything under its root
+    confirm: bool = False           # a whole run only stops with this
+    dry_run: bool = False
+
+
+@security_router.post("/events/{eid}/stop")
+async def stop_agent(eid: int, body: StopBody | None = None):
+    """Stop the agent that raised the event, or (scope=run, confirm=true) the whole
+    run it belongs to. Without confirm, or with dry_run, it only says what it would stop."""
+    b = body or StopBody()
+    return await _acting(eid, secactions.stop, b.scope, confirm=b.confirm, dry_run=b.dry_run)
 
 
 class BaselineBody(BaseModel):
@@ -456,7 +563,7 @@ async def allow_process(eid: int, body: BaselineBody,
             db, kind="proc_baseline_changed", severity="info",
             summary=f"You allowed {what} in every box's process baseline",
             detail={"scope": body.scope, "exe": entry["exe"], "unit": unit,
-                    "from_event": eid, "acknowledged": n})
+                    "from_event": eid, "acknowledged": n}, actor=security.OPERATOR)
         await security.acknowledge(db, audit)
         return {"ok": True, **entry, "acknowledged": n}
     finally:
@@ -492,7 +599,8 @@ async def remove_operator_baseline(body: BaselineRemoveBody):
         audit = await security.raise_event(
             db, kind="proc_baseline_changed", severity="info",
             summary=f"You took {what} off the allowed-process list",
-            detail={"scope": "remove", "exe": body.exe, "unit": body.unit})
+            detail={"scope": "remove", "exe": body.exe, "unit": body.unit},
+            actor=security.OPERATOR)
         await security.acknowledge(db, audit)
         return {"ok": True}
     finally:

@@ -10,6 +10,8 @@ import { MessageBody } from '../ToolActivity.jsx'
 import { activityMark, makeTurnFolder, newTurn, seedParts } from '../turnEvents.js'
 import { useDockHeight, useFollow } from '../useFollow.js'
 import TurnStatus from '../TurnStatus.jsx'
+import ResumeBar from '../ResumeBar.jsx'
+import { RESUME_TEXT, resumable, resumeUrl } from '../resume.js'
 import { useAsk } from '../ask.jsx'
 import ModelPicker from '../ModelPicker.jsx'
 import { AskPanel, PermissionModeSelect, useOperatorAsks, usePermissionMode } from '../AskUser.jsx'
@@ -331,6 +333,26 @@ export default function Chat({
   useLayoutEffect(() => { followRun() }, [messages, followRun])
   useDockHeight(dockRef)
 
+  // A security card's "Open chat at step" (/c/<id>?step=<n>, kept by routes.jsx):
+  // once the transcript has rendered, scroll the message list to that step and
+  // flash it. Direct scrollTop, like the follow logic: never the page.
+  useEffect(() => {
+    if (!conversationId || !messages.length) return
+    let want = null
+    try { want = sessionStorage.getItem('jarvis.chat.step') } catch { /* private mode */ }
+    if (!want) return
+    const [cid, step] = want.split(':')
+    if (Number(cid) !== conversationId) return
+    const el = document.getElementById(`step-${step}`)
+    const box = scrollRef.current
+    if (!el || !box) return          // not drawn yet: the next messages change tries again
+    try { sessionStorage.removeItem('jarvis.chat.step') } catch { /* private mode */ }
+    const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop
+    box.scrollTop = Math.max(0, top - box.clientHeight / 3)
+    el.classList.add('step-hit')
+    setTimeout(() => el.classList.remove('step-hit'), 3600)
+  }, [conversationId, messages])
+
   // the composer grows with the draft, up to the CSS max-height. Past one line
   // the pill relaxes into a rounded box — .multi is that threshold.
   function autoGrow() {
@@ -553,7 +575,9 @@ export default function Chat({
     asks.settle()   // the turn's open question is void now; do not leave a dead card
   }
 
-  async function send(resend = null) {
+  // `url` sends somewhere other than /api/chat: the resume endpoint, which
+  // refuses (409) unless the chat's last turn really died
+  async function send(resend = null, url = undefined) {
     const text = (resend ?? input).trim()
     if (!text || busy) return
     // the orb is on screen only while the chat is empty — grab where it is
@@ -581,6 +605,7 @@ export default function Chat({
           if (ev.type === 'final' || ev.type === 'error') settled = true
           handleTurnEvent(ev, mine)
         },
+        url,
       )
     } catch (err) {
       if (mine !== gen.current) return   // the reader moved on; the turn runs regardless
@@ -591,7 +616,7 @@ export default function Chat({
       } else {
         // refused before anything streamed: drop the two optimistic messages
         setMessages((m) => m.slice(0, -2))
-        setInput(text)
+        if (!url) setInput(text)   // a resume has no draft to give back
         setMessages((m) => [...m, { role: 'error',
           content: err.status === 409 && err.detail === 'turn_in_progress'
             ? 'a turn is still running in this chat — wait for it to finish'
@@ -619,6 +644,12 @@ export default function Chat({
       api(`/api/conversations/${done}/messages`)
         .then((r) => setChatJobs(r.jobs || [])).catch(() => {})
     }
+  }
+
+  // the last turn died and the server saved it: send it on from its last step
+  function resume() {
+    if (conversationId && !busy && !temporary)
+      send(RESUME_TEXT, resumeUrl(conversationId))
   }
 
   // Swipe in from the left edge to open the chat list on a phone — the quick
@@ -803,6 +834,9 @@ export default function Chat({
                 ? <Fragment key={i}>{row}<div className="chat-approvals">
                     {approvalRows(approvalsAfter.get(i))}</div></Fragment>
                 : row))}
+              {conversationId && !busy && !temporary && resumable(messages) && (
+                <ResumeBar onResume={resume} />
+              )}
               {approvalsTail.length > 0 && (
                 <div className="chat-approvals">{approvalRows(approvalsTail)}</div>
               )}

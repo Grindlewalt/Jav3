@@ -160,6 +160,7 @@ async def _events(kind=None):
         if kind:
             q += " WHERE kind = ?"
             args = (kind,)
+        q += " ORDER BY id"     # raise order: an index on kind would otherwise pick the order
         async with db.execute(q, args) as cur:
             return [dict(r) for r in await cur.fetchall()]
     finally:

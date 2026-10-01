@@ -224,7 +224,7 @@ async def test_a_repeat_counts_onto_the_unacknowledged_row(db, feed):
 
 
 async def test_acknowledged_or_different_is_a_new_row(db):
-    kw = dict(kind="docker_weak_isolation", summary="no gVisor", project="docker-a")
+    kw = dict(kind="gateway_cap", summary="a flood", project="docker-a")
     first = await security.raise_event(db, **kw, severity="warn")
     await security.acknowledge(db, first)
     second = await security.raise_event(db, **kw, severity="warn")
@@ -318,8 +318,8 @@ async def test_records_leave_the_badge_but_not_the_log(client):
 
 
 async def test_the_level_setting_round_trips(client):
-    assert (await client.get("/api/notifications/settings")).json() == {
-        "level": "approvals", "levels": ["critical", "approvals", "all"]}
+    got = (await client.get("/api/notifications/settings")).json()
+    assert got["level"] == "approvals" and got["levels"] == ["critical", "approvals", "all"]
     r = await client.put("/api/notifications/settings", json={"level": "all"})
     assert r.status_code == 200 and r.json()["level"] == "all"
     assert (await client.get("/api/notifications")).json()["level"] == "all"

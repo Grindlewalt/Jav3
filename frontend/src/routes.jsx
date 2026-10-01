@@ -23,8 +23,14 @@ import NotFound from './pages/NotFound.jsx'
 // first run only, so never prefetched
 function OpenChat() {
   const { id } = useParams()
+  const step = new URLSearchParams(useLocation().search).get('step')
   if (/^\d+$/.test(id || '')) {
     try { localStorage.setItem('jarvis.chat.last', id) } catch { /* private mode */ }
+    // /c/<id>?step=<n>: a security card's "Open chat at step". Chat scrolls to it
+    // once the transcript is loaded (pages/Chat.jsx), then forgets it.
+    try {
+      if (/^\d+$/.test(step || '')) sessionStorage.setItem('jarvis.chat.step', `${id}:${step}`)
+    } catch { /* private mode */ }
   }
   return <Navigate to="/" replace />
 }
@@ -38,7 +44,17 @@ const AgentDefinitions = lazy(() => import('./pages/Agents.jsx')
 const SkillsPanel = lazy(() => import('./SkillsPanel.jsx'))
 const AgentOutputs = lazy(() => import('./AgentOutputs.jsx'))
 const Tools = lazy(() => import('./pages/Tools.jsx'))
+// Settings is a layout route like Agents: the shell + tab strip is the default
+// export, Models the index child, Alerts / Access / System siblings.
 const Settings = lazy(() => import('./pages/Settings.jsx'))
+const SettingsModels = lazy(() => import('./pages/Settings.jsx')
+  .then((m) => ({ default: m.ModelsTab })))
+const SettingsAlerts = lazy(() => import('./pages/Settings.jsx')
+  .then((m) => ({ default: m.AlertsTab })))
+const SettingsAccess = lazy(() => import('./pages/Settings.jsx')
+  .then((m) => ({ default: m.AccessTab })))
+const SettingsSystem = lazy(() => import('./pages/Settings.jsx')
+  .then((m) => ({ default: m.SystemTab })))
 
 // Review is a layout route: the shell (title + tab strip) is the default
 // export and the queue is the index child, so the tabs are real URLs —
@@ -64,6 +80,7 @@ const Memory = lazy(() => import('./pages/Memory.jsx'))
 // so moving between them never remounts it mid-stream
 const Shell = lazy(() => import('./shell/Shell.jsx'))
 const Schedules = lazy(() => import('./pages/Schedules.jsx'))
+const Git = lazy(() => import('./pages/Git.jsx'))
 
 // reachable, not advertised
 const Voice = lazy(() => import('./pages/Voice.jsx'))
@@ -80,6 +97,7 @@ const PREFETCH = [
   () => import('./pages/Voice.jsx'), () => import('./pages/Artifacts.jsx'),
   () => import('./pages/Vms.jsx'), () => import('./pages/Catalogue.jsx'),
   () => import('./pages/Persistent.jsx'), () => import('./pages/Profiles.jsx'),
+  () => import('./pages/Git.jsx'),
 ]
 
 function usePrefetchRoutes(enabled) {
@@ -142,11 +160,18 @@ export default function AppRoutes({ onLogin, onSetup, authed }) {
           <Route path="catalogue" element={<Catalogue />} />
         </Route>
         <Route path="/tools" element={<Tools />} />
-        <Route path="/settings" element={<Settings />} />
+        <Route path="/settings" element={<Settings />}>
+          <Route index element={<SettingsModels />} />
+          <Route path="alerts" element={<SettingsAlerts />} />
+          <Route path="access" element={<SettingsAccess />} />
+          <Route path="system" element={<SettingsSystem />} />
+        </Route>
 
         {/* the ⋯ menu */}
         <Route path="/memory" element={<Memory />} />
         <Route path="/schedules" element={<Schedules />} />
+        <Route path="/git" element={<Git />} />
+        <Route path="/git/:slug" element={<Git />} />
         <Route path="/shell/*" element={<Shell />} />
 
         {/* the old addresses keep working: bookmarks, toasts, muscle memory */}

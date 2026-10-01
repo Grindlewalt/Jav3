@@ -13,6 +13,7 @@ import yaml
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from . import toolcatalog
 from .agent.tools import imported
 from .agent.tools.registry import compile_registry, load_registry, _parse_md
 from .auth import require_user
@@ -237,9 +238,14 @@ def _why_not(e: dict) -> str:
 async def list_tools():
     """Everything in the registry, granted or not — the Tools tab reads this.
     `group` is yours (skills) / imported (OpenClaw, pinned) / builtin (tool
-    folders shipped with the code)."""
+    folders shipped with the code). A built-in row also says how the model
+    sees it (toolcatalog: `section`, `action`, `core`, `merged_into`,
+    `internal`, `gating`); built-in rows come first-seen in the model's own
+    order, and `sections` describes the sections in use, in that order."""
+    entries = load_registry()
+    cat = toolcatalog.catalogue(entries)
     out = []
-    for e in load_registry():
+    for e in entries:
         row = {
             "name": e["name"],
             "group": _group(e),
@@ -253,6 +259,9 @@ async def list_tools():
             # the model is handed it right now, and `reason` is why not
             row["reason"] = _why_not(e)
             row["offered"] = not row["reason"]
+            row.update(cat["rows"].get(e["name"]) or {
+                "section": e.get("section") or "other", "action": None, "core": False,
+                "merged_into": None, "internal": e.get("internal") is True, "gating": []})
         if row["group"] == "imported":
             row.update({
                 "slug": e["dir"], "enabled": imported.offerable(e),
@@ -263,4 +272,7 @@ async def list_tools():
                 "body": e.get("body", ""),
             })
         out.append(row)
-    return {"tools": out}
+    rank = {n: i for i, n in enumerate(cat["order"])}
+    # the built-in rows in the order the model's tool list has them, after the rest
+    out.sort(key=lambda r: rank.get(r["name"], len(rank)) if r["group"] == "builtin" else -1)
+    return {"tools": out, "sections": cat["sections"]}

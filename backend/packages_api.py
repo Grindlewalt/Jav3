@@ -160,7 +160,8 @@ async def approve(pkg_id: int, body: ApproveBody, user: dict = Depends(require_u
     try:
         try:
             row = await packages.approve(db, pkg_id, target_variant=body.target_variant,
-                                         decided_by=user.get("username") or "operator")
+                                         decided_by=user.get("username") or "operator",
+                                         by_operator=True)
         except LookupError as e:
             raise HTTPException(404, str(e))
         except (packages.PackageError, images.RecipeError) as e:
@@ -186,7 +187,8 @@ async def reject(pkg_id: int, body: RejectBody, user: dict = Depends(require_use
     try:
         try:
             return await packages.reject(db, pkg_id, reason=body.reason,
-                                         decided_by=user.get("username") or "operator")
+                                         decided_by=user.get("username") or "operator",
+                                         by_operator=True)
         except LookupError as e:
             raise HTTPException(404, str(e))
         except packages.PackageError as e:

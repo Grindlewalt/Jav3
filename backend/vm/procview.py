@@ -17,6 +17,19 @@ Everything else is shown, with all of its descendants under it. Tags:
               nohup'd or not) but not the server itself
   unexpected  anything else, and raises `unexpected_process` (warn; critical
               in a service box), once per (box boot, exe, unit)
+A run_code process that outlived its command (a server the agent started, a
+Chromium it launched and its crashpad handler) is re-parented to init. In a VM
+it keeps the guest server's cgroup, so it is `run_code` already; a Docker box
+has no units, so it would read as unexpected. A turn box's process outside any
+unit whose only ancestor is init is also `run_code`: it is RECORDED, once per
+(boot, exe, script), as an unexpected_process that the rule files quietly
+("started by the agent"), never alerted.
+
+Vendor units. An image's baseline also holds every .service the distribution
+ships (`units_vendor`, recorded at image build): timer-started units such as
+apt-listchanges, fstrim and man-db are never "enabled", and each new stock unit
+was one more false alarm. A unit that is not in the image (one the agent or an
+attacker added to a running box) still alerts.
 
 Host truth. Once per cycle the host samples ITS OWN kernel (`ss -tinH`) for
 TCP sockets whose peer is a box's guest IP: the proxy's accepted sockets and
@@ -64,6 +77,7 @@ MAX_CONNS_PER_PROC = 64
 MAX_TREE_DEPTH = 64
 MAX_EVENT_BYTES = 256 * 1024        # a bigger box row is announced, not pushed
 MAX_ALERTS_PER_BOX_HOUR = 10
+MAX_AGENT_RECORDS_PER_BOOT = 50     # quiet "started by the agent" rows, per box boot
 _MAX_INT = 2 ** 53
 _MAX_PID = 4194304                  # PID_MAX_LIMIT
 _STR = {"exe": 256, "cmd": 512, "comm": 64, "user": 32, "unit": 128,
@@ -233,14 +247,18 @@ def entries_from_image_baseline(data: dict) -> list[dict]:
     (truncated, no path, no unit) and are NOT turned into entries: a bare name
     would whitelist that name in every cgroup (the capture itself runs
     python3/ps/sh), so it would hide exactly the implant this view exists to
-    show. The built-in systemd/getty/dbus patterns are kept alongside."""
+    show. The built-in systemd/getty/dbus patterns are kept alongside.
+    `units_vendor` (every .service the distribution ships) is trusted the same
+    way as the enabled ones."""
     out = [{"exe": e, "unit": u} for e, u in BUILTIN_BASELINE]
     seen = set()
-    for u in data.get("units_enabled") or []:
-        if (isinstance(u, str) and _UNIT_NAME.match(u)
-                and not _NEVER_BASELINE_UNITS.match(u) and u not in seen):
-            seen.add(u)
-            out.append({"exe": "*", "unit": u})
+    for key in ("units_enabled", "units_vendor"):
+        for u in data.get(key) or []:
+            if (isinstance(u, str) and _UNIT_NAME.match(u)
+                    and not _NEVER_BASELINE_UNITS.match(u) and u not in seen):
+                seen.add(u)
+                # a template (getty@.service) runs as getty@tty1.service
+                out.append({"exe": "*", "unit": u.replace("@.", "@*.")})
     return out
 
 
@@ -250,7 +268,7 @@ def parse_baseline(data: Any, source: str = "image") -> Baseline:
     WP5's image baseline shape (units_enabled, processes, ...) is converted
     by entries_from_image_baseline."""
     if (isinstance(data, dict) and "entries" not in data
-            and ("units_enabled" in data or "processes" in data)):
+            and ("units_enabled" in data or "units_vendor" in data or "processes" in data)):
         data = {"v": 1, "entries": entries_from_image_baseline(data)}
     entries = data.get("entries") if isinstance(data, dict) else data
     if not isinstance(entries, list):
@@ -442,15 +460,44 @@ def _descendants(root: int, kids: dict[int, list[int]], limit: int = MAX_PROCS) 
     return seen
 
 
+def _orphans_of_run_code(procs: dict[int, dict], self_pid: int | None, self_unit: str,
+                         kids: dict[int, list[int]]) -> set[int]:
+    """Processes a turn box's run_code started that no unit and no ancestor
+    says so: outside every systemd unit, re-parented to init (ppid 0 or 1, or a
+    parent the snapshot does not hold), with everything under them. Only where
+    the guest server itself has no unit (Docker: the cgroup namespace hides
+    them); in a VM such a process keeps the server's unit and is run_code
+    already, and a process outside any unit there stays unexpected."""
+    if not self_pid or self_unit:
+        return set()
+    out: set[int] = set()
+    for pid, p in procs.items():
+        if (p["unit"] == "" and not p["kthread"] and pid not in (1, self_pid)
+                and pid not in out and (p["ppid"] <= 1 or p["ppid"] not in procs)):
+            out.add(pid)
+            out |= _descendants(pid, kids)
+    return out
+
+
 def classify(snap: dict, box, baseline: Baseline,
              approved: set[int] | None) -> dict[int, str]:
     """pid -> tag for every process that is NOT OS (before descendants)."""
+    return _classify(snap, box, baseline, approved)[0]
+
+
+def _classify(snap: dict, box, baseline: Baseline,
+              approved: set[int] | None) -> tuple[dict[int, str], set[int]]:
+    """(tags, the pids tagged run_code by the orphan rule: see
+    _orphans_of_run_code, which evaluate records quietly)."""
     procs = snap["procs"]
     self_pid = snap["self_pid"] if snap["self_pid"] in procs else None
     self_unit = procs[self_pid]["unit"] if self_pid else ""
     kids = _children_map(procs)
     self_desc = _descendants(self_pid, kids) if self_pid else set()
     turn_box = box.kind in ("shared", "project")
+    orphans = (_orphans_of_run_code(procs, self_pid, self_unit, kids)
+               if turn_box else set())
+    agent: set[int] = set()
     tags: dict[int, str] = {}
     for pid, p in procs.items():
         # PID 1 is the box's own init: systemd in a VM (init.scope, already
@@ -472,8 +519,12 @@ def classify(snap: dict, box, baseline: Baseline,
             continue
         if baseline.matches(p["exe"], p["unit"]):
             continue
+        if pid in orphans:
+            tags[pid] = "run_code"
+            agent.add(pid)
+            continue
         tags[pid] = "unexpected"
-    return tags
+    return tags, agent
 
 
 def shown_tags(snap: dict, tags: dict[int, str]) -> dict[int, str]:
@@ -659,7 +710,7 @@ def evaluate(box, snap: dict, st: BoxState, *, baseline: Baseline,
         st.miss.clear()
         st.alerted.clear()
     st.baseline_source = baseline.source
-    own = classify(snap, box, baseline, approved)
+    own, agent = _classify(snap, box, baseline, approved)
     tags = shown_tags(snap, own)
     by_pid, orphans, owned = build_conns(snap, box, host_socks or {}, hostnames, inbound)
     tree = render_tree(snap, tags, by_pid, box, st, now)
@@ -682,7 +733,34 @@ def evaluate(box, snap: dict, st: BoxState, *, baseline: Baseline,
                        f"{(p['exe'] or p['comm'] or '?')[:120]}",
             "detail": {"box_id": box.id, "pid": pid, "exe": p["exe"], "cmd": p["cmd"],
                        "unit": p["unit"], "user": p["user"],
-                       "baseline": baseline.source}})
+                       "baseline": baseline.source,
+                       # what Kill process checks the pid against, and the box's boot
+                       "start_ticks": p["start_ticks"], "boot_id": snap["boot_id"]}})
+
+    # what the agent's own run_code left running (the orphan rule): recorded,
+    # once per (boot, exe, script), and filed quietly: not an alert. Kept apart
+    # from the alerts so the per-hour rate cap below never lets them crowd one out.
+    quiet: list[dict] = []
+    for pid in sorted(agent):
+        p = snap["procs"][pid]
+        exe = p["exe"] or p["comm"] or "?"
+        argv = (p["cmd"] or "").split()
+        script = argv[1] if len(argv) > 1 and not argv[1].startswith("-") else ""
+        key = ("agent", exe, script)
+        if key in st.alerted:
+            continue
+        if sum(1 for k in st.alerted if k[0] == "agent") >= MAX_AGENT_RECORDS_PER_BOOT:
+            break                              # a guest cannot fill the log with names
+        st.alerted.add(key)
+        quiet.append({
+            "kind": "unexpected_process", "severity": "warn",
+            "summary": f"Process started by the agent in box {box.id}: {exe[:120]}",
+            "cause": f"agent-process:{box.id}:{exe}:{script}"[:300],
+            "rule": "started by the agent's run_code and left running",
+            "detail": {"box_id": box.id, "pid": pid, "exe": p["exe"], "cmd": p["cmd"],
+                       "unit": p["unit"], "user": p["user"], "ppid": p["ppid"],
+                       "baseline": baseline.source, "start_ticks": p["start_ticks"],
+                       "boot_id": snap["boot_id"]}})
 
     # host-held connections from this guest that no reported process owns
     if host_socks is not None:
@@ -701,7 +779,8 @@ def evaluate(box, snap: dict, st: BoxState, *, baseline: Baseline,
                     "kind": "proc_report_mismatch", "severity": "warn",
                     "summary": f"Box {box.id}: host sees a connection from guest port "
                                f"{t[1]} that no reported process owns",
-                    "detail": {"box_id": box.id, "reason": "unreported_connection",
+                    "detail": {"box_id": box.id, "boot_id": snap["boot_id"],
+                               "reason": "unreported_connection",
                                "guest": f"{t[0]}:{t[1]}", "peer": f"{t[2]}:{t[3]}",
                                "host": hostnames.get(t[1]),
                                "host_bytes_out": hs.get("bytes_received"),
@@ -721,7 +800,8 @@ def evaluate(box, snap: dict, st: BoxState, *, baseline: Baseline,
                         "kind": "proc_report_mismatch", "severity": "warn",
                         "summary": f"Box {box.id}: pid {pid} reports different byte "
                                    f"counts than the host saw on port {r['lport']}",
-                        "detail": {"box_id": box.id, "reason": "byte_mismatch", "pid": pid,
+                        "detail": {"box_id": box.id, "boot_id": snap["boot_id"],
+                                   "reason": "byte_mismatch", "pid": pid,
                                    "exe": snap["procs"][pid]["exe"],
                                    "guest": f"{t[0]}:{t[1]}", "peer": f"{t[2]}:{t[3]}",
                                    "guest_bytes_out": r["guest_bytes_out"],
@@ -756,7 +836,7 @@ def evaluate(box, snap: dict, st: BoxState, *, baseline: Baseline,
            "baseline": baseline.source, "truncated": snap["truncated"],
            "totals": totals, "orphan_conns": orphans[:MAX_CONNS_PER_PROC],
            "tree": tree}
-    return row, kept
+    return row, kept + quiet
 
 
 # --- I/O: fetch from a guest, sample the host, read the DB ---------------------------
@@ -814,6 +894,100 @@ async def rpc_ps(box) -> Any:
     if reply.get("ok") is not True:
         raise ValueError(clean_str(reply.get("error") or "ps failed", "error"))
     return reply.get("snapshot")
+
+
+class KillRefused(ValueError):
+    """Kill process will not signal this pid (it is gone, it changed, the
+    snapshot is too old...). The text is written for the operator."""
+
+
+Killer = Callable[[Any, dict], Awaitable[Any]]
+_killers: dict[str, Killer] = {}
+
+
+def register_killer(kind: str, fn: Killer) -> None:
+    """Override how a kind of box is asked to kill a pid (tests)."""
+    _killers[kind] = fn
+
+
+async def rpc_kill(box, spec: dict) -> Any:
+    """Default kill: newline JSON `{"mode":"kill_pid", pid, exe, start_ticks, cmd,
+    sig}` on the same port as `ps`; reply `{"type":"kill","ok":..,"why":..,
+    "error":..}`. The guest re-checks the pid against /proc before it signals."""
+    port = boxes.PORT_SVCD if box.kind == "service" else boxes.PORT_RUNTURN
+    sock = await box.transport.connect(port)
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.sock_sendall(sock, json.dumps({"mode": "kill_pid", **spec}).encode() + b"\n")
+        line = await _read_line(sock, 64 * 1024)
+    finally:
+        sock.close()
+    reply = json.loads(line)
+    if not isinstance(reply, dict) or reply.get("type") != "kill":
+        # an older guest answers an unknown mode with an error event
+        raise KillRefused("this box's guest is older than Kill process: restart the box to "
+                          "get the new one, or stop the process by hand")
+    return reply
+
+
+def _find_box(box_id: str):
+    for b in boxes.all_boxes():
+        if b.id == box_id:
+            return b
+    return None
+
+
+async def kill_process(box_id: str, pid: int, exe: str, *, cmd: str | None = None,
+                       start_ticks: int | None = None, boot_id: str | None = None,
+                       sig: str = "TERM") -> dict:
+    """Kill one process an alert named, but only if it is still THAT process: the
+    host's last ps snapshot of the box must hold the same pid with the same
+    program (and the same start time, else the same command line), and the box
+    must not have rebooted since; then the guest re-checks the same against its
+    live /proc before it signals. Anything else raises KillRefused with the reason.
+    Returns {"pid", "sig", "box_id"}."""
+    if sig not in ("TERM", "KILL"):
+        raise KillRefused("signal must be TERM or KILL")
+    if not box_id or not isinstance(pid, int) or isinstance(pid, bool) or pid < 2:
+        raise KillRefused("this alert does not name a process in a box")
+    box = _find_box(box_id)
+    st = _state.get(box_id)
+    if box is None or not _pollable(box):
+        raise KillRefused(f"box {box_id} is not running, so there is nothing to kill")
+    if st is None or st.snap is None or st.reported_at is None:
+        raise KillRefused("no process snapshot of this box yet: try again in a few seconds")
+    if is_stale(st, time.time()):
+        raise KillRefused("the last process snapshot of this box is out of date: "
+                          "the process list cannot be checked right now")
+    snap = st.snap
+    if boot_id and snap["boot_id"] != boot_id:
+        raise KillRefused("this box has rebooted since the alert: the process is gone")
+    p = snap["procs"].get(pid)
+    if p is None:
+        raise KillRefused(f"process {pid} is no longer running")
+    if p["exe"] != (exe or ""):
+        raise KillRefused(f"pid {pid} is now {p['exe'] or 'another program'}, not {exe}: "
+                          "not killing it")
+    if start_ticks is not None:
+        if p["start_ticks"] != start_ticks:
+            raise KillRefused(f"pid {pid} was started again since the alert: not killing it")
+    elif cmd is not None and p["cmd"] != cmd:
+        raise KillRefused(f"pid {pid} runs a different command now: not killing it")
+    elif cmd is None:
+        raise KillRefused("this alert has neither a start time nor a command line to check")
+    spec = {"pid": pid, "exe": p["exe"], "start_ticks": p["start_ticks"], "cmd": p["cmd"],
+            "sig": sig}
+    try:
+        reply = await asyncio.wait_for(_killers.get(box.kind, rpc_kill)(box, spec),
+                                       FETCH_TIMEOUT_S * 2)
+    except KillRefused:
+        raise
+    except (OSError, ValueError, asyncio.TimeoutError) as e:
+        raise KillRefused(f"could not reach the box: {clean_str(str(e) or type(e).__name__, 'error')}")
+    if not isinstance(reply, dict) or reply.get("ok") is not True:
+        why = clean_str((reply or {}).get("error") if isinstance(reply, dict) else "", "error")
+        raise KillRefused(why or "the box refused to kill it")
+    return {"pid": pid, "sig": sig, "box_id": box_id}
 
 
 _pw_mod = None
@@ -948,6 +1122,20 @@ def is_stale(st: BoxState, now: float) -> bool:
     return st.reported_at is None or now - st.reported_at > 3 * period or st.error is not None
 
 
+def _bound_conversation(box) -> int | None:
+    """The conversation whose turn is bound to this box right now: the proxy's
+    own rule (egress_proxy.attribute) for a project box, a joined one, or the
+    shared box with turns of ONE project. Two projects on the shared box, no
+    live turn, or a service box: None (ambiguous or nobody: the alert groups by
+    the box and its boot instead). Attribution only."""
+    try:
+        from . import egress_proxy
+        cid = egress_proxy.attribute(box).get("conversation_id")
+        return int(cid) if cid is not None else None
+    except Exception:  # noqa: BLE001 — an alert never waits on its attribution
+        return None
+
+
 async def poll_once(now: float | None = None) -> list[dict]:
     """One cycle over every running box. Returns the rows it produced."""
     from ..db import get_db
@@ -979,11 +1167,13 @@ async def poll_once(now: float | None = None) -> list[dict]:
                 continue
             st.snap, st.reported_at, st.error, st.row = res, now, None, row
             rows.append(row)
+            cid = _bound_conversation(box) if alerts else None
             for a in alerts:
                 try:
                     await security.raise_event(db, kind=a["kind"], severity=a["severity"],
                                                project=box.project, summary=a["summary"],
-                                               detail=a["detail"])
+                                               detail=a["detail"], cause=a.get("cause"),
+                                               rule=a.get("rule"), conversation_id=cid)
                 except Exception:  # noqa: BLE001
                     log.exception("procview: raising %s", a["kind"])
     finally:

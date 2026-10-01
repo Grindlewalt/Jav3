@@ -1,7 +1,9 @@
-import { useContext, useEffect, useState } from 'react'
+import { useContext, useEffect, useRef, useState } from 'react'
 import { Link, Outlet, useLocation } from 'react-router-dom'
 import { api, subscribeSse } from '../api.js'
 import SecurityBoard from '../SecurityBoard.jsx'
+import SecurityHistory from '../SecurityHistory.jsx'
+import RunCards from '../SecurityRuns.jsx'
 import TriagePanel from '../TriagePanel.jsx'
 import Posture from '../Posture.jsx'
 import ScrollHint from '../ScrollHint.jsx'
@@ -9,10 +11,11 @@ import { useEgressDecide } from '../EgressDecide.jsx'
 import { PendingCountContext } from '../Notices.jsx'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
-import { sevClass, ts } from '../format.js'
+import { liveInQueue } from '../securityQueue.js'
+import { cardsFor, cardTotals } from '../securityRuns.js'
 import {
   ALLOW_ALWAYS_TIP, ALLOW_ONCE_TIP, ASKS_LEDE, DENY_TIP, FAULTS_LEDE, REFUSED_TAG, askAge,
-  askKindText, faultText, ledeFor, SECURITY_LEDES,
+  askKindText, ledeFor, SECURITY_LEDES,
 } from '../securityCopy.js'
 import EmptyState from '../components/EmptyState.jsx'
 import Page from '../components/Page.jsx'
@@ -48,7 +51,8 @@ export function ReviewQueue({ slug }) {
   const [names, setNames] = useState({})                     // slug -> display name
   const [gitReqs, setGitReqs] = useState({})                 // slug -> [pending requests]
   const [pending, setPending] = useState([])                 // egress host approvals
-  const [alerts, setAlerts] = useState([])                   // unacknowledged security events
+  const [runs, setRuns] = useState([])                       // the Queue's cards, one per run
+  const reload = useRef(null)                                // a live event schedules one refetch
   const [asks, setAsks] = useState([])                       // questions waiting in chats
   const [busy, setBusy] = useState(false)
   const [board, setBoard] = useState(null)   // {id, seed} — the open evidence board
@@ -98,10 +102,10 @@ export function ReviewQueue({ slug }) {
     api('/api/notifications').then((r) => setAsks(r.asks || [])).catch(() => {})
   }
   function loadAlerts() {
-    api('/api/security/events?unacknowledged=true').then((r) => {
-      let evs = r.events || []
-      if (slug) evs = evs.filter((e) => (e.project_slug || e.project) === slug)
-      setAlerts(evs)
+    // the Queue: one card per run (backend/secruns.py), each with its newest
+    // events and what the agent was doing at each. Audit lines stay in the History.
+    api('/api/security/runs?events=8').then((r) => {
+      setRuns(cardsFor(r.runs || [], slug))
     }).catch(() => {})
   }
 
@@ -152,22 +156,21 @@ export function ReviewQueue({ slug }) {
     }
   }, [key]) // eslint-disable-line
 
-  // live security alerts prepend as they fire; a repeat (the server coalesced
-  // it onto a row still in the queue) only bumps that row's count
+  // a live security alert changes a card's counts and its newest events: refetch
+  // the cards once (a burst of events is one request, not one each)
   useEffect(() => {
     return subscribeSse('/api/security/stream', (ev) => {
       if (ev.type !== 'security_event') return
+      // filed already acknowledged (their own action, a rule's "normal work", or
+      // a Record-only kind) or an audit line: it is history, not a queue item
+      if (!liveInQueue(ev)) return
       const proj = ev.project_slug || ev.project
       if (slug && proj !== slug) return
-      setAlerts((a) => a.some((x) => x.id === ev.id)
-        ? a.map((x) => (x.id === ev.id && ev.count
-          ? { ...x, count: ev.count, last_seen: new Date().toISOString() } : x))
-        : [{
-          id: ev.id, kind: ev.kind, severity: ev.severity, project_slug: proj,
-          summary: ev.summary, detail: ev.detail, acknowledged: false,
-          created_at: ev.created_at, count: ev.count || 1, tier: ev.tier }, ...a])
+      clearTimeout(reload.current)
+      reload.current = setTimeout(() => loadAlerts(), 600)
     })
-  }, [slug])
+  }, [slug]) // eslint-disable-line
+  useEffect(() => () => clearTimeout(reload.current), [])
 
   async function gitAct(s, id, verb) {
     if (verb === 'reject'
@@ -185,8 +188,7 @@ export function ReviewQueue({ slug }) {
   // picker as the Network tab (an unattributed row is put on a project you choose)
   const { decide: egressAct, picker } = useEgressDecide(loadEgress, { project: slug || null, names })
   async function ackAlert(id) {
-    try { await api(`/api/security/events/${id}/ack`, { method: 'POST' })
-      setAlerts((a) => a.filter((x) => x.id !== id)) }
+    try { await api(`/api/security/events/${id}/ack`, { method: 'POST' }); loadAlerts() }
     catch (e) { notifyError(e) }
   }
 
@@ -219,7 +221,7 @@ export function ReviewQueue({ slug }) {
   // Agent reports (harness_fault) are a list of their own: the alerts' bulk
   // acknowledge leaves them alone, and they have their own "Resolve all".
   async function ackAllAlerts(only) {
-    const n = (only ? faults : secAlerts).length
+    const n = only ? totals.reports : totals.need
     if (!await ask.confirm(only ? `Mark all ${n} agent reports resolved?`
                                 : `Acknowledge all ${n} alerts?`,
                            { confirmLabel: only ? 'Resolve all' : 'Acknowledge all' })) return
@@ -233,12 +235,11 @@ export function ReviewQueue({ slug }) {
     setBusy(false)
   }
 
-  const faults = alerts.filter((a) => a.kind === 'harness_fault')
-  const secAlerts = alerts.filter((a) => a.kind !== 'harness_fault')
+  const totals = cardTotals(runs)
   const multi = !slug && (slugs?.length || 0) > 1
   const projLabel = (s) => names[s] || s
   const gitTotal = (slugs || []).reduce((n, s) => n + (gitReqs[s]?.length || 0), 0)
-  const total = alerts.length + gitTotal + pending.length + svcReqs.length + pkgReqs.length
+  const total = totals.need + totals.reports + gitTotal + pending.length + svcReqs.length + pkgReqs.length
     + asks.length
 
   if (!slugs) return <div className="dim center-pad">…</div>
@@ -405,48 +406,30 @@ export function ReviewQueue({ slug }) {
         </section>
       )}
 
-      {/* ---- security alerts ---- */}
-      {secAlerts.length > 0 && (
+      {/* ---- security alerts: one card per run (alerts and the agents' own reports) ---- */}
+      {runs.length > 0 && (
         <section className="sbx-sec">
           <div className="sbx-sec-head">
             <h3>Security alerts</h3>
-            <span className="sec-count">{secAlerts.length}</span>
+            <span className="sec-count">{totals.need + totals.reports}</span>
             {/* ack_all is global — inside a single project's Workspace panel it
                 would silently clear other projects' alerts, so it stays off */}
             {!slug && (
               <div className="sec-actions">
-                <button className="ghost" disabled={busy}
-                        title="mark every alert as seen (agent reports stay)"
-                        onClick={() => ackAllAlerts(false)}>Acknowledge all</button>
+                {totals.need > 0 && (
+                  <button className="ghost" disabled={busy}
+                          title="mark every alert as seen (agent reports stay)"
+                          onClick={() => ackAllAlerts(false)}>Acknowledge all</button>)}
+                {totals.reports > 0 && (
+                  <button className="ghost" disabled={busy}
+                          title="mark every agent report resolved"
+                          onClick={() => ackAllAlerts(true)}>Resolve all reports</button>)}
               </div>
             )}
           </div>
-          {secAlerts.map((a) => (
-            <AlertRow key={a.id} a={a} onAck={ackAlert}
-                      onOpen={() => setBoard({ id: a.id, seed: a })} />
-          ))}
-        </section>
-      )}
-
-      {/* ---- what agents reported about Jav3's own tools: not security alerts ---- */}
-      {faults.length > 0 && (
-        <section className="sbx-sec">
-          <div className="sbx-sec-head">
-            <h3>Agent reports</h3>
-            <span className="sec-count">{faults.length}</span>
-            {!slug && (
-              <div className="sec-actions">
-                <button className="ghost" disabled={busy}
-                        title="mark every agent report resolved"
-                        onClick={() => ackAllAlerts(true)}>Resolve all</button>
-              </div>
-            )}
-          </div>
-          <p className="dim small net-lede">{FAULTS_LEDE}</p>
-          {faults.map((a) => (
-            <FaultRow key={a.id} a={a} onAck={ackAlert}
-                      onOpen={() => setBoard({ id: a.id, seed: a })} />
-          ))}
+          {totals.reports > 0 && <p className="dim small net-lede">{FAULTS_LEDE}</p>}
+          <RunCards runs={runs} slug={slug} onChanged={loadAlerts}
+                    onOpenBoard={(a) => setBoard({ id: a.id, seed: a })} />
         </section>
       )}
 
@@ -454,83 +437,6 @@ export function ReviewQueue({ slug }) {
         <SecurityBoard eventId={board.id} seed={board.seed}
                        onClose={() => setBoard(null)} onAck={ackAlert} />
       )}
-    </div>
-  )
-}
-
-// The one thing worth seeing without opening the board: WHAT the alert is
-// about. A queue of "write flag: new_import" rows is unscannable; a queue of
-// paths and hostnames is.
-function subjectOf(d) {
-  if (!d || typeof d !== 'object') return null
-  return d.path || d.host || d.username || d.peer || null
-}
-
-function AlertRow({ a, onAck, onOpen }) {
-  const sev = sevClass(a.severity)
-  // a summary that already names its subject ("… (from 10.0.0.82)") does not
-  // need the subject again on the line under it
-  const subj = subjectOf(a.detail)
-  const subject = subj && !String(a.summary || '').includes(subj) ? subj : null
-  return (
-    <div className={`sbx-row sev-${sev}`}>
-      <div className="grow rev-alert-main">
-        <div className="sbx-verdict-top rev-alert-top">
-          <span className={`tag sev-${sev}-tag`}>{a.severity}</span>
-          <span className="mono small">{a.kind}</span>
-          {a.project_slug && <span className="tag">{a.project_slug}</span>}
-          {/* the same alert again while this row waited: counted, not re-listed */}
-          {a.count > 1 && (
-            <span className="tag" title={`first ${ts(a.created_at)}, last ${ts(a.last_seen)} UTC`}>
-              ×{a.count}</span>)}
-          {a.triage_verdict === 'flag' && (
-            <span className="tag triage-flag" title={a.triage_reason}>⚑ {a.triage_reason}</span>)}
-          <span className="dim small">{ts(a.count > 1 && a.last_seen ? a.last_seen : a.created_at)}</span>
-        </div>
-        {/* the whole summary is the affordance — clicking it opens the board */}
-        <button type="button" className="rev-alert-open" onClick={onOpen}
-                title="open the evidence board">
-          <span className="rev-alert-summary">{a.summary}</span>
-          {subject && <span className="mono small rev-alert-subject">{subject}</span>}
-        </button>
-      </div>
-      <div className="sbx-right">
-        <button className="ghost" onClick={onOpen}
-                title="the flagged code, the diff, the directory, the traffic">
-          Inspect</button>
-        <button className="ghost" onClick={() => onAck(a.id)}>Acknowledge</button>
-      </div>
-    </div>
-  )
-}
-
-// One agent report: which tool, which chat, what went wrong. The chat link is
-// the point (a report with no way back to the turn that hit it is a riddle);
-// "Mark resolved" is the honest name for what the button does.
-function FaultRow({ a, onAck, onOpen }) {
-  const d = a.detail && typeof a.detail === 'object' ? a.detail : {}
-  return (
-    <div className="sbx-row sev-info">
-      <div className="grow rev-alert-main">
-        <div className="sbx-verdict-top rev-alert-top">
-          {d.tool && <span className="tag mono">{d.tool}</span>}
-          {a.project_slug && <span className="tag">{a.project_slug}</span>}
-          {d.conversation_id && (
-            <Link className="small" to={`/c/${d.conversation_id}`}
-                  title="open the chat where this happened">chat #{d.conversation_id}</Link>)}
-          <span className="dim small">{ts(a.created_at)}</span>
-        </div>
-        <button type="button" className="rev-alert-open" onClick={onOpen}
-                title="the whole report">
-          <span className="rev-alert-summary">{faultText(a.summary, d.tool)}</span>
-        </button>
-      </div>
-      <div className="sbx-right">
-        <button className="ghost" onClick={onOpen}>Inspect</button>
-        <button className="ghost" onClick={() => onAck(a.id)}
-                title="You have dealt with it, or noted the bug. It leaves this list.">
-          Mark resolved</button>
-      </div>
     </div>
   )
 }
@@ -581,6 +487,7 @@ export function ReviewHome() {
       <Posture />
       <TriagePanel />
       <ReviewQueue />
+      <SecurityHistory />
     </div>
   )
 }

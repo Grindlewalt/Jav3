@@ -228,7 +228,9 @@ async def test_402_becomes_one_plain_error_and_one_bell(client, broke):
         assert "unknown_error" not in str(e.value)         # the raw JSON does not leak through
     await asyncio.sleep(0.1)
     bells = await _bells()
-    assert len(bells) == 1 and bells[0]["severity"] == "critical"
+    # an empty account is an outage, not a breach: warn, so it never breaks
+    # through do-not-disturb (it still pings by default: security.DEFAULT_KIND_MODES)
+    assert len(bells) == 1 and bells[0]["severity"] == "warn"
     assert bells[0]["summary"] == str(e.value)
     assert provider_balance.is_empty() and provider_balance.reason() == str(e.value)
 

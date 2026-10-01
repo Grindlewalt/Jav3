@@ -404,8 +404,9 @@ async def test_decisions_record_the_username(client, db, monkeypatch):
     assert r.status_code == 200
     seen = []
 
-    async def reject(db, pkg_id, reason=None, decided_by="operator"):
+    async def reject(db, pkg_id, reason=None, decided_by="operator", by_operator=False):
         seen.append(decided_by)
+        assert by_operator                    # the route is the operator's click
         return {"ok": True}
     monkeypatch.setattr(packages, "reject", reject)
     r = await client.post("/api/packages/1/reject", json={"reason": "no"})

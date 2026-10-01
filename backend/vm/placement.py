@@ -232,10 +232,13 @@ def cap_warning(eff: dict) -> str | None:
     return None
 
 
-async def put(db, slug: str, body: dict, *, actor: str = "operator") -> dict:
+async def put(db, slug: str, body: dict, *, actor: str = "operator",
+              by_operator: bool = False) -> dict:
     """Store a project's placement. Raises PlacementError. Returns
     {setting, effective, warnings}. Every change is a `placement_changed`
-    event; a join is also a `box_joined` event."""
+    event; a join is also a `box_joined` event. `by_operator` is the operator
+    route saying the change is their own click (recorded quietly, no alert);
+    explicit, never inferred from `actor`, which is only a label."""
     from .. import security
     if not await _project_exists(db, slug):
         raise PlacementError("no such project", 404)
@@ -263,7 +266,8 @@ async def put(db, slug: str, body: dict, *, actor: str = "operator") -> dict:
             db, kind="placement_changed", severity="info", project=slug,
             summary=f"project {slug} now runs in {describe(eff)} (set by {actor})",
             detail={"project": slug, "from": old, "to": new, "effective": eff,
-                    "actor": actor})
+                    "actor": actor},
+            actor=security.OPERATOR if by_operator else None)
     if new["mode"] == "join" and (old or {}).get("box_id") != new["box_id"]:
         owner = owner_of(new["box_id"])
         await security.raise_event(
@@ -271,7 +275,8 @@ async def put(db, slug: str, body: dict, *, actor: str = "operator") -> dict:
             summary=f"project {slug} joined {new['box_id']} ({owner}'s box) by "
                     f"{actor}: the two share files and processes",
             detail={"project": slug, "box_id": new["box_id"], "owner": owner,
-                    "actor": actor, "warning": JOIN_WARNING})
+                    "actor": actor, "warning": JOIN_WARNING},
+            actor=security.OPERATOR if by_operator else None)
     if new["mode"] == "join":
         warnings.append(JOIN_WARNING)
     w = cap_warning(eff)

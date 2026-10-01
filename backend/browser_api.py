@@ -107,7 +107,7 @@ async def put_grant(device_id: int, body: GrantBody):
 @router.post("/{device_id:int}/stop")
 async def stop_browser(device_id: int, user: dict = Depends(require_user)):
     await _browser_or_404(device_id)
-    return await browser.stop(device_id, by=user["username"])
+    return await browser.stop(device_id, by=user["username"], by_operator=True)
 
 
 @router.get("/{device_id:int}/actions")

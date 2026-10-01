@@ -339,3 +339,44 @@ async def test_api_operator_only_and_round_trip(db):
         r = await c.get("/api/vm/boxes")
         row = next(x for x in r.json()["boxes"] if x["id"] == "p-mc")
         assert row["joined"] == [] and row["image_pending"] is None
+
+
+# --- the operator's own change is quiet, an agent's is not -----------------------------
+
+async def test_placement_events_are_quiet_only_when_the_operator_route_says_so(db):
+    """`actor` is only a label (the default is "operator"), so a call that merely
+    passes it still alerts; the route marks the click with by_operator."""
+    await add_project(db, "mc")
+    await add_project(db, "arm")
+    await placement.put(db, "mc", {"mode": "own"})
+    await placement.put(db, "arm", {"mode": "join:p-mc"})              # unmarked
+    for kind in ("placement_changed", "box_joined"):
+        ev = (await events(db, kind))[-1]
+        assert not ev["acknowledged"] and ev["actor"] is None, kind
+    await placement.put(db, "arm", {"mode": "own"})
+    n_changed = len(await events(db, "placement_changed"))
+    n_joined = len(await events(db, "box_joined"))
+    await placement.put(db, "arm", {"mode": "join:p-mc"}, actor="grindlewalt",
+                        by_operator=True)
+    changed = (await events(db, "placement_changed"))[n_changed:]
+    joined = (await events(db, "box_joined"))[n_joined:]
+    assert len(changed) == 1 and len(joined) == 1
+    for ev in changed + joined:
+        assert ev["acknowledged"] and ev["actor"] == "operator"
+        assert ev["quiet"] == "operator"
+
+
+async def test_the_placement_route_marks_the_operators_click(db):
+    from backend.auth import hash_password
+    from backend.main import app
+    await db.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                     ("operator", hash_password("pw")))
+    await db.commit()
+    await add_project(db, "mc")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        await c.post("/api/auth/login", json={"username": "operator", "password": "pw"})
+        r = await c.put("/api/projects/mc/placement", json={"mode": "own", "mem_mb": 600})
+        assert r.status_code == 200, r.text
+    (ev,) = await events(db, "placement_changed")
+    assert ev["acknowledged"] and ev["actor"] == "operator"

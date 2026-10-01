@@ -168,6 +168,8 @@ assert.equal(tabTitle('/vms/images/', 12), '(12) VMs: Images · Jav3')
 assert.equal(tabTitle('/security', 140), '(99+) Security · Jav3')
 assert.equal(tabTitle('/c/646', 0), 'Work · Jav3')
 assert.equal(tabTitle('/security/bogus', 0), 'Security · Jav3')      // an unknown tab keeps its section
+assert.equal(tabTitle('/git', 0), 'Git · Jav3')
+assert.equal(tabTitle('/git/benchmark-game', 2), '(2) Git · Jav3')
 assert.equal(tabTitle('/nowhere', 0), 'Not found · Jav3')
 assert.equal(tabTitle(undefined, undefined), 'Work · Jav3')
 

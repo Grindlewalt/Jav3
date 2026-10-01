@@ -10,8 +10,11 @@ model gateway (agent/model.py) hands the 402 to `refused`, which
   - remembers the provider is empty until a later call to it succeeds (`ok`),
     so a plan runner can pause instead of burning attempts: `is_empty()` /
     `reason()`,
-  - raises ONE critical security event per outage (the bell), coalesced onto its
-    unacknowledged twin across restarts by security.raise_event.
+  - raises ONE warn security event per outage (the bell), coalesced onto its
+    unacknowledged twin across restarts by security.raise_event. An empty
+    account is an outage, not a breach, so it is not critical (it would break
+    through do-not-disturb); security.DEFAULT_KIND_MODES keeps it pinging until
+    the operator says otherwise.
 
 `tidy` rewrites the guest's wrapped copy of that text back to the plain
 message, for whoever shows a turn's final content."""
@@ -110,7 +113,7 @@ async def _notice(provider: str, msg: str, detail: str) -> None:
         db = await get_db()
         try:
             await security.raise_event(
-                db, kind="provider_balance", severity="critical", summary=msg[:300],
+                db, kind="provider_balance", severity="warn", summary=msg[:300],
                 cause=f"provider_balance:{provider}",
                 detail={"provider": provider, "response": detail[:500]})
         finally:

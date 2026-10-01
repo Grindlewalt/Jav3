@@ -193,8 +193,8 @@ async def _open(pilot, app, cid=42):
     await pilot.pause(0.3)
     app.cid = cid
     app.dispatch("/security calls")
-    assert await _until(pilot, lambda: type(app.screen).__name__ == "SecurityScreen")
-    scr = app.screen
+    assert await _until(pilot, lambda: type(app.top).__name__ == "SecurityPage")
+    scr = app.top
     assert await _until(pilot, lambda: scr.loaded["calls"] and len(_rows(scr)) >= 1)
     await pilot.pause(0.1)
     return scr
@@ -232,8 +232,8 @@ async def test_calls_tab_is_reachable_by_8_and_by_tabbing():
     async with app.run_test(size=(150, 45)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/security")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "SecurityScreen")
-        scr = app.screen
+        assert await _until(pilot, lambda: type(app.top).__name__ == "SecurityPage")
+        scr = app.top
         await pilot.press("8")
         assert scr.tab == "calls" and scr.query_one("#sec-tab-calls").has_class("-on")
         await pilot.press("tab")
@@ -279,12 +279,12 @@ async def test_enter_views_the_captured_context():
     async with app.run_test(size=(150, 45)) as pilot:
         scr = await _open(pilot, app)
         await pilot.press("enter")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "View")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "View")
         assert any(path == "/api/logs/calls/12/context" for m, path, p in seen)
-        body = " ".join(str(w.render()) for w in app.screen.query("Static"))
+        body = " ".join(str(w.render()) for w in app.top.query("Static"))
         assert "what is the plan" in body and "12,431 in (9,102 cached)" in body
         await pilot.press("escape")
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
 
 
 async def test_enter_on_a_call_without_context_only_notes_it():
@@ -295,7 +295,7 @@ async def test_enter_on_a_call_without_context_only_notes_it():
         scr = await _open(pilot, app)
         await pilot.press("down", "enter")
         await pilot.pause(0.2)
-        assert app.screen is scr
+        assert app.top is scr
         assert "context wasn't captured" in str(scr.query_one("#sec-sub").render())
         assert not any("/context" in path for m, path, p in seen)
 
@@ -306,8 +306,8 @@ async def test_empty_and_locked():
     async with app.run_test(size=(150, 45)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/security calls")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "SecurityScreen")
-        scr = app.screen
+        assert await _until(pilot, lambda: type(app.top).__name__ == "SecurityPage")
+        scr = app.top
         assert await _until(pilot, lambda: scr.loaded["calls"])
         await pilot.pause(0.1)
         assert _rows(scr) == ["no model calls yet"]
@@ -316,6 +316,6 @@ async def test_empty_and_locked():
     async with app.run_test(size=(150, 45)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/security calls")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "SecurityScreen")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "SecurityPage")
         await pilot.pause(0.3)
         assert not any(path == "/api/logs/calls" for m, path, p in seen)   # chat-only login

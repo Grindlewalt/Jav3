@@ -12,4 +12,6 @@ pyyaml>=6.0
 zeroconf>=0.132        # mDNS: advertise <name>.local on the LAN (backend/lan.py)
 pytest>=8.0
 pytest-asyncio>=0.23
+pexpect>=4.9           # scripts/tui_drive.py, tests/test_tui_snapshots.py: the real client in a pty
+pyte>=0.8.2            # ... and the screen it draws (those tests also want textual, which the client's installer provides)
 pillow>=10.0           # grounding fixtures: the model finder renders labelled screens (backend/grounding_fixtures.py)

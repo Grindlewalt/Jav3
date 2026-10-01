@@ -376,7 +376,7 @@ async def set_resolution(db, pkg_id: int, *, resolved_version: str | None,
 
 
 async def approve(db, pkg_id: int, *, target_variant: str | None,
-                  decided_by: str = "operator") -> dict:
+                  decided_by: str = "unmarked", by_operator: bool = False) -> dict:
     """pending -> approved. Needs a successful dry-run. Does NOT build; the
     caller (packages_api) asks images for a new variant version."""
     row = await get(db, pkg_id)
@@ -403,12 +403,13 @@ async def approve(db, pkg_id: int, *, target_variant: str | None,
                 f"into `{variant}` (used by: {', '.join(used['all']) or 'none'})",
         detail={"package_id": pkg_id, "target_variant": variant,
                 "variant_used_by": used["all"], "integrity": row["integrity"],
-                "canonical_command": row["canonical_command"]})
+                "canonical_command": row["canonical_command"]},
+        actor=security.OPERATOR if by_operator else None)
     return row
 
 
 async def reject(db, pkg_id: int, *, reason: str = "",
-                 decided_by: str = "operator") -> dict:
+                 decided_by: str = "unmarked", by_operator: bool = False) -> dict:
     row = await get(db, pkg_id)
     if row is None:
         raise LookupError("no such package request")
@@ -420,7 +421,8 @@ async def reject(db, pkg_id: int, *, reason: str = "",
     await security.raise_event(
         db, kind="package_rejected", severity="warn", project=row["project_slug"],
         summary=f"rejected {row['manager']} package {row['package']}",
-        detail={"package_id": pkg_id, "reason": (reason or "")[:500]})
+        detail={"package_id": pkg_id, "reason": (reason or "")[:500]},
+        actor=security.OPERATOR if by_operator else None)
     return await get(db, pkg_id)
 
 

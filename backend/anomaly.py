@@ -4,7 +4,7 @@ Run by the proxy ONLY on requests it actually allowed (a denied host never went
 anywhere, so there is nothing to watch). Three detectors, matching the operator's
 picks — new/unapproved hosts deliberately do NOT trip these:
 
-  • high-entropy host   — a random-looking hostname; the DGA / DNS-tunnel tell.
+  • high-entropy host   — a random-looking domain name; the DGA tell.
   • volume spike        — bytes to one host far above this project's baseline.
   • beacon cadence      — near-perfectly regular connections to one host (C2).
 
@@ -19,6 +19,14 @@ to files.pythonhosted.org crossed 1 MB after 40 days and was cut, Pi
 2026-09-07), and a daily schedule's requests are a perfectly regular
 86400 s "beacon". Anchoring on the latest hit rather than the wall clock keeps
 the judgement the same whenever it runs.
+
+Entropy is judged on the REGISTRABLE domain (eTLD+1: `gvt1.com`), not on the
+host. A CDN names its nodes at random (`r11---sn-bvvbaxivnuxqjvhj5nu-nx5k.
+gvt1.com`, entropy 4.10 against 3.8) and cut Google's Chromium downloads twice
+on the Pi (2026-10-01): the agent's browser broke, both cuts were false. What a
+DGA randomises is the name it registered, so that is what is measured. A host
+on the project's (or its profile's) allowlist is not judged on entropy at all:
+someone already decided it. Volume and cadence still apply to every host.
 """
 import math
 from datetime import datetime
@@ -41,6 +49,37 @@ def entropy_bits_per_char(s: str) -> float:
     for c in chars:
         freq[c] = freq.get(c, 0) + 1
     return -sum((k / n) * math.log2(k / n) for k in freq.values())
+
+
+# second-level labels that sit under a country code as a public suffix
+# (example.co.uk, example.com.au); the short list of the ones in real use
+_CC_SECOND = frozenset({"co", "com", "org", "net", "gov", "edu", "ac", "or", "ne", "go",
+                        "gob", "mil", "sch", "nom"})
+
+
+def registrable_domain(host: str) -> str:
+    """The domain a name was registered as (eTLD+1): `r4---sn-x.gvt1.com` ->
+    `gvt1.com`, `a.b.example.co.uk` -> `example.co.uk`. An IP literal or a
+    one-label name is returned as it is. A heuristic, not the public suffix list:
+    it is only used to decide WHAT to measure."""
+    h = (host or "").strip().lower().rstrip(".")
+    labels = h.split(".")
+    if len(labels) <= 2 or ":" in h or all(p.isdigit() for p in labels):
+        return h
+    if len(labels[-1]) == 2 and labels[-2] in _CC_SECOND and len(labels) > 2:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+async def _allowlisted(db: aiosqlite.Connection, slug: str | None, host: str) -> bool:
+    """Is the host on the project's or its profile's allowlist (an explicit
+    decision: not allow-by-default, not an auto-allow)? Unsure reads as no."""
+    try:
+        from . import egress
+        pol = await egress.get_policy(db, slug)
+        return egress._host_matches(host, pol["effective_allow"])
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _parse(ts: str) -> float | None:
@@ -98,11 +137,12 @@ async def _host_gaps(db: aiosqlite.Connection, slug: str | None, host: str,
 async def check_host(db: aiosqlite.Connection, slug: str | None, host: str) -> dict | None:
     """Return the first anomaly for this host, or None. Called after an allowed
     request is recorded (so the just-seen event is in the history)."""
-    ent = entropy_bits_per_char(host)
-    if ent >= settings.egress_entropy_threshold:
+    domain = registrable_domain(host)
+    ent = entropy_bits_per_char(domain)
+    if ent >= settings.egress_entropy_threshold and not await _allowlisted(db, slug, host):
         return {"kind": "high_entropy",
                 "summary": f"high-entropy host {host} (entropy {ent:.2f})",
-                "detail": {"host": host, "entropy": round(ent, 2),
+                "detail": {"host": host, "domain": domain, "entropy": round(ent, 2),
                            "threshold": settings.egress_entropy_threshold}}
 
     since = await _window_start(db, slug, host)

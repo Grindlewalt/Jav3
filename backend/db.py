@@ -780,6 +780,9 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE agent_messages ADD COLUMN "
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
+        await _migrate_secsettings(db)
+        await _migrate_secrules(db)
+        await _migrate_secruns(db)
         await _migrate_peer_trust(db)
         await _migrate_narration(db)
         await _migrate_turnstats(db)
@@ -992,6 +995,59 @@ async def _migrate_secnotify(db: aiosqlite.Connection) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_security_events_cause "
         "ON security_events(kind, cause, acknowledged)")
+
+
+async def _migrate_secsettings(db: aiosqlite.Connection) -> None:
+    """Who caused a security event, and why a row was filed already
+    acknowledged (backend/security.py). `actor` is 'operator' only when an
+    operator-facing route said so explicitly; `quiet` is 'operator' (their own
+    action, "record only") or 'kind' (that kind is set to Record only).
+    Old rows read as NULL/NULL: not operator, not quieted. Idempotent."""
+    await _add_columns(db, "security_events", (
+        ("actor", "TEXT"),
+        ("quiet", "TEXT"),
+    ))
+
+
+async def _migrate_secrules(db: aiosqlite.Connection) -> None:
+    """Why a rule judged a security event normal work (backend/security.py):
+    `rule` is the short reason ("file never committed", "imported elsewhere in
+    the project"), set only on rows filed already acknowledged with
+    quiet='rule'. NULL on every other row. Idempotent."""
+    await _add_columns(db, "security_events", (
+        ("rule", "TEXT"),
+    ))
+    # the files each conversation created (backend/writes.py): removing one of
+    # those is the run clearing its own scratch work. Notes older than a month go.
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS write_created ("
+        " project_slug TEXT NOT NULL,"
+        " conversation_id INTEGER NOT NULL,"
+        " path TEXT NOT NULL,"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+        " PRIMARY KEY (project_slug, conversation_id, path))")
+    await db.execute("DELETE FROM write_created WHERE created_at < datetime('now', '-30 days')")
+
+
+async def _migrate_secruns(db: aiosqlite.Connection) -> None:
+    """Which run an event belongs to (backend/secruns.py). `conversation_id` is
+    the conversation the event happened in, `run_root` the top of that
+    conversation's tree (a chat, or a plan/funnel job head: one card per run in
+    the Queue), `call_id` the model's id for the tool call it happened in,
+    `box_id` / `boot_id` the box (and its boot) for a process event no turn is
+    bound to. All attribution only: nothing here decides who the actor was.
+    NULL on every row from before; those group by their detail or the box.
+    tool_calls gains `call_id` so "open the chat at that step" can find the row.
+    Idempotent and additive."""
+    await _add_columns(db, "security_events", (
+        ("conversation_id", "INTEGER"), ("run_root", "INTEGER"), ("call_id", "TEXT"),
+        ("box_id", "TEXT"), ("boot_id", "TEXT"),
+    ))
+    await _add_columns(db, "tool_calls", (("call_id", "TEXT"),))
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_security_events_run "
+                     "ON security_events(run_root)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_tool_calls_callid "
+                     "ON tool_calls(call_id)")
 
 
 async def _migrate_boxlog(db: aiosqlite.Connection) -> None:

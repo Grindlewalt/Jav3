@@ -28,6 +28,8 @@ class VMError(Exception):
 
 _VERSION_RE = re.compile(r"base-v(\d+)\.qcow2$")
 REBUILD_LOG_LINES = 400           # the base rebuild's log kept for the Images tab
+WEDGED_AFTER_S = 30               # an already-running guest this quiet on vsock is restarted
+CONSOLE_TAIL_BYTES = 256 * 1024   # how much of the console death_note reads
 
 
 def _base_image() -> Path:
@@ -510,9 +512,15 @@ class GuestVM:
             # a service box runs svcd (5558), not the run-turn server
             from .boxes import PORT_SVCD
             ready_port = PORT_SVCD
+        # A guest that was already up and answers nothing is wedged, not booting
+        # (a box-wide OOM left one like that on 2026-10-01: ping worked, vsock
+        # never did, and every turn waited out the boot timeout until someone
+        # restarted the box). With no other turn pinned to it, restart it once.
+        warm = self.running() and self._inflight == 0 and ready_port == GUEST_RUNTURN_PORT
         await self.boot()
         loop = asyncio.get_event_loop()
         deadline = loop.time() + settings.vm_boot_timeout_seconds
+        wedged_at = loop.time() + WEDGED_AFTER_S if warm else None
         while loop.time() < deadline:
             s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
             try:
@@ -520,10 +528,43 @@ class GuestVM:
                     None, s.connect, (self._cid, ready_port))
                 return
             except OSError:
+                if wedged_at is not None and loop.time() >= wedged_at and self._inflight == 0:
+                    wedged_at = None
+                    from . import boxlog
+                    note = await self.death_note()
+                    async with boxlog.action(
+                            self._record_box(), "restarted", actor="app",
+                            reason="the guest stopped answering" + (f": {note}" if note else "")):
+                        await self.teardown()
+                        await self.boot()
+                    deadline = loop.time() + settings.vm_boot_timeout_seconds
+                    continue
                 await asyncio.sleep(1)
             finally:
                 s.close()
-        raise VMError("guest run-turn server did not become ready in time")
+        note = await self.death_note()
+        raise VMError("guest run-turn server did not become ready in time"
+                      + (f" ({note})" if note else ""))
+
+    async def death_note(self) -> str:
+        """Why a turn lost this guest, from what it left behind: the kernel's last
+        OOM kill or panic on the console, or a QEMU that exited. '' when there is
+        nothing to say. guest_turn puts it in the turn's error and the box's
+        history; read it BEFORE a teardown, which deletes the console log."""
+        from . import deathnote
+        rc = self._proc.returncode if self._proc is not None else None
+        if rc is not None:
+            return f"the VM process exited by itself (QEMU exit code {rc})"
+
+        def tail() -> str:
+            try:
+                with open(self._console(), "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    f.seek(max(0, f.tell() - CONSOLE_TAIL_BYTES))
+                    return f.read().decode(errors="replace")
+            except OSError:
+                return ""
+        return deathnote.console_note(await asyncio.to_thread(tail))
 
     def _isolation(self) -> dict:
         log = self._console()

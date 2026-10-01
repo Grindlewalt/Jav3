@@ -233,7 +233,8 @@ async def test_edit_emits_profile_changed_with_diff(db):
     await profiles.update(db, p["id"], {"service_placement": "per_project",
                                         "box_runtime": "kvm",
                                         "default_verdict": "allow",
-                                        "allow_hosts": ["a.dev", "b.dev"]})
+                                        "allow_hosts": ["a.dev", "b.dev"]},
+                          actor="grindlewalt", by_operator=True)
     ev = (await events(db, "profile_changed"))[-1]
     ch = ev["detail"]["changes"]
     assert ch["default_verdict"] == {"from": "deny", "to": "allow"}
@@ -243,10 +244,14 @@ async def test_edit_emits_profile_changed_with_diff(db):
     assert ev["severity"] == "warn"
     # ... anything else widening it is still critical
     widen = {"default_verdict": {"from": "deny", "to": "allow"}}
-    assert profiles._severity(widen, "setup") == "critical"
+    assert profiles._severity(widen) == "critical"
     assert profiles._severity({"network_off": {"from": True, "to": False}},
-                              "legacy policy call") == "critical"
-    assert profiles._severity(widen, "operator") == "warn"
+                              actor="legacy policy call") == "critical"
+    assert profiles._severity(widen, True, "grindlewalt") == "warn"
+    # the label is only text: a caller that is not marked is not the operator,
+    # whatever it calls itself
+    assert profiles._severity(widen, actor="operator") == "critical"
+    assert profiles._severity(widen, actor="setup") == "warn"       # the wizard's choice
 
 
 async def test_default_cannot_be_deleted_until_another_is_marked(db):
@@ -316,8 +321,8 @@ async def test_unassigned_projects_follow_the_marked_default(db):
     assert (await profiles.for_slug(db, "alpha"))["name"] == "Default"
     open_ = await profiles.create(db, {"name": "Wide", "default_verdict": "allow",
                                        "service_placement": "per_project",
-                                       "box_runtime": "kvm"})
-    await profiles.set_default(db, open_["id"])
+                                       "box_runtime": "kvm"}, by_operator=True)
+    await profiles.set_default(db, open_["id"], by_operator=True)
     assert (await profiles.for_slug(db, "alpha"))["name"] == "Wide"
     assert (await profiles.for_slug(db, None))["name"] == "Wide"
     assert (await egress.decide(db, "alpha", "anything.dev"))[0] == "allow"

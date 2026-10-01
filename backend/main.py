@@ -214,6 +214,8 @@ from . import placement_api  # noqa: E402  # per-project "Runs in"
 app.include_router(placement_api.router)
 from . import services_api  # noqa: E402  # WP3
 app.include_router(services_api.router)  # WP3
+from .vm import display_api  # noqa: E402  # the live desktop of a box (P1: watch only)
+app.include_router(display_api.router)
 
 
 @app.get("/api/health")

@@ -123,7 +123,7 @@ async def test_only_what_the_server_pings_reaches_the_sidebar(cfg):
         assert await _until(pilot, lambda: any("egress_anomaly" in t for _, _, t in app.notices))
         await _until(pilot, lambda: any("Coder" in t for _, _, t in app.notices))
         # one stream for both topics
-        assert ("GET", "/api/events", "topics=notices,security") in seen
+        assert ("GET", "/api/events", "topics=notices,security,runs") in seen
         assert not any(p == "/api/agents/notices/stream" for _, p, _ in seen)
         kinds = {t.split(" ")[0]: k for _, k, t in app.notices if "Coder" not in t}
         assert kinds == {"egress_anomaly": "error", "package_requested": "warn"}
@@ -198,8 +198,8 @@ async def test_security_log_rows_show_coalesced_counts(cfg):
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/security logs")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "SecurityScreen")
-        scr = app.screen
+        assert await _until(pilot, lambda: type(app.top).__name__ == "SecurityPage")
+        scr = app.top
         assert await _until(pilot, lambda: scr.entries["logs"])
         row = scr.row_markup(scr.entries["logs"][0])
         assert "[b]×3[/]" in row
