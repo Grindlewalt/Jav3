@@ -5055,7 +5055,8 @@ def build_tui(base: str, token: str, **kw):
             Binding("7", "jump(6)", show=False),
             Binding("8", "jump(7)", show=False),
             Binding("c", "conversation", show=False),
-            Binding("up,k", "move(-1)", show=False),
+            Binding("up", "move(-1)", show=False),
+            Binding("k", "k_key", show=False),         # kill a process on the Queue; else up
             Binding("down,j", "move(1)", show=False),
             Binding("pageup", "page(-1)", show=False),
             Binding("pagedown", "page(1)", show=False),
@@ -5075,6 +5076,10 @@ def build_tui(base: str, token: str, **kw):
             Binding("b", "build", show=False),
             Binding("u", "promote", show=False),
             Binding("l", "logs", show=False),
+            Binding("o", "chat_open", show=False),      # Queue: the run's chat
+            Binding("x", "stop_agent", show=False),     # Queue: stop the agent
+            Binding("X", "stop_run", show=False),       # Queue: stop the whole run (asks)
+            Binding("m", "mute", show=False),           # Queue: mute this kind
             Binding("enter", "enter", show=False),
         ]
 
@@ -5095,6 +5100,8 @@ def build_tui(base: str, token: str, **kw):
             self.log_filter = "all"
             self.status = ""
             self.open_nodes: set[str] = set()    # Persistent: expanded process rows
+            self.open_runs: set[str] = set()     # Queue: run cards opened to their events
+            self._queue_src: tuple | None = None # what the Queue was last built from
             self.lan_ip = ""                     # services_lan_ip ("" = no LAN exposure)
             self.lan_conf = ""                   # services_lan_ip_configured
             self.lan_error = ""                  # why the configured one is unusable
@@ -5202,14 +5209,19 @@ def build_tui(base: str, token: str, **kw):
                 self.render_chrome()
 
         async def _load_queue(self):
-            projects, pending, alerts, svcs, pkgs = await asyncio.gather(
+            projects, pending, runs, svcs, pkgs = await asyncio.gather(
                 self._get("queue", "projects", "/api/projects", "projects"),
                 self._get("queue", "egress", "/api/egress/pending", "pending"),
-                self._get("queue", "alerts", "/api/security/events", "events",
-                          params={"unacknowledged": "true", "limit": self.LIMIT}),
+                # one card per run (backend/secruns.py); an older server has none
+                self._get("queue", "alert runs", "/api/security/runs", "runs", quiet404=True,
+                          params={"events": 20}),
                 self._get("queue", "services", "/api/services", "", quiet404=True),
                 self._get("queue", "packages", "/api/packages", "packages", quiet404=True,
                           params={"status": "pending"}))
+            alerts = None
+            if runs is None:                          # the flat list, as before the cards
+                alerts = await self._get("queue", "alerts", "/api/security/events", "events",
+                                         params={"unacknowledged": "true", "limit": self.LIMIT})
             if projects is not None:
                 self.projects = projects
             self._lan(svcs)
@@ -5217,10 +5229,18 @@ def build_tui(base: str, token: str, **kw):
             reqs = await asyncio.gather(*[
                 self._get("queue", f"git {s}", f"/api/projects/{s}/git/requests", "requests")
                 for s in slugs])
-            if projects is None and pending is None and alerts is None:
+            if projects is None and pending is None and alerts is None and runs is None:
                 return None
-            return self.queue_entries(pending or [], dict(zip(slugs, reqs)), alerts or [],
-                                      (svcs or {}).get("services") or [], pkgs or [])
+            self._queue_src = (pending or [], dict(zip(slugs, reqs)), alerts or [],
+                               (svcs or {}).get("services") or [], pkgs or [], runs)
+            return self.queue_entries_again()
+
+        def queue_entries_again(self) -> list[dict]:
+            """The Queue from what was last loaded, with the cards opened or closed as
+            they are now (no request)."""
+            pending, git, alerts, services, packages, runs = self._queue_src
+            return self.queue_entries(pending, git, alerts, services, packages, runs=runs,
+                                      open_runs=self.open_runs)
 
         def _lan(self, svcs) -> None:
             """GET /api/services' LAN fields: services_lan_ip is "" unless a
@@ -5241,7 +5261,8 @@ def build_tui(base: str, token: str, **kw):
             return "LAN exposure unavailable (no services LAN IP on the server)"
 
         @staticmethod
-        def queue_entries(pending, git: dict, alerts, services=(), packages=()) -> list[dict]:
+        def queue_entries(pending, git: dict, alerts, services=(), packages=(), runs=None,
+                          open_runs=()) -> list[dict]:
             asks = [{"type": "egress", "key": f"p{e.get('id')}", "raw": e,
                      "ts": e.get("last_seen") or ""} for e in pending]
             asks += [{"type": "service", "key": f"v{q.get('id')}", "raw": q,
@@ -5258,6 +5279,9 @@ def build_tui(base: str, token: str, **kw):
                                      "ts": q.get("created_at") or ""})
             asks.sort(key=lambda x: x["ts"], reverse=True)
             # a coalesced row (count > 1) sorts and reads by its latest repeat
+            if runs is not None:
+                # one row per run, worst first as the server sorted them
+                return asks + SecurityPage.run_entries(runs, open_runs)
             al = [{"type": "alert", "key": f"s{e.get('id')}", "raw": e,
                    "ts": ((e.get("count") or 1) > 1 and e.get("last_seen")
                           or e.get("created_at") or "")}
@@ -5265,6 +5289,197 @@ def build_tui(base: str, token: str, **kw):
             al.sort(key=lambda x: x["ts"], reverse=True)
             al.sort(key=lambda x: SecurityPage._rank(x["raw"]))
             return asks + al                  # what waits on a verdict comes first
+
+        @staticmethod
+        def run_entries(runs, open_runs=()) -> list[dict]:
+            """A card per run; an opened one is followed by its events, a row each."""
+            out = []
+            for r in runs or []:
+                key = f"r{r.get('key')}"
+                opened = r.get("key") in open_runs
+                out.append({"type": "run", "key": key, "raw": r, "open": opened,
+                            "ts": r.get("last_at") or ""})
+                if opened:
+                    out += [{"type": "runev", "key": f"{key}#{ev.get('id')}", "raw": ev,
+                             "run": r, "ts": ev.get("last_seen") or ev.get("created_at") or ""}
+                            for ev in r.get("events") or []]
+            return out
+
+        @staticmethod
+        def _run_counts(c: dict, long: bool = False) -> str:
+            c = c or {}
+            bits = []
+            if c.get("need"):
+                bits.append(f"{c['need']} need you")
+            if c.get("filtered"):
+                bits.append(f"{c['filtered']} filtered" + (" as normal work" if long else ""))
+            if c.get("reports"):
+                bits.append(f"{c['reports']} agent report{'s' * (c['reports'] != 1)}")
+            return " · ".join(bits)
+
+        @staticmethod
+        def _ev_subject(ev: dict) -> str:
+            d = ev.get("detail") if isinstance(ev.get("detail"), dict) else {}
+            for k in ("path", "host", "username", "peer"):
+                if d.get(k):
+                    return str(d[k])
+            exe = d.get("exe")
+            return str(exe).rsplit("/", 1)[-1] if exe else ""
+
+        @staticmethod
+        def _run_target(e: dict) -> dict | None:
+            """The event the keys act on: a child row's own, or, on a card, the newest
+            event of its worst kind."""
+            if e["type"] == "runev":
+                return e["raw"]
+            r = e["raw"]
+            evs = r.get("events") or []
+            for k in [*(r.get("kinds") or []), *(r.get("report_kinds") or [])]:
+                for ev in evs:
+                    if ev.get("kind") == k.get("kind"):
+                        return ev
+            return evs[0] if evs else None
+
+        @staticmethod
+        def _ev_chat(ev: dict) -> int | None:
+            doing = ev.get("doing") or {}
+            d = ev.get("detail") if isinstance(ev.get("detail"), dict) else {}
+            cid = ((doing.get("conversation") or {}).get("id") or ev.get("conversation_id")
+                   or d.get("conversation_id"))
+            return int(cid) if isinstance(cid, int) or str(cid).isdigit() else None
+
+        @staticmethod
+        def _ev_program(ev: dict) -> str | None:
+            exe = (ev.get("detail") or {}).get("exe") if isinstance(ev.get("detail"), dict) \
+                else None
+            return str(exe).rsplit("/", 1)[-1] if exe else None
+
+        @staticmethod
+        def _ev_primary(ev: dict) -> str:
+            """What y does to this event, in the footer's words ('' = nothing)."""
+            k = ev.get("kind")
+            d = ev.get("detail") if isinstance(ev.get("detail"), dict) else {}
+            if k == "unexpected_process" and d.get("exe"):
+                return f"allow {SecurityPage._ev_program(ev)}"
+            if k == "write_flag" and d.get("path") and not d.get("refused"):
+                return "revert file"
+            if k in ("egress_anomaly", "host_cut") and d.get("host"):
+                return "un-cut host"
+            return ""
+
+        @staticmethod
+        def _ev_killable(ev: dict) -> bool:
+            d = ev.get("detail") if isinstance(ev.get("detail"), dict) else {}
+            return (ev.get("kind") in ("unexpected_process", "proc_report_mismatch")
+                    and isinstance(d.get("pid"), int) and bool(d.get("box_id")))
+
+        @staticmethod
+        def _row_run(e: dict, compact: bool = False) -> str:
+            r, ts = e["raw"], row_ts(e.get("ts"))
+            sev = r.get("severity") or "info"
+            col = _SEV_COL.get(sev, "$text-muted")
+            fold = "▾" if e.get("open") else "▸"
+            state = " [$success]running[/]" if r.get("running") is True else ""
+            counts = SecurityPage._run_counts(r.get("counts"))
+            return (f"[{col}]●[/] [$text-muted]{ts}[/] [{col} b]{sev[:4].upper():<4}[/] {fold} "
+                    f"[b]{_esc(_short(r.get('title') or '?', 64))}[/]{state}  "
+                    f"[$text-muted]{_esc(counts)}[/]")
+
+        @staticmethod
+        def _row_runev(e: dict, compact: bool = False) -> str:
+            ev = e["raw"]
+            sev = ev.get("severity") or "info"
+            col = _SEV_COL.get(sev, "$text-muted")
+            n = ev.get("count") or 1
+            times = f" [b]×{n}[/]" if isinstance(n, int) and n > 1 else ""
+            step = (ev.get("doing") or {}).get("step") or {}
+            at = (f" [$text-muted]{_esc(str(step.get('tool') or ''))} #{step.get('id')}[/]"
+                  if step else "")
+            what = SecurityPage._ev_subject(ev) or ev.get("summary") or ""
+            return (f"    [{col}]·[/] [{col} b]{sev[:4].upper():<4}[/] "
+                    f"[$secondary]{_esc(ev.get('kind') or '?')}[/]{times} "
+                    f"{_esc(_short(what, 56))}{at}")
+
+        @staticmethod
+        def _ev_lines(ev: dict, run: dict | None) -> list[str]:
+            """One event: what it is, and what the agent was doing at the step it happened
+            in. The agent's own words are labelled as such, always."""
+            sev = ev.get("severity") or "info"
+            col = _SEV_COL.get(sev, "$text-muted")
+            n = ev.get("count") or 1
+            times = f" ×{n}" if isinstance(n, int) and n > 1 else ""
+            d = ev.get("detail") if isinstance(ev.get("detail"), dict) else {}
+            where = f" · box {_esc(str(d['box_id']))}" if d.get("box_id") else ""
+            lines = [f"[{col} b]{_esc(sev.upper())}[/] [$secondary]{_esc(ev.get('kind') or '?')}"
+                     f"{times}[/][$text-muted]{where} · #{ev.get('id')} · "
+                     f"{_esc(full_ts(ev.get('created_at')))}[/]",
+                     f"[b]{_esc(ev.get('summary') or '')}[/]"]
+            doing = ev.get("doing")
+            if doing:
+                cid = (doing.get("conversation") or {}).get("id")
+                step, says = doing.get("step"), doing.get("says")
+                lines += ["", "[$text-muted]what it was doing · the agent's words: untrusted[/]"]
+                if step:
+                    near = (" [$text-muted](nearest earlier step)[/]"
+                            if step.get("match") == "nearest" else "")
+                    cmd = f": {_esc(_short(step.get('command') or '', 160))}" \
+                        if step.get("command") else ""
+                    lines.append(f"chat {cid} → {_esc(str(step.get('tool') or '?'))} "
+                                 f"#{step.get('id')}{cmd}{near}")
+                elif cid:
+                    lines.append(f"chat {cid}")
+                if says:
+                    how = {"narration": "says", "todo": "its todo list says",
+                           "chat title": "its chat is titled"}.get(says.get("source"), "says")
+                    lines.append(f"{how}: “{_esc(_short(says.get('text') or '', 240))}”")
+            body = _detail_markup(ev.get("detail"))
+            if body:
+                lines += ["", body]
+            return lines
+
+        def _detail_run(self, e) -> str:
+            r = e["raw"]
+            state = {True: "  [$success]running[/]", False: "  [$text-muted]finished[/]"}.get(
+                r.get("running"), "")
+            lines = [f"[b]{_esc(r.get('title') or '?')}[/]{state}",
+                     f"[$text-muted]{_esc(self._run_counts(r.get('counts'), long=True))}[/]"]
+            for k in [*(r.get("kinds") or []), *(r.get("report_kinds") or [])]:
+                subj = ", ".join(k.get("subjects") or [])
+                lines.append(f"  [$secondary]{_esc(k.get('kind') or '?')}[/] ×{k.get('n')}"
+                             + (f" [$text-muted]({_esc(subj)})[/]" if subj else ""))
+            ev = self._run_target(e)
+            if ev is not None:
+                lines += [""] + self._ev_lines(ev, r)
+            return "\n".join(lines)
+
+        def _detail_runev(self, e) -> str:
+            return "\n".join(self._ev_lines(e["raw"], e.get("run")))
+
+        def _run_keys(self, e: dict) -> str:
+            """The Queue's keys for a run card or one of its events (see _primary and
+            the others below): what each does depends on the event they act on."""
+            ev = self._run_target(e)
+            card = e["type"] == "run"
+            keys = []
+            if ev is not None:
+                prim = self._ev_primary(ev)
+                if prim:
+                    keys.append(f"[$primary]y[/] {_esc(prim)}")
+                if self._ev_chat(ev):
+                    keys.append("[$primary]o[/] open chat")
+                    run = e["raw"] if card else (e.get("run") or {})
+                    if run.get("running") is not False:
+                        keys.append("[$primary]x[/] stop agent")
+                        if card and run.get("running") is True:
+                            keys.append("[$primary]X[/] stop run")
+                if self._ev_killable(ev):
+                    keys.append("[$primary]k[/] kill")
+                if ev.get("tier") != "critical" and ev.get("severity") != "critical":
+                    keys.append("[$primary]m[/] mute kind")
+            keys.append("[$primary]a[/] acknowledge" + (" group" if card else ""))
+            if card:
+                keys.append("[$primary]enter[/] " + ("close" if e.get("open") else "events"))
+            return "  ".join(keys)
 
         @staticmethod
         def _rank(e: dict) -> int:
@@ -5515,7 +5730,10 @@ def build_tui(base: str, token: str, **kw):
             return (f"{n}?" if n else "?") if self.errors[tab] else n
 
         def counts(self) -> dict:
-            return {"queue": self._count("queue"), "secrets": self._count("secrets")}
+            # an opened run's event rows are part of its card, not more to look at
+            return {"queue": self._count("queue", sum(e["type"] != "runev"
+                                                       for e in self.entries["queue"])),
+                    "secrets": self._count("secrets")}
 
         @staticmethod
         def row_markup(e: dict, all_projects: bool = True, compact: bool = False) -> str:
@@ -5565,6 +5783,10 @@ def build_tui(base: str, token: str, **kw):
                 return (f"[{col}]●[/] [$text-muted]{ts}[/] "
                         f"[{col} b]{verdict_label(v):<8}[/] "
                         f"{_esc(_short(what.strip(), 70))}{proj}{meter}")
+            if t == "run":
+                return SecurityPage._row_run(e, compact)
+            if t == "runev":
+                return SecurityPage._row_runev(e, compact)
             if t in _ROWS:
                 return _ROWS[t](e)
             hosts = r.get("hosts") or []
@@ -5872,6 +6094,8 @@ def build_tui(base: str, token: str, **kw):
                 e = self.selected()
                 if e is not None and e["type"] == "alert":
                     return "[$primary]a[/] acknowledge"
+                if e is not None and e["type"] in ("run", "runev"):
+                    return self._run_keys(e)
                 if e is not None:
                     return "[$primary]y[/] approve  [$primary]n[/] deny"
             return self.FOOT[self.tab]
@@ -5935,15 +6159,21 @@ def build_tui(base: str, token: str, **kw):
                 eg = sum(e["type"] == "egress" for e in es)
                 gt = sum(e["type"] == "git" for e in es)
                 al = sum(e["type"] == "alert" for e in es)
+                rn = [e["raw"] for e in es if e["type"] == "run"]
                 sv = sum(e["type"] == "service" for e in es)
                 pk = sum(e["type"] == "package" for e in es)
                 extra = ""
                 if sv or pk:
                     extra = (f"{sv} service{'s' * (sv != 1)} · {pk} package"
                              f"{'s' * (pk != 1)} · ")
+                if rn:
+                    need = sum((r.get("counts") or {}).get("need", 0) for r in rn)
+                    al = f"{need} alert{'s' * (need != 1)} in {len(rn)} run{'s' * (len(rn) != 1)}"
+                    tail = f"{al} · enter opens a run"
+                else:
+                    tail = f"{al} alert{'s' * (al != 1)} to acknowledge"
                 bits.append(f"[$text-muted]{eg} host{'s' * (eg != 1)} waiting · {gt} git "
-                            f"request{'s' * (gt != 1)} · {extra}{al} alert{'s' * (al != 1)} "
-                            "to acknowledge · every project[/]")
+                            f"request{'s' * (gt != 1)} · {extra}{tail} · every project[/]")
             elif self.tab == "network":
                 bits.append(self.net_markup())
             elif self.tab == "logs":
@@ -6234,7 +6464,11 @@ def build_tui(base: str, token: str, **kw):
             e = self.selected()
             if e is None:
                 return
-            if e["type"] == "proc" and e["raw"].get("children"):
+            if e["type"] == "run" and self.tab == "queue":
+                self.open_runs ^= {e["raw"].get("key")}
+                self.entries["queue"] = self.queue_entries_again()
+                await self.rebuild()
+            elif e["type"] == "proc" and e["raw"].get("children"):
                 self.open_nodes ^= {e["key"]}
                 self.entries["persistent"] = self.persistent_entries_again()
                 await self.rebuild()
@@ -6328,6 +6562,14 @@ def build_tui(base: str, token: str, **kw):
                 await (self._approve_package(e["raw"]) if yes
                        else self._reject("package", e["raw"]))
                 return
+            if e is not None and e["type"] in ("run", "runev"):
+                if yes:
+                    await self._primary(e)
+                else:
+                    self.status = ("[$warning]an alert is not an approval: y does what the "
+                                   "footer names, a acknowledges[/]")
+                    self.render_chrome()
+                return
             if e is not None and e["type"] == "alert":
                 self.status = ("[$warning]an alert is not an approval: a acknowledges it, "
                                "the detail below says what happened[/]")
@@ -6392,8 +6634,159 @@ def build_tui(base: str, token: str, **kw):
                 await self._send("POST", f"/api/projects/{slug}/git/requests/{rid}/{verb}",
                                  f"{'approved' if yes else 'rejected'} request #{rid}")
 
+        # -- the run cards' actions (backend/secactions.py) --------------------------------
+
+        def _queue_target(self):
+            """(entry, event) for a run row or one of its events, else (None, None)."""
+            e = self.selected()
+            if self.tab != "queue" or e is None or e["type"] not in ("run", "runev"):
+                return None, None
+            return e, self._run_target(e)
+
+        def _event_path(self, ev: dict, verb: str) -> str:
+            return f"/api/security/events/{ev.get('id')}/{verb}"
+
+        async def _primary(self, e: dict) -> None:
+            """y: the event's own remedy: allow the program, revert the file, un-cut the host."""
+            ev = self._run_target(e)
+            if ev is None:
+                return
+            d = ev.get("detail") if isinstance(ev.get("detail"), dict) else {}
+            kind = ev.get("kind")
+            if kind == "unexpected_process" and d.get("exe"):
+                unit = d.get("unit") or "no unit"
+                if await self._confirm(
+                        f"Allow {d['exe']} in {unit}?",
+                        "Stops alerting on this program in this unit, in every box. Waiting "
+                        "alerts it covers are acknowledged. The box's own baseline is unchanged."):
+                    await self._send("POST", self._event_path(ev, "baseline"),
+                                     f"allowed {self._ev_program(ev)}",
+                                     json={"scope": "program"})
+            elif kind == "write_flag" and d.get("path") and not d.get("refused"):
+                if await self._confirm(
+                        f"Revert {d['path']}?",
+                        "Puts the file back to the copy git HEAD holds, or deletes it if the "
+                        "agent created it. Edits since the last commit are lost. Refused if the "
+                        "file changed after this alert."):
+                    await self._send("POST", self._event_path(ev, "revert"),
+                                     f"reverted {d['path']}")
+            elif kind in ("egress_anomaly", "host_cut") and d.get("host"):
+                if await self._confirm(
+                        f"Un-cut {d['host']}?",
+                        "Lifts the block and the firewall drop; the host is not re-judged for "
+                        "an hour. An anomaly cut is a sign something may be wrong: look at the "
+                        "evidence first."):
+                    await self._send("POST", self._event_path(ev, "uncut"),
+                                     f"{d['host']} is let through again")
+            else:
+                self.status = "[$warning]nothing to do for this kind but acknowledge it (a)[/]"
+                self.render_chrome()
+
+        async def _open_chat(self) -> None:
+            e, ev = self._queue_target()
+            cid = self._ev_chat(ev) if ev is not None else None
+            if not cid:
+                self.status = "[$warning]this alert is not tied to a chat[/]"
+                self.render_chrome()
+                return
+            # the app opens it (a worker of its own, as the agents page does): this page
+            # goes away under its feet
+            run = e["raw"] if e["type"] == "run" else (e.get("run") or {})
+            self.app.run_worker(self.app.open_node({"id": cid, "running": run.get("running") is True}),
+                                group="agents")
+
+        async def _stop_agent(self, whole_run: bool = False) -> None:
+            e, ev = self._queue_target()
+            if ev is None or not self._ev_chat(ev):
+                self.status = "[$warning]this alert is not tied to an agent run[/]"
+                self.render_chrome()
+                return
+            path = self._event_path(ev, "stop")
+            if not whole_run:
+                if await self._confirm("Stop this agent?",
+                                       "Just the agent that did this, not the rest of its run."):
+                    await self._send("POST", path, "stopped the agent",
+                                     json={"scope": "agent"})
+                return
+            try:
+                dry = await self.app.api("POST", path, json={"scope": "run", "dry_run": True}) or {}
+            except CliError as ex:
+                self.status = f"[$error]{_esc(str(ex))}[/]"
+                self.render_chrome()
+                return
+            n = len(dry.get("agents") or [])
+            if not n and not dry.get("plans"):
+                self.status = f"[$warning]{_esc(dry.get('message') or 'nothing is running')}[/]"
+                self.render_chrome()
+                return
+            plans = dry.get("plans") or []
+            if await self._confirm(
+                    f"Stop the whole run ({n} agent{'s' * (n != 1)}"
+                    + (f" and the plan of {', '.join(plans)}" if plans else "") + ")?",
+                    "Everything running under this run's chat is stopped where it is."):
+                await self._send("POST", path, "stopped the run",
+                                 json={"scope": "run", "confirm": True})
+
+        async def _kill(self) -> bool:
+            e, ev = self._queue_target()
+            if ev is None or not self._ev_killable(ev):
+                return False
+            d = ev["detail"]
+            if await self._confirm(
+                    f"Stop {d.get('exe') or 'this process'} (pid {d['pid']}) in {d['box_id']}?",
+                    "Only if it still is the process the box reported: a pid that was reused "
+                    "is left alone, and you are told."):
+                await self._send("POST", self._event_path(ev, "kill"), "process stopped",
+                                 json={})
+            return True
+
+        async def _mute(self) -> None:
+            e, ev = self._queue_target()
+            if ev is None:
+                return
+            if ev.get("tier") == "critical" or ev.get("severity") == "critical":
+                self.status = "[$warning]a critical kind always pings: it cannot be muted[/]"
+                self.render_chrome()
+                return
+            mode = await self.app.pick(
+                f"Mute {ev.get('kind')}", [("badge", "Badge only", "counts here, never pings"),
+                                           ("record", "Record only",
+                                            "filed in the log, out of the Queue")], "record")
+            if mode:
+                await self._send("PUT", "/api/notifications/settings",
+                                 f"{ev.get('kind')}: {mode} only from now on",
+                                 json={"kinds": {ev.get("kind"): mode}})
+
+        def action_chat_open(self) -> None:
+            if self.tab == "queue":
+                self._act(self._open_chat())
+
+        def action_stop_agent(self) -> None:
+            if self.tab == "queue":
+                self._act(self._stop_agent())
+
+        def action_stop_run(self) -> None:
+            if self.tab == "queue":
+                self._act(self._stop_agent(whole_run=True))
+
+        def action_mute(self) -> None:
+            if self.tab == "queue":
+                self._act(self._mute())
+
+        def action_k_key(self) -> None:
+            """k kills a process on a Queue card that names one; everywhere else it is
+            still vim's up."""
+            e, ev = self._queue_target()
+            if ev is not None and self._ev_killable(ev):
+                self._act(self._kill())
+            else:
+                self.action_move(-1)
+
         async def _ack(self) -> None:
             e = self.selected()
+            if e is not None and self.tab == "queue" and e["type"] in ("run", "runev"):
+                await self._ack_run(e)
+                return
             if e is None or e["type"] not in ("alert", "log") or e["raw"].get("acknowledged"):
                 return
             r = e["raw"]
@@ -6405,6 +6798,27 @@ def build_tui(base: str, token: str, **kw):
             if await self._confirm(q, detail):
                 await self._send("POST", f"/api/security/events/{r.get('id')}/ack",
                                  f"acknowledged #{r.get('id')}")
+
+        async def _ack_run(self, e: dict) -> None:
+            """a on a card: everything waiting in the run; on one of its events: that one."""
+            if e["type"] == "runev":
+                ev = e["raw"]
+                if await self._confirm(f"Acknowledge #{ev.get('id')}?",
+                                       f"{ev.get('kind')}: {_short(ev.get('summary') or '', 120)}. "
+                                       "Marks it seen; it stays in the log."):
+                    await self._send("POST", self._event_path(ev, "ack"),
+                                     f"acknowledged #{ev.get('id')}")
+                return
+            from urllib.parse import quote
+            r = e["raw"]
+            c = r.get("counts") or {}
+            if await self._confirm(
+                    f"Acknowledge everything in {_short(r.get('title') or 'this run', 60)}?",
+                    f"{c.get('need', 0)} alert{'s' * (c.get('need', 0) != 1)} and "
+                    f"{c.get('reports', 0)} agent report{'s' * (c.get('reports', 0) != 1)} are "
+                    "marked seen. They stay in the log; nothing else changes."):
+                await self._send("POST", f"/api/security/runs/{quote(r.get('key') or '', safe='')}/ack",
+                                 "acknowledged the run", json={})
 
         async def _pick_project(self) -> None:
             try:

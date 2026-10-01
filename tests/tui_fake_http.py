@@ -399,6 +399,41 @@ def alerts() -> list[dict]:
     ]
 
 
+def runs() -> list[dict]:
+    """GET /api/security/runs: the Queue as one card per run (backend/secruns.py), built
+    from the alerts above. The cut belongs to a running chat (its step and what the agent
+    said it was doing); the unexpected process to a box no turn was bound to."""
+    evs = {e["id"]: e for e in alerts()}
+    cut, proc = evs[104], evs[102]
+    step = {"id": 4211, "call_id": "call_4211", "tool": "run_code", "match": "call",
+            "at": utc(-9 * 3600), "args": "{}",
+            "command": "curl -sS https://files.example.net/dump.tar -o /tmp/dump.tar"}
+    return [
+        {"key": "run:12", "group": "run", "title": "homelab · chat 12 \"Sync the NAS\"",
+         "project": "homelab",
+         "root": {"id": 12, "kind": "chat", "summary": "Sync the NAS", "agent_slug": None,
+                  "job_id": None},
+         "running": True, "tier": "critical", "severity": "critical", "newest_id": 104,
+         "counts": {"need": 1, "reports": 0, "filtered": 3, "record": 0},
+         "kinds": [{"kind": "egress_anomaly", "n": 1, "count": 1, "severity": "critical",
+                    "tier": "critical", "subjects": ["files.example.net"], "ids": [104]}],
+         "report_kinds": [], "last_at": cut["last_seen"],
+         "events": [{**cut, "conversation_id": 12, "run_root": 12, "doing": {
+             "conversation": {"id": 12, "kind": "chat", "agent_slug": None,
+                              "summary": "Sync the NAS"},
+             "step": step, "untrusted": True,
+             "says": {"text": "Fetch the archive the NAS exports before syncing.",
+                      "source": "narration"}}}]},
+        {"key": "box:shared", "group": "box", "title": "box shared", "project": None,
+         "root": None, "running": None, "tier": "alert", "severity": "warn", "newest_id": 102,
+         "counts": {"need": 1, "reports": 0, "filtered": 0, "record": 0},
+         "kinds": [{"kind": "unexpected_process", "n": 1, "count": 7, "severity": "warn",
+                    "tier": "alert", "subjects": ["odd"], "ids": [102]}],
+         "report_kinds": [], "last_at": proc["last_seen"],
+         "events": [{**proc, "doing": None}]},
+    ]
+
+
 # --- the server --------------------------------------------------------------------------------
 
 class SeededServer(FakeServer):
@@ -608,6 +643,8 @@ class SeededServer(FakeServer):
             if q.get("unacknowledged") == "true":
                 evs = [e for e in evs if not e["acknowledged"]]
             return logged(J({"events": evs}))
+        if path == "/api/security/runs" and method == "GET":
+            return logged(J({"runs": runs(), "totals": {"runs": 2, "need": 2, "reports": 0}}))
         if path == "/api/services" and method == "GET":
             return logged(J({"services_lan_ip": "", "services": [
                 {"id": 5, "name": "nas-sync", "command": ["python", "sync.py", "--watch"],
