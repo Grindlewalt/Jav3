@@ -31,10 +31,60 @@ What it does, each step skipped when already done (a re-run is safe):
 6. Writes `JARVIS_GITEA_ENABLED=true`, `JARVIS_GITEA_OWNER`,
    `JARVIS_GITEA_PORT` to `~/.config/jarvis/env`, then creates a repo for each
    project.
+7. Makes every enabled account a read collaborator on every repo (see Access).
+
+`gitea-setup --access [--dry-run]` runs only that last step, against a Gitea that
+is already running: it prints each grant it makes (or would make) and changes
+nothing else. Use it after enabling an account in Gitea's own site admin, or when
+`doctor` reports grants missing.
 
 Settings (`backend/config.py`): `gitea_enabled`, `gitea_port`, `gitea_url`
-(the address for browser links; empty means `http://<first LAN IP>:<port>`),
+(the address for browser links; empty means `http://<first LAN IP>:<port>`, which
+does not work from outside the network: set `JARVIS_GITEA_URL` in
+`~/.config/jarvis/env` to the address you reach Gitea at, then restart Jav3),
 `gitea_owner`, `gitea_bot_user`, `gitea_dir`, and the two token paths.
+
+## Who can open a repo
+
+Gitea is private (`DEFAULT_PRIVATE`, `REQUIRE_SIGNIN_VIEW`, no registration) and
+every repo is created with the operator's token, so it belongs to the operator.
+A second account sees nothing until it is a collaborator. The rule:
+
+- Every **enabled** account that is not the owner, the agent bot or a site
+  admin (an admin sees everything already) is a **read** collaborator on every
+  repo. Disabled accounts are not granted; enabling one grants it.
+- It is applied in code, in four places: `ensure_remote_repo` (a new repo),
+  `create_user` and enabling an account (every existing repo), and
+  `gitea-setup --access` (everything, idempotent). `doctor`'s gitea stage reads
+  the same check and says which account cannot open how many repos.
+- A grant is never lowered by any of these: a `write` the operator set stays.
+- The level per account and repo is changed on the Git page's Access row
+  (read or write). Write lets someone push branches and open pull requests; main
+  stays protected, so only the operator can push to it or merge into it.
+
+## The Git page
+
+Under the nav's ⋯ menu (`/git`, `/git/<project>`; `/git [project]` in the web
+composer). For one project it shows where the host's main and Gitea's main stand
+(with Push main, which pushes as the operator, or fast-forwards the host when
+Gitea is ahead; a diverged pair is refused), the agent's pull requests (a diff,
+Approve, Reject), branches, recent commits, the Access row, and the Gitea
+accounts. Approve and Reject are the Review Center's own request routes
+(`/api/projects/<slug>/git/requests/<id>/approve|reject`): the page lists only
+requests Jav3 filed, never an arbitrary pull request in Gitea. Nothing polls:
+listing the pull requests asks Gitea about each waiting one.
+
+Operator-only routes under `/api/gitea` (the password session; a device token is
+refused), all host-side with the operator's token:
+
+- `GET /repos`: slug, default branch, last commit, open agent PRs, accounts shared with
+- `GET /repos/<slug>/branches`, `/commits?branch=&page=&limit=`
+- `GET /repos/<slug>/pulls`: the agent's pull requests (waiting, and the last few decided)
+- `GET /repos/<slug>/pulls/<n>/diff`: capped at 20000 characters, tokens and secret
+  values replaced; only for a pull request Jav3 filed
+- `GET /repos/<slug>/sync`, `POST /repos/<slug>/push`: host main against Gitea main, and Push main
+- `GET /repos/<slug>/access`, `PUT /repos/<slug>/access/<login>` with `{"permission": "read"|"write"}`
+- `GET /status` (adds `url_configured`), `/users` and the account routes, as before
 
 ## How an agent's work reaches main
 
@@ -90,9 +140,9 @@ an error.
   Gitea's port, before any policy runs.
 - Tokens are never written to `.git/config`, argv, the DB or a tool result.
   Git gets them as a per-command `http.extraheader` in the environment.
-- Accounts: Settings > Gitea lists users and can create a user, reset a
-  password, or disable a user. It is operator-only (the password session, not
-  device tokens). For anything else, use Gitea's own site admin.
+- Accounts: the Git page's Accounts card lists users and can create a user,
+  reset a password, or disable or enable one. It is operator-only (the password
+  session, not device tokens). For anything else, use Gitea's own site admin.
 
 ## Off
 

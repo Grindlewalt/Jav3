@@ -180,16 +180,33 @@ def stages() -> list[dict]:
                       facts["profile"] or "none yet",
                       f"{py} -m backend.cli setup --profile-only"))
 
-    gitea_ok = None
+    gitea_ok, gitea_detail, gitea_fix = None, "not set up", f"{py} -m backend.cli gitea-setup"
     if settings.gitea_enabled:
         from .gitea_setup import _healthy
         gitea_ok = _healthy()
-    out.append(_stage("gitea", "Gitea (agent pull requests)", gitea_ok if settings.gitea_enabled
-                      else False,
-                      "running" if gitea_ok else ("enabled, not answering" if settings.gitea_enabled
-                                                  else "not set up"),
-                      f"{py} -m backend.cli gitea-setup", optional=True))
+        gitea_detail = "running" if gitea_ok else "enabled, not answering"
+        gaps = _gitea_gaps() if gitea_ok else []
+        if gaps:
+            gitea_ok = False
+            gitea_detail = (f"running; {', '.join(sorted({g['login'] for g in gaps}))} "
+                            f"cannot open every repo yet ({len(gaps)} grants missing)")
+            gitea_fix = f"{py} -m backend.cli gitea-setup --access"
+    out.append(_stage("gitea", "Gitea (agent pull requests)",
+                      gitea_ok if settings.gitea_enabled else False,
+                      gitea_detail, gitea_fix, optional=True))
     return out
+
+
+def _gitea_gaps() -> list[dict]:
+    """Enabled Gitea accounts that cannot open a repo yet (read-only: nothing is
+    granted here). [] when Gitea cannot be asked."""
+    from . import gitea
+    if not gitea.enabled():
+        return []
+    try:
+        return asyncio.run(gitea.backfill_access(dry=True))["missing"]
+    except Exception:
+        return []
 
 
 def summary(st: list[dict]) -> dict:

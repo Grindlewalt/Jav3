@@ -442,6 +442,16 @@ export const COMMANDS = [
     run: (_, env) => { env.navigate('/memory') },
   },
   {
+    name: 'git', usage: '[project]', busyOk: true,
+    help: 'the Git page: agent pull requests, branches, history, who can open the repo',
+    args: (env) => projectOptions(env.host),
+    run: (arg, env) => {
+      if (!arg) { env.navigate('/git'); return }
+      need(env.host.projects.some((p) => p.slug === arg), `no project “${arg}”`)
+      env.navigate(`/git/${arg}`)
+    },
+  },
+  {
     name: 'window', aliases: ['open'], usage: '<card>', busyOk: true,
     help: 'open one of the project’s cards beside the chat',
     args: () => WINDOW_TYPES.map(([value, label]) => ({ value, label: value, meta: label })),

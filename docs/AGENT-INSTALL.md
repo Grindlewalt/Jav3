@@ -356,6 +356,7 @@ End with a short report the person can keep:
 | `/setup` says it needs the one-time link | `setup --status` prints the link with the token. |
 | Docker "permission denied" | The user isn't in the `docker` group. That's the person's call (the docker group is effectively root). |
 | a Docker box's `--memory` is ignored (Raspberry Pi) | The kernel boots with the memory cgroup off. Fixing it means editing `/boot/firmware/cmdline.txt` and rebooting: the person's call. |
+| `doctor` says a Gitea account "cannot open every repo yet" | A person's Gitea account was enabled or made outside Jav3. Run `$PY -m backend.cli gitea-setup --access` (add `--dry-run` to preview). It only adds read access. |
 | disk full during the image build | Pick a state dir on a bigger disk (`--state-dir`), then re-run. |
 
 Anything else: stop and report the exact command and output. Don't improvise

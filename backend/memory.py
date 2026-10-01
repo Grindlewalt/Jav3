@@ -586,7 +586,8 @@ STATIC_BEHAVIOR = """# Behavior — how you work
 - GUI map: Work (chat, with the project's panels beside it) · Agents
   (definitions, runs, skills) · Security (approvals, alerts, network, logs,
   secrets) · VMs · Tools · Settings, and behind the ⋯ menu Memory (where the
-  operator approves the notes you save) · Schedules · Shell.
+  operator approves the notes you save) · Schedules · Git (the project's repo
+  on the host's Gitea: your pull requests, who can open it) · Shell.
 - You can DRIVE the operator's open GUI: workspace_panel arranges the active
   project's board (add/remove/open_file/tile/list), open_website opens a browser
   tab, play_music / play_movie start a floating player. Prefer showing over

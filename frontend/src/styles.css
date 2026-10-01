@@ -4452,3 +4452,41 @@ a:has(> .nav-dot) { position: relative; }
 .tool-old { overflow-wrap: anywhere; }
 .tool-gate { font-size: var(--fs-xs); }
 .tool-card .tool-reqs { margin-top: var(--sp-3); }
+/* Git page */
+.git-page > .card, .git-page > .git-bar, .git-page > p { margin-bottom: var(--sp-7); }
+.git-bar { display: flex; align-items: center; gap: var(--sp-5); flex-wrap: wrap; }
+.git-bar select { max-width: 100%; }
+.git-refresh { display: flex; justify-content: flex-end; margin-bottom: var(--sp-3); }
+.git-note { margin: var(--sp-4) 0 0; }
+.git-card-link { margin-left: auto; color: var(--dim); }
+.git-sync { display: flex; align-items: center; gap: var(--sp-5); flex-wrap: wrap; }
+.git-sync > .grow { min-width: 12rem; }
+.git-pulls, .git-commits, .git-access, .git-chips { list-style: none; margin: 0; padding: 0; }
+.git-pull { padding: var(--sp-5) 0; border-top: 1px solid var(--border); }
+.git-pull:first-child { border-top: 0; padding-top: 0; }
+.git-pull-row { display: flex; align-items: center; gap: var(--sp-5); min-width: 0; }
+.git-pull-row > .grow { min-width: 0; }
+.git-branch-name { max-width: 14rem; flex-shrink: 1; color: var(--dim); }
+.git-pull-actions { display: flex; align-items: center; gap: var(--sp-5); margin-top: var(--sp-4);
+  flex-wrap: wrap; }
+.git-diff-view { margin-top: var(--sp-5); max-height: 28rem; overflow: auto; border-radius: 6px; }
+.mem-dl.file { color: var(--dim); font-weight: 600; }
+.git-recent { margin-top: var(--sp-6); }
+.git-recent > summary { cursor: pointer; }
+.git-recent .git-pull-row { padding: var(--sp-2) 0; }
+.git-chips { display: flex; flex-wrap: wrap; gap: var(--sp-4); }
+.git-chip { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+.git-chip.on { background: var(--panel-2); color: var(--text); }
+.git-commits li { display: flex; align-items: baseline; gap: var(--sp-5); padding: var(--sp-2) 0;
+  min-width: 0; }
+.git-commits li > .grow { min-width: 0; }
+.git-commits + button { margin-top: var(--sp-5); }
+.git-access { display: flex; flex-wrap: wrap; gap: var(--sp-4) var(--sp-8); }
+.git-access li { display: flex; align-items: center; gap: var(--sp-4); }
+.git-access select { width: auto; }
+@media (max-width: 768px) {
+  .git-pull-row { flex-wrap: wrap; }
+  .git-pull-row > strong { flex-basis: 100%; order: 2; white-space: normal; }
+  .git-branch-name { max-width: 100%; }
+  .git-commits li { flex-wrap: wrap; }
+}

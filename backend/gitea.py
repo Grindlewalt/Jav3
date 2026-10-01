@@ -55,6 +55,11 @@ class GiteaUnreachable(GiteaError):
     """Nothing answered: the service is down, or the port is wrong."""
 
 
+class GiteaNotFound(GiteaError):
+    """Gitea has no such repo, branch, pull request or account (a 404 nobody
+    asked to see)."""
+
+
 class GiteaRefused(GiteaError):
     """Gitea answered and declined a merge (conflict, protection). The pull
     request is untouched and the Jav3 request stays pending."""
@@ -195,14 +200,14 @@ def new_branch() -> str:
 # --- API -----------------------------------------------------------------------
 
 async def api(method: str, path: str, *, token: str | None = None, json_body=None,
-              allow: tuple[int, ...] = ()) -> httpx.Response:
+              params: dict | None = None, allow: tuple[int, ...] = ()) -> httpx.Response:
     tok = token or admin_token()
     if not tok:
         raise GiteaOff("Gitea admin token missing")
     async with httpx.AsyncClient(base_url=api_base() + "/api/v1", transport=_transport,
                                  timeout=API_TIMEOUT) as c:
         try:
-            r = await c.request(method, path, json=json_body,
+            r = await c.request(method, path, json=json_body, params=params,
                                 headers={"Authorization": f"token {tok}",
                                          "Accept": "application/json"})
         except httpx.HTTPError as e:
@@ -210,9 +215,24 @@ async def api(method: str, path: str, *, token: str | None = None, json_body=Non
             raise GiteaUnreachable(scrub(
                 f"Gitea isn't answering at {api_base()} ({detail})")) from None
     if r.status_code >= 400 and r.status_code not in allow:
-        raise GiteaError(scrub(f"Gitea refused {method} {path} ({r.status_code}): "
-                               f"{_api_message(r)}"))
+        err = GiteaNotFound if r.status_code == 404 else GiteaError
+        raise err(scrub(f"Gitea refused {method} {path} ({r.status_code}): "
+                        f"{_api_message(r)}"))
     return r
+
+
+async def _all(path: str, params: dict | None = None, per: int = 50, cap: int = 8) -> list:
+    """Every row of a paged list endpoint (Gitea answers 30 by default, 50 at
+    most). `cap` pages is a ceiling, not an expectation: a Jav3 host has a
+    handful of repos and accounts."""
+    rows: list = []
+    for page in range(1, cap + 1):
+        r = await api("GET", path, params={**(params or {}), "limit": per, "page": page})
+        got = r.json()
+        rows += got
+        if len(got) < per:
+            break
+    return rows
 
 
 async def version() -> str | None:
@@ -235,8 +255,9 @@ def _protection(o: str) -> dict:
 
 async def ensure_remote_repo(slug: str) -> dict:
     """Idempotent: the private repo `<owner>/<slug>`, the bot as a write
-    collaborator (branches only: main is protected against it), and main's
-    protection rule re-asserted every time."""
+    collaborator (branches only: main is protected against it), every other
+    enabled account as a read collaborator (see grant_default_access), and
+    main's protection rule re-asserted every time."""
     if not _SLUG.match(slug or ""):
         raise ValueError(f"bad project slug {slug!r}")
     o = owner()
@@ -249,6 +270,7 @@ async def ensure_remote_repo(slug: str) -> dict:
     repo = r.json()
     await api("PUT", f"/repos/{o}/{slug}/collaborators/{bot_user()}",
               json_body={"permission": "write"})
+    await _share_quietly(slug)
     rule = _protection(o)
     r = await api("GET", f"/repos/{o}/{slug}/branch_protections/main", allow=(404,))
     if r.status_code == 404:
@@ -633,7 +655,8 @@ async def reconcile(slug: str) -> None:
 
 async def status() -> dict:
     out = {"enabled": bool(settings.gitea_enabled), "configured": enabled(),
-           "url": public_url(), "port": settings.gitea_port, "owner": owner(),
+           "url": public_url(), "url_configured": bool(settings.gitea_url.strip()),
+           "port": settings.gitea_port, "owner": owner(),
            "bot": bot_user(), "running": False, "version": None,
            "tokens_private": all(token_file_ok(p) for p in (
                settings.gitea_admin_token_path, settings.gitea_bot_token_path))}
@@ -650,19 +673,12 @@ async def status() -> dict:
     return out
 
 
-async def list_repos() -> list[dict]:
-    r = await api("GET", f"/users/{owner()}/repos?limit=50")
-    return [{"name": x.get("name"), "private": x.get("private"),
-             "url": f"{public_url()}/{owner()}/{x.get('name')}",
-             "updated": x.get("updated_at")} for x in r.json()]
-
-
 async def list_users() -> list[dict]:
-    r = await api("GET", "/admin/users?limit=50")
+    rows = await _all("/admin/users")
     return [{"login": u.get("login"), "email": u.get("email"),
              "is_admin": u.get("is_admin"), "active": u.get("active"),
              "prohibit_login": u.get("prohibit_login"),
-             "bot": u.get("login") == bot_user()} for u in r.json()]
+             "bot": u.get("login") == bot_user()} for u in rows]
 
 
 _LOGIN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,38}$")
@@ -681,7 +697,7 @@ async def create_user(login: str, email: str, password: str) -> dict:
     r = await api("POST", "/admin/users", json_body={
         "username": login, "email": email or f"{login}@localhost",
         "password": password, "must_change_password": True, "send_notify": False})
-    return {"login": r.json().get("login")}
+    return {"login": r.json().get("login"), **await _share_everywhere(login)}
 
 
 async def _edit_user(login: str, body: dict) -> None:
@@ -698,8 +714,403 @@ async def reset_password(login: str, password: str) -> None:
     await _edit_user(login, {"password": password, "must_change_password": True})
 
 
-async def set_disabled(login: str, disabled: bool) -> None:
+async def set_disabled(login: str, disabled: bool) -> dict:
     await _edit_user(login, {"prohibit_login": bool(disabled), "active": not disabled})
+    # an account that can sign in again gets what every enabled one has
+    return {} if disabled else await _share_everywhere(login)
+
+
+# --- access: who besides the owner and the bot can open a repo -------------------
+#
+# Gitea is private (DEFAULT_PRIVATE, REQUIRE_SIGNIN_VIEW) and every repo is made
+# with the operator's token, so a second account sees nothing until it is a
+# collaborator. The rule: every enabled account that is not the owner, the bot
+# or a site admin (an admin sees everything already) READS every repo. It is
+# applied where repos and accounts appear (ensure_remote_repo, create_user,
+# enabling an account) and re-checked by `gitea-setup --access` and doctor.
+# Main stays protected: only the owner pushes or merges, whatever level this is.
+# A grant is never lowered here: a write the operator chose is kept.
+
+ACCESS_LEVELS = ("read", "write")
+
+
+def _grantable(u: dict) -> bool:
+    return bool(u.get("login") and u["login"] not in (owner(), bot_user())
+                and u.get("active") and not u.get("prohibit_login")
+                and not u.get("is_admin"))
+
+
+async def _repo_names() -> list[str]:
+    return [x["name"] for x in await _all(f"/users/{owner()}/repos") if x.get("name")]
+
+
+async def _collaborator_logins(slug: str) -> list[str]:
+    rows = await _all(f"/repos/{owner()}/{slug}/collaborators")
+    return [u["login"] for u in rows if u.get("login")]
+
+
+async def _put_access(slug: str, login: str, level: str) -> None:
+    await api("PUT", f"/repos/{owner()}/{slug}/collaborators/{login}",
+              json_body={"permission": level})
+
+
+async def _missing_access(slug: str, logins: list[str]) -> list[str]:
+    if not logins:
+        return []
+    have = set(await _collaborator_logins(slug))
+    return [l for l in logins if l not in have]
+
+
+async def grant_default_access(slug: str, logins: list[str] | None = None) -> list[str]:
+    """Read access on one repo for the accounts that have none yet. Idempotent.
+    Returns who was granted now."""
+    if logins is None:
+        logins = [u["login"] for u in await list_users() if _grantable(u)]
+    new = await _missing_access(slug, logins)
+    for login in new:
+        await _put_access(slug, login, "read")
+    return new
+
+
+async def _share_quietly(slug: str) -> None:
+    """ensure_remote_repo's step. A failure is logged, not raised: the agent's
+    push request must not fail over an account list. `gitea-setup --access`
+    and doctor find the gap."""
+    try:
+        await grant_default_access(slug)
+    except (GiteaError, GiteaOff) as e:
+        log.warning("could not share %s with the other accounts: %s", slug, e)
+
+
+async def _share_everywhere(login: str) -> dict:
+    """A new or re-enabled account reads every repo. The account change has
+    already happened, so a failure here comes back as words, not an error."""
+    try:
+        n = 0
+        for slug in await _repo_names():
+            n += bool(await grant_default_access(slug, [login]))
+        return {"shared": n}
+    except (GiteaError, GiteaOff) as e:
+        return {"shared": 0, "share_error": scrub(str(e))}
+
+
+async def backfill_access(dry: bool = False) -> dict:
+    """Every repo of the owner, every enabled account: read where there is no
+    grant. dry only reports. {"accounts", "repos", "missing", "granted"}."""
+    logins = [u["login"] for u in await list_users() if _grantable(u)]
+    out = {"accounts": logins, "repos": 0, "missing": [], "granted": []}
+    if not logins:
+        return out
+    names = await _repo_names()
+    out["repos"] = len(names)
+    for slug in names:
+        for login in await _missing_access(slug, logins):
+            out["missing"].append({"repo": slug, "login": login})
+            if not dry:
+                await _put_access(slug, login, "read")
+                out["granted"].append({"repo": slug, "login": login})
+    return out
+
+
+async def _permission(slug: str, login: str) -> str:
+    r = await api("GET", f"/repos/{owner()}/{slug}/collaborators/{login}/permission",
+                  allow=(404,))
+    if r.status_code == 404:
+        return "none"
+    return str(r.json().get("permission") or "none")
+
+
+async def repo_access(slug: str) -> dict:
+    """The Git page's Access row: the owner, then everyone with a grant and
+    their level, then the enabled accounts that have none."""
+    _check_slug(slug)
+    users = {u["login"]: u for u in await list_users()}
+    logins = await _collaborator_logins(slug)
+    levels = await asyncio.gather(*(_permission(slug, l) for l in logins))
+    rows = [{"login": owner(), "permission": "owner", "owner": True}]
+    for login, level in zip(logins, levels):
+        u = users.get(login) or {}
+        rows.append({"login": login, "permission": level, "bot": login == bot_user(),
+                     "admin": bool(u.get("is_admin")),
+                     "disabled": bool(u.get("prohibit_login") or u.get("active") is False)})
+    seen = {owner(), *logins}
+    for login, u in users.items():
+        if login not in seen and not u.get("bot") and not u.get("is_admin"):
+            rows.append({"login": login, "permission": "none", "bot": False, "admin": False,
+                         "disabled": bool(u.get("prohibit_login") or u.get("active") is False)})
+    return {"owner": owner(), "bot": bot_user(), "levels": list(ACCESS_LEVELS),
+            "access": rows}
+
+
+async def set_access(slug: str, login: str, level: str) -> dict:
+    _check_slug(slug)
+    _check_login(login)
+    if level not in ACCESS_LEVELS:
+        raise ValueError(f"access is one of: {', '.join(ACCESS_LEVELS)}")
+    if login in (owner(), bot_user()):
+        raise ValueError(f"{login} is managed by Jav3: the owner owns the repo and "
+                         "the agent bot always writes to its own branches")
+    if not any(u["login"] == login for u in await list_users()):
+        raise GiteaNotFound(f"there is no Gitea account called {login}")
+    await _put_access(slug, login, level)
+    return {"login": login, "permission": level}
+
+
+# --- the Git page: one repo, read from Gitea ------------------------------------
+
+_BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
+DIFF_CAP = 20000            # the same ceiling gitgate.diff_text puts on a host diff
+RECENT_REQUESTS = 5
+
+
+def _check_slug(slug: str) -> str:
+    if not _SLUG.match(slug or ""):
+        raise ValueError(f"bad project slug {slug!r}")
+    return slug
+
+
+def _check_branch(name: str) -> str:
+    if not isinstance(name, str) or not _BRANCH.match(name) or ".." in name:
+        raise ValueError(f"bad branch name {name!r}")
+    return name
+
+
+def _commit_row(c: dict) -> dict:
+    cm = c.get("commit") or {}
+    msg = (cm.get("message") or "").strip()
+    au = cm.get("author") or {}
+    sha = c.get("sha") or c.get("id") or ""
+    return {"sha": sha, "short": sha[:7],
+            "subject": scrub(msg.splitlines()[0][:200]) if msg else "",
+            "author": scrub(au.get("name") or ""),
+            "date": au.get("date") or c.get("created") or c.get("timestamp")}
+
+
+async def _commits_page(slug: str, branch: str, page: int, limit: int) -> tuple[list[dict], bool]:
+    """One page of a branch's history, newest first, and whether more follows.
+    An empty repo has no history: 409 or 404 read as nothing."""
+    r = await api("GET", f"/repos/{owner()}/{slug}/commits", allow=(404, 409),
+                  params={"sha": branch, "page": page, "limit": limit, "stat": "false",
+                          "verification": "false", "files": "false"})
+    if r.status_code in (404, 409):
+        return [], False
+    rows = [_commit_row(c) for c in r.json()]
+    more = r.headers.get("x-hasmore")
+    return rows, (more == "true") if more is not None else len(rows) >= limit
+
+
+async def commits(slug: str, branch: str | None = None, page: int = 1,
+                  limit: int = 10) -> dict:
+    _check_slug(slug)
+    b = _check_branch(branch or "main")
+    page, limit = max(1, int(page)), min(max(1, int(limit)), 50)
+    rows, more = await _commits_page(slug, b, page, limit)
+    return {"branch": b, "page": page, "commits": rows, "more": more}
+
+
+async def _pending_counts() -> dict[str, int]:
+    db = await get_db()
+    try:
+        async with db.execute(
+                "SELECT project_slug, COUNT(*) AS n FROM git_requests "
+                "WHERE kind = 'push' AND status = 'pending' GROUP BY project_slug") as cur:
+            return {r["project_slug"]: r["n"] for r in await cur.fetchall()}
+    finally:
+        await db.close()
+
+
+async def list_repos() -> list[dict]:
+    """The owner's repos with what the Git page's project list shows: default
+    branch, the last commit, how many agent pull requests wait (from Jav3's own
+    rows: no per-PR Gitea call) and how many accounts besides the bot can open
+    the repo. A repo Gitea will not describe still lists, with blanks."""
+    rows = await _all(f"/users/{owner()}/repos")
+    waiting = await _pending_counts()
+    gate = asyncio.Semaphore(6)
+
+    async def one(x: dict) -> dict:
+        slug = x.get("name")
+        branch = x.get("default_branch") or "main"
+        row = {"name": slug, "slug": slug, "private": x.get("private"),
+               "url": web_url(slug), "updated": x.get("updated_at"),
+               "default_branch": branch, "empty": bool(x.get("empty")),
+               "last_commit": None, "shared_with": None,
+               "open_prs": waiting.get(slug, 0)}
+        async with gate:
+            try:
+                if not row["empty"]:
+                    got, _ = await _commits_page(slug, branch, 1, 1)
+                    row["last_commit"] = got[0] if got else None
+                row["shared_with"] = len(
+                    [l for l in await _collaborator_logins(slug) if l != bot_user()])
+            except GiteaError as e:
+                log.info("gitea repo list %s: %s", slug, e)
+        return row
+
+    return list(await asyncio.gather(*(one(x) for x in rows)))
+
+
+async def branches(slug: str) -> list[dict]:
+    """main first (protected), then the agent's branches, then the rest. An
+    agent branch carries its pull request's number while one is waiting."""
+    _check_slug(slug)
+    rows = await _all(f"/repos/{owner()}/{slug}/branches")
+    waiting = {r["branch"]: r["pr_number"] for r in await _push_rows(slug, pending=True)}
+    out = []
+    for b in rows:
+        name = b.get("name") or ""
+        c = b.get("commit") or {}
+        msg = (c.get("message") or "").strip()
+        out.append({"name": name, "protected": bool(b.get("protected")),
+                    "sha": c.get("id"), "short": (c.get("id") or "")[:7],
+                    "subject": scrub(msg.splitlines()[0][:200]) if msg else "",
+                    "date": c.get("timestamp"),
+                    "agent": bool(_AGENT_REF.match(name)), "pr_number": waiting.get(name)})
+    out.sort(key=lambda b: (b["name"] != "main", not b["agent"], b["name"]))
+    return out
+
+
+# --- the Git page: the agent's pull requests --------------------------------------
+
+_STAT = re.compile(r"(\d+) files? changed(?:, (\d+) insertions?\(\+\))?"
+                   r"(?:, (\d+) deletions?\(-\))?")
+
+
+def stat_numbers(summary: str | None) -> tuple[int | None, int | None, int | None]:
+    """(files, added, removed) from the closing line of a `git diff --stat`, which
+    is what the request row keeps. None when there is no such line."""
+    found = _STAT.findall(summary or "")
+    if not found:
+        return None, None, None
+    files, add, rem = found[-1]
+    return int(files), int(add or 0), int(rem or 0)
+
+
+async def _push_rows(slug: str, pending: bool | None = None, number: int | None = None,
+                     limit: int | None = None) -> list[dict]:
+    q = "SELECT * FROM git_requests WHERE project_slug = ? AND kind = 'push'"
+    args: list = [slug]
+    if pending is True:
+        q += " AND status = 'pending'"
+    elif pending is False:
+        q += " AND status != 'pending'"
+    if number is not None:
+        q += " AND pr_number = ?"
+        args.append(number)
+    q += " ORDER BY id DESC" + (f" LIMIT {int(limit)}" if limit else "")
+    db = await get_db()
+    try:
+        async with db.execute(q, args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+    finally:
+        await db.close()
+
+
+def _pull_row(slug: str, r: dict) -> dict:
+    files, add, rem = stat_numbers(r.get("summary"))
+    n = r.get("pr_number")
+    title = (r.get("message") or "").strip().splitlines()
+    return {"id": r["id"], "pr_number": n, "branch": r.get("branch"),
+            "title": scrub(title[0][:200]) if title else "",
+            "status": r["status"], "error": scrub(r["error"]) if r.get("error") else None,
+            "created_at": r.get("created_at"), "decided_at": r.get("decided_at"),
+            "files": files, "added": add, "removed": rem,
+            "pr_url": f"{web_url(slug)}/pulls/{n}" if n else None}
+
+
+async def agent_pulls(slug: str) -> dict:
+    """The agent's pull requests for one repo: the ones waiting on the operator
+    and the last few decided. Only requests Jav3 itself filed (a `git_requests`
+    row of kind push), never an arbitrary pull request in Gitea. The totals are
+    from the diff stat taken when it was filed. One reconcile first, so a PR
+    merged or closed in Gitea is settled; that is a Gitea call per waiting PR,
+    so the page reads this on open and on a click, never on a timer."""
+    _check_slug(slug)
+    await reconcile(slug)
+    return {"pulls": [_pull_row(slug, r) for r in await _push_rows(slug, pending=True)],
+            "recent": [_pull_row(slug, r) for r in
+                       await _push_rows(slug, pending=False, limit=RECENT_REQUESTS)]}
+
+
+async def pull_diff(slug: str, number: int) -> dict:
+    """An agent pull request's diff from Gitea, secret values replaced by their
+    placeholders (what every other surface does with a tool result) and cut to
+    DIFF_CAP characters."""
+    _check_slug(slug)
+    rows = await _push_rows(slug, number=number)
+    if not rows:
+        raise GiteaNotFound(f"pull request #{number} is not one of the agent's requests "
+                            f"for {slug}")
+    r = await api("GET", f"/repos/{owner()}/{slug}/pulls/{number}.diff")
+    from . import secrets as vault          # lazily: secrets imports auth
+    text = vault.scrub(scrub(r.text)) or ""
+    cut = len(text) > DIFF_CAP
+    return {"diff": text[:DIFF_CAP] + ("\n... [truncated]" if cut else ""), "truncated": cut,
+            "pr_url": f"{web_url(slug)}/pulls/{number}"}
+
+
+# --- the Git page: the host's main against Gitea's ------------------------------
+
+async def _count(slug: str, spec: str) -> int:
+    rc, out, _ = await gitgate.run_git(slug, "rev-list", "--count", spec)
+    return int(out.strip() or 0) if rc == 0 else 0
+
+
+async def sync_status(slug: str) -> dict:
+    """Where the host's main and Gitea's main stand. state: in_sync, host_ahead
+    (Push main), gitea_ahead (a merge in Gitea the host has not taken in yet),
+    diverged, empty (neither has a commit yet) or unknown (Gitea's main is not
+    in the host's repo and could not be fetched). ahead = commits the host has
+    that Gitea lacks, behind = the other way."""
+    _check_slug(slug)
+    await gitgate.ensure_repo(slug)
+    host = None
+    if await _has_head(slug):
+        _, out, _ = await gitgate.run_git(slug, "rev-parse", "HEAD")
+        host = out.strip()
+    r = await api("GET", f"/repos/{owner()}/{slug}/branches/main", allow=(404,))
+    remote = ((r.json().get("commit") or {}).get("id") or None) if r.status_code == 200 else None
+    out = {"host": host, "gitea": remote, "ahead": 0, "behind": 0, "state": "in_sync"}
+    if host == remote:
+        out["state"] = "in_sync" if host else "empty"
+        return out
+    if remote is None:
+        out.update(state="host_ahead", ahead=await _count(slug, "HEAD"))
+        return out
+    if host is None:
+        out.update(state="gitea_ahead")
+        return out
+    rc, _, _ = await gitgate.run_git(slug, "cat-file", "-e", f"{remote}^{{commit}}")
+    if rc != 0:                 # merged in Gitea since the host last looked: take the objects
+        frc, ferr = await _git_net(slug, "fetch", "-q", "--", repo_url(slug),
+                                   "+refs/heads/main:refs/remotes/gitea/main",
+                                   env=operator_env())
+        if frc != 0:
+            return {**out, "state": "unknown", "error": f"fetch from Gitea failed: {ferr}"}
+    up, _, _ = await gitgate.run_git(slug, "merge-base", "--is-ancestor", remote, host)
+    down, _, _ = await gitgate.run_git(slug, "merge-base", "--is-ancestor", host, remote)
+    out["ahead"] = await _count(slug, f"{remote}..{host}")
+    out["behind"] = await _count(slug, f"{host}..{remote}")
+    out["state"] = "host_ahead" if up == 0 else "gitea_ahead" if down == 0 else "diverged"
+    return out
+
+
+async def push_host_main(slug: str) -> dict:
+    """The Git page's Push main. Brings the two mains level the way the next
+    approval would: a host that is behind fast-forwards to Gitea's main (HEAD and
+    index only: the live files stay), a host that is ahead pushes as the
+    operator, and a diverged pair is refused. Returns the new sync_status."""
+    _check_slug(slug)
+    if not enabled():
+        raise GiteaOff("Gitea is not set up")
+    await gitgate.ensure_repo(slug)
+    err = await sync_main(slug)
+    if err:
+        raise GiteaError(err)
+    err = await push_main(slug)
+    if err:
+        raise GiteaError(err)
+    return await sync_status(slug)
 
 
 def egress_refusal(host: str, port) -> str | None:

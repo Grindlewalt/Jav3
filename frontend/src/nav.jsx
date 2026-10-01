@@ -9,9 +9,10 @@
 //
 // The bar carries six primaries — the surfaces work starts from, Review (the
 // one link that asks the operator for something, so it wears the pending
-// count), and Settings. Three more sit behind ⋯: Memory (what Jav3 reads
-// before every turn), Schedules, and Shell (the terminal-style chat on trial
-// beside the classic one). Voice and Artifacts are deliberately
+// count), and Settings. Four more sit behind ⋯: Memory (what Jav3 reads
+// before every turn), Schedules, Git (a project's repo on the host's Gitea:
+// the agent's pull requests, who can open it), and Shell (the terminal-style
+// chat on trial beside the classic one). Voice and Artifacts are deliberately
 // absent — their routes still work, they are just not advertised — and
 // Network and Logs are Review's sub-tabs now, not destinations of their own.
 import { createContext, useEffect } from 'react'
@@ -56,6 +57,9 @@ export const PATHS = {
   // a terminal prompt in a window: the /shell trial
   shell: <><rect x="3" y="4.5" width="18" height="15" rx="2.2" />
            <path d="m7.5 10 3 2.5-3 2.5M12.5 15.5h4" /></>,
+  // a branch: two commits on a line, a third joining it from the side (the Git page)
+  git: <><circle cx="6.5" cy="5.6" r="2.2" /><circle cx="6.5" cy="18.4" r="2.2" />
+         <circle cx="17.5" cy="8.6" r="2.2" /><path d="M6.5 7.8v8.4M17.5 10.8v.6a4 4 0 0 1-4 4h-7" /></>,
   // a box, front face and lid: the VM manager
   vms: <><path d="M12 3.2 20 7.4v9.2l-8 4.2-8-4.2V7.4Z" /><path d="M4 7.4l8 4.2 8-4.2M12 11.6v9.2" /></>,
   history: <path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3M4.5 4.5v3.2h3.2M12 8v4l2.8 1.8" />,
@@ -98,6 +102,7 @@ export const NAV_ITEMS = [
   { to: '/settings', label: 'Settings', icon: 'settings', primary: true },
   { to: '/memory', label: 'Memory', icon: 'memory', count: 'memory' },
   { to: '/schedules', label: 'Schedules', icon: 'schedules' },
+  { to: '/git', label: 'Git', icon: 'git' },
   { to: '/shell', label: 'Shell', icon: 'shell' },
 ]
 
