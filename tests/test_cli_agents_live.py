@@ -273,6 +273,26 @@ async def test_the_chat_you_came_from_is_selected_and_marked():
         assert await wait_for(lambda: not app.busy)
 
 
+async def test_a_running_chat_nobody_can_name_does_not_refetch_the_list_every_reload():
+    """An incognito chat runs but is not in /api/conversations: it stays off the
+    screen, and the list is not asked for again on every 1.5 s reload."""
+    srv = LiveServer()
+    srv.running = [90]
+    srv.convs = [conv(7, "old chat")]
+    app = await boot(srv)
+    async with app.run_test(size=(140, 40)) as pilot:
+        scr = await open_agents(pilot, app)
+        before = srv.calls.count(("GET", "/api/conversations"))
+        reloads = len(srv.agent_queries)
+        assert await wait_for(lambda: len(srv.agent_queries) >= reloads + 3, tries=140)
+        assert srv.calls.count(("GET", "/api/conversations")) - before <= 1
+        assert not titles(scr, "chat")
+        # it is named once the server lists it: that is looked up again after a while
+        srv.convs = [conv(90, "now listed"), conv(7, "old chat")]
+        scr.feed._tried.clear()                       # the retry delay, skipped
+        assert await wait_for(lambda: titles(scr, "now listed"), tries=70)
+
+
 async def test_servers_without_running_or_conversations_routes_still_list_the_tree():
     """An older server answers 404 to /api/chat/running: the tree is all there is."""
     class Old(LiveServer):
