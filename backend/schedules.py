@@ -291,8 +291,11 @@ async def purge_schedule(sid: int):
     return {"ok": True}
 
 
-@router.post("/{sid}/run-now")
+@router.post("/{sid}/run-now", status_code=202)
 async def run_now(sid: int):
+    """Start a run in the background and answer at once (ROBUST-18: it used to
+    hold the request open for the whole run, and nothing stopped a second one).
+    The row says `running…` until it finishes; next_run is not touched."""
     db = await get_db()
     try:
         async with db.execute(
@@ -303,8 +306,15 @@ async def run_now(sid: int):
         await db.close()
     if row is None:
         raise HTTPException(status_code=404, detail="no such schedule")
-    result = await _run_schedule(dict(row))
-    return {"result": result}
+    if not _reserve(sid):
+        raise HTTPException(status_code=409, detail="this schedule is already running")
+    try:
+        await _mark_running(sid)
+    except BaseException:
+        _running.pop(sid, None)
+        raise
+    _launch(dict(row))
+    return {"started": True}
 
 
 async def _run_jarvis_headless(task: str, project_slug: str | None,
@@ -381,6 +391,101 @@ async def _sweep_trash() -> None:
         await db.close()
 
 
+# What last_result says while a run is in flight. A restart that ends the run
+# leaves it behind; _mark_interrupted turns it into the truth at boot.
+RUNNING = "running…"
+_running: dict[int, "asyncio.Future | asyncio.Task"] = {}   # schedule id -> its run
+
+
+def _reserve(sid: int) -> bool:
+    """Synchronously hold a schedule's slot (no await between the check and the
+    set), so the heartbeat and run-now cannot both start it."""
+    if sid in _running:
+        return False
+    _running[sid] = asyncio.get_running_loop().create_future()
+    return True
+
+
+async def _mark_running(sid: int) -> None:
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE schedules SET last_run = ?, last_result = ? "
+            "WHERE id = ? AND deleted_at IS NULL",
+            (_now().isoformat(timespec="minutes"), RUNNING, sid))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+async def _claim(row: dict) -> bool:
+    """Take a due schedule BEFORE running it: advance next_run and mark it
+    running in one UPDATE, so a restart mid-run (a deploy during a two-hour
+    agent run) does not run it again from scratch. The tick's list is a
+    snapshot, so the UPDATE re-checks that the row is still enabled, not
+    deleted and still due at the time we saw (an edit moves next_run); False
+    means somebody changed it first and it is not ours to run."""
+    now = _now()
+    nxt = compute_next(row["cadence_kind"], row["daily_at"],
+                       row["interval_minutes"], now)
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "UPDATE schedules SET next_run = ?, last_run = ?, last_result = ? "
+            "WHERE id = ? AND enabled = 1 AND deleted_at IS NULL AND next_run = ?",
+            (nxt.isoformat(timespec="minutes"), now.isoformat(timespec="minutes"),
+             RUNNING, row["id"], row["next_run"]))
+        await db.commit()
+        return cur.rowcount == 1
+    finally:
+        await db.close()
+
+
+async def _run_tracked(row: dict) -> None:
+    result = await _run_schedule(row)
+    now = _now()
+    # a run that outlasted its interval would be due again the moment it ends:
+    # step over the slots that went by while it ran
+    nxt = compute_next(row["cadence_kind"], row["daily_at"],
+                       row["interval_minutes"], now)
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE schedules SET last_result = ?, "
+            "next_run = CASE WHEN next_run <= ? THEN ? ELSE next_run END WHERE id = ?",
+            (result, now.isoformat(timespec="minutes"),
+             nxt.isoformat(timespec="minutes"), row["id"]))
+        await db.commit()
+    finally:
+        await db.close()
+
+
+def _launch(row: dict) -> None:
+    """Run a reserved schedule as a tracked task of its own."""
+    sid = row["id"]
+    task = asyncio.create_task(_run_tracked(row))
+    _running[sid] = task
+
+    def _done(t: asyncio.Task) -> None:
+        if _running.get(sid) is t:
+            _running.pop(sid, None)
+        if not t.cancelled():
+            t.exception()                    # retrieved: never an "unretrieved" warning
+    task.add_done_callback(_done)
+
+
+async def _mark_interrupted() -> None:
+    """At boot: a row still saying `running…` lost its run to the restart."""
+    db = await get_db()
+    try:
+        await db.execute(
+            "UPDATE schedules SET last_result = ? WHERE last_result = ?",
+            ("interrupted by a restart; it runs again at its next time", RUNNING))
+        await db.commit()
+    finally:
+        await db.close()
+
+
 async def _tick() -> None:
     now = _now()
     await _sweep_trash()
@@ -393,24 +498,29 @@ async def _tick() -> None:
             due = [dict(r) for r in await cur.fetchall()]
     finally:
         await db.close()
+    # claim each, then run it as a task of its own: one slow schedule no longer
+    # holds the others behind it, and a schedule still running (or started by
+    # run-now) is skipped rather than started twice
     for row in due:
-        result = await _run_schedule(row)
-        nxt = compute_next(row["cadence_kind"], row["daily_at"],
-                           row["interval_minutes"], _now())
-        db = await get_db()
+        if not _reserve(row["id"]):
+            continue
         try:
-            await db.execute(
-                "UPDATE schedules SET last_run = ?, last_result = ?, next_run = ? "
-                "WHERE id = ?",
-                (now.isoformat(timespec="minutes"), result,
-                 nxt.isoformat(timespec="minutes"), row["id"]))
-            await db.commit()
-        finally:
-            await db.close()
+            claimed = await _claim(row)
+        except BaseException:
+            _running.pop(row["id"], None)
+            raise
+        if claimed:
+            _launch(row)
+        else:
+            _running.pop(row["id"], None)
 
 
 async def scheduler_loop() -> None:
     """Background heartbeat. Never lets one bad tick stop the clock."""
+    try:
+        await _mark_interrupted()
+    except Exception:  # noqa: BLE001
+        pass
     while True:
         try:
             await _tick()
