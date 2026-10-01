@@ -489,8 +489,11 @@ def _decide(kind: str, severity: str, actor: str | None, level: str, prefs: dict
 
 async def decide(db: aiosqlite.Connection, kind: str, severity: str,
                  actor: str | None) -> dict:
-    return _decide(kind, severity, actor, await notify_level(db), await get_prefs(db),
-                   (await dnd_status(db))["on"])
+    try:
+        dnd_on = (await dnd_status(db))["on"]
+    except Exception:                           # noqa: BLE001 — fail toward pinging, not silence
+        dnd_on = False
+    return _decide(kind, severity, actor, await notify_level(db), await get_prefs(db), dnd_on)
 
 
 def decide_sync(con, kind: str, severity: str, actor: str | None = None) -> dict:

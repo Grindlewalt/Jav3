@@ -18,6 +18,7 @@ import pytest
 from backend import bus, egress, operator_ask, profiles, runtime, security
 from backend import db as db_mod
 from backend.auth import hash_password
+from backend.config import settings
 from backend.main import app
 
 REPO = Path(__file__).resolve().parent.parent
@@ -539,3 +540,63 @@ def test_the_critical_raisers_are_the_audited_ones():
     # the kinds that always ping whatever severity they carry
     assert security.ALWAYS_KINDS == {"egress_anomaly", "host_cut", "secret_leak",
                                      "proc_report_mismatch"}
+
+
+# --- the paths around raise_event --------------------------------------------------
+
+def test_imported_skill_alerts_use_the_same_decision(tmp_env):
+    """imported.alert (sync, no event loop) used to INSERT and publish with no
+    `ping` stamp. It goes through security.raise_sync now: stamped, and held by
+    do-not-disturb like the rest (a critical one breaking through)."""
+    import sqlite3
+    from backend.agent.tools import imported
+    asyncio.run(db_mod.init_db())
+
+    async def prep():
+        c = await db_mod.get_db()
+        try:
+            await security.set_dnd(c, True)
+        finally:
+            await c.close()
+    asyncio.run(prep())
+    q = bus.subscribe(security.SECURITY_CHAN)
+    try:
+        imported._alerted.clear()
+        imported.alert("skill_import_flag", "k1", "a flagged import", {"x": 1})
+        imported.alert("skill_pin_mismatch", "k2", "a drifted skill", {"y": 2},
+                       severity="critical")
+        got = []
+        while not q.empty():
+            got.append(q.get_nowait())
+    finally:
+        bus.unsubscribe(security.SECURITY_CHAN, q)
+    sec = [e for e in got if e["type"] == "security_event"]
+    assert [(e["kind"], e["tier"], e["ping"]) for e in sec] == [
+        ("skill_import_flag", "alert", False),                  # held back
+        ("skill_pin_mismatch", "critical", True)]               # breaks through
+    con = sqlite3.connect(settings.db_path)
+    rows = con.execute("SELECT kind, acknowledged FROM security_events ORDER BY id").fetchall()
+    con.close()
+    assert rows == [("skill_import_flag", 0), ("skill_pin_mismatch", 0)]
+
+
+async def test_the_migration_is_idempotent_and_old_rows_read_as_unmarked(db):
+    await db.execute("ALTER TABLE security_events DROP COLUMN actor")
+    await db.execute("ALTER TABLE security_events DROP COLUMN quiet")
+    await db.execute("INSERT INTO security_events(kind, severity, summary) "
+                     "VALUES ('write_flag', 'warn', 'an old row')")
+    await db.commit()
+    await db_mod._migrate_secsettings(db)
+    await db_mod._migrate_secsettings(db)
+    # the read side: _COLUMNS names the new columns
+    rows = await security.list_events(db)
+    assert rows[0]["actor"] is None and rows[0]["quiet"] is None and rows[0]["count"] == 1
+    # and a database from before the columns still takes an alert from imported.py
+    await db.execute("ALTER TABLE security_events DROP COLUMN quiet")
+    await db.commit()
+    import sqlite3
+    con = sqlite3.connect(settings.db_path)
+    try:
+        assert security.raise_sync(con, kind="skill_import_flag", summary="old db") is not None
+    finally:
+        con.close()
