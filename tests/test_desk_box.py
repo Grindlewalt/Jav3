@@ -603,6 +603,12 @@ def test_guest_desk_mode_runs_the_client_holds_the_display_and_ends_with_it(tmp_
             t.extractall(pkg, filter="data")
         assert (pkg / "backend" / "jav3_desk.py").is_file()       # the client ships
         assert (pkg / "backend" / "deskbox.py").is_file()
+        # the guest python has no site-packages on the image's system side: both
+        # modules must import on the stdlib alone (PIL / websockets are lazy)
+        r = subprocess.run([sys.executable, "-S", "-c",
+                            "import backend.jav3_desk, backend.deskbox; print('IMPORT-OK')"],
+                           cwd=pkg, env={"PYTHONPATH": str(pkg)}, capture_output=True, text=True)
+        assert "IMPORT-OK" in r.stdout, r.stderr[-500:]
         bin_dir = short / "bin"
         bin_dir.mkdir()
         for name, body in (("xdotool", FAKE_XDOTOOL), ("maim", FAKE_SHOT), ("import", FAKE_SHOT)):
