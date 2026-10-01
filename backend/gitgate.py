@@ -22,7 +22,15 @@ GIT_TIMEOUT = 30
 NET_TIMEOUT = 120       # push / fetch / ls-remote cross the internet on a Pi
 CLONE_TIMEOUT = 300
 
-GITIGNORE = ".staging/\n.workspace.json\n.context.json\ndata/\n"
+# The harness's own files at the project root: never part of a commit or a push,
+# whatever the project's .gitignore says (the agent can replace the host-written
+# one). `.todo.md` is the todo_update list. Used for .gitignore, for
+# .git/info/exclude (which `git add -A` honours and the agent cannot write): the
+# add in approve_request and gitea's snapshot rely on that one.
+RUNTIME_FILES = (".staging", ".workspace.json", ".context.json", ".todo.md", "data")
+GITIGNORE = ".staging/\n.workspace.json\n.context.json\n.todo.md\ndata/\n"
+_EXCLUDE = "# Jav3 runtime files (written by the host)\n" + "".join(
+    f"/{n}\n" for n in RUNTIME_FILES)
 
 
 def _project_dir(slug: str) -> Path:
@@ -93,6 +101,15 @@ async def ensure_repo(slug: str) -> None:
         gitignore = d / ".gitignore"
         if not gitignore.exists():
             gitignore.write_text(GITIGNORE)
+        # an `rm`/rewrite of .gitignore must not let the runtime files into a
+        # commit: info/exclude lives inside .git, which no agent tool can write
+        exclude = d / ".git" / "info" / "exclude"
+        try:
+            if not exclude.exists() or exclude.read_text() != _EXCLUDE:
+                exclude.parent.mkdir(exist_ok=True)
+                exclude.write_text(_EXCLUDE)
+        except OSError as e:
+            log.warning("could not write %s: %s", exclude, e)
 
 
 # --- GitHub remote plumbing --------------------------------------------------
@@ -324,13 +341,28 @@ async def create_request(slug: str, message: str, paths: list[str] | None = None
                          "a file first.")
     db = await get_db()
     try:
+        # BUILD-08: a project has one pending commit request. Older ones named a
+        # tree that no longer exists (one claimed a rename the commit could not
+        # record, one with no paths would `git add -A` whatever is there at
+        # approval), so the new request replaces them, and says so.
+        async with db.execute(
+                "SELECT id, message FROM git_requests WHERE project_slug = ? "
+                "AND kind = 'commit' AND status = 'pending' ORDER BY id", (slug,)) as cur:
+            old = [dict(r) for r in await cur.fetchall()]
         cur = await db.execute(
             "INSERT INTO git_requests (project_slug, message, paths, conversation_id) "
             "VALUES (?, ?, ?, ?)",
             (slug, message.strip(), json.dumps(paths) if paths else None,
              _requesting_turn()))
+        for o in old:
+            await db.execute(
+                "UPDATE git_requests SET status = 'rejected', error = ?, "
+                "decided_at = datetime('now') WHERE id = ? AND status = 'pending'",
+                (f"replaced by request #{cur.lastrowid}", o["id"]))
         await db.commit()
-        return await _fetch_request(db, cur.lastrowid)
+        row = await _fetch_request(db, cur.lastrowid)
+        row["replaced"] = old
+        return row
     finally:
         await db.close()
 
@@ -419,7 +451,7 @@ async def approve_request(rid: int, slug: str | None = None) -> dict:
         if paths:
             await run_git(slug, "add", "--", *paths, check=True)
         else:
-            await run_git(slug, "add", "-A", check=True)
+            await run_git(slug, "add", "-A", check=True)     # RUNTIME_FILES: info/exclude
         rc, _, _ = await run_git(slug, "diff", "--cached", "--quiet")
         rc_head, head, _ = await run_git(slug, "rev-parse", "--verify", "-q", "HEAD")
         if rc == 0 and rc_head == 0:

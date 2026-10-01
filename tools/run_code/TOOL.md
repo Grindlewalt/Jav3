@@ -18,20 +18,21 @@ parameters:
       type: integer
       description: Kill the run after this many seconds (default 60, max 300).
 ---
-The sandbox has no direct network and no secrets. With monitored egress on,
-pip/npm/curl go through the host's proxy and reach only hosts the project's
-Network policy allows (a proxy 403 = refused or queued: report the exact hosts,
-do not probe the sandbox); with it off they fail by design. `node`, `npm` and
-(in current images) `pytest` are installed: run and test in place.
+No direct network, no secrets. With monitored egress on, pip/npm/curl go through
+the host's proxy and reach only hosts the project's Network policy allows (a proxy
+403 = refused or queued: report the exact hosts, do not probe); with it off they
+fail by design. `node`, `npm` and (current images) `pytest` are installed.
+
+`command` runs under /bin/sh (dash: no arrays, PIPESTATUS, pipefail or [[ ]]; use
+`bash -c`). The interpreter is `python3`, not `python`. The cwd is already the
+project: no `cd "$(pwd)" &&`.
 
 Background jobs: redirect output (`cmd > /tmp/x.log 2>&1 &`) and kill what you
-start; an unredirected one is detached after ~2 s but keeps running, and keeps
-its port for everyone on the shared box.
+start; an unredirected one is detached after ~2 s but keeps running and keeps its
+port for everyone on the shared box.
 
-Your working directory is the project copy: read its files directly, and write
-results as files — they sync back to the project at turn end. That sync keeps
-EVERYTHING the run created, so put small throwaway scratch under /tmp, where it
-is NOT kept (it is RAM-backed and small, ~350 MB: no venvs or big installs
-there; use .venv in the project). node_modules, .venv, __pycache__,
-.pytest_cache and package caches are never kept. stdout/stderr are truncated
-past ~6k chars: print what matters, write the rest to a file.
+Files the run creates or changes sync back to the project at turn end, so put
+throwaway scratch under /tmp (RAM-backed, ~350 MB, not kept: no venvs or big
+installs; use .venv in the project). node_modules, .venv, __pycache__,
+.pytest_cache and package caches are never kept. stdout/stderr truncate past ~6k
+chars: print what matters, write the rest to a file.

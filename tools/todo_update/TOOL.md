@@ -14,13 +14,18 @@ parameters:
       enum: [add, check, uncheck, delete, list]
     text:
       type: string
-      description: The item text. For add, the new item. For check/uncheck/delete, the item to act on — matched against the list, so a few distinctive words are enough.
+      description: For add, the new item. For check/uncheck/delete, the item to act on (a few distinctive words are enough).
+    items:
+      type: array
+      items: {type: string}
+      description: For add, several items in one call (write a whole plan at once).
     index:
       type: integer
-      description: 0-based item index, only when `text` would be ambiguous. Positions shift as items are added, including by subagents running in parallel, so prefer text.
+      description: 0-based index, only when `text` is ambiguous. Positions shift as items are added; prefer text.
   required: [action]
 ---
-Check items off by `text`, not by an index you remember. Indexes move: your own
-adds and any parallel subagent's shift every position after them, so a number
-read a few calls ago points at a different item — and checking off the wrong one
-is worse than an error. Every call returns the current list.
+Check items off by `text`, not an index you remember: indexes move as you and
+parallel subagents add items, and checking off the wrong one is worse than an
+error. Add a whole plan in one call with `items`. A call answers with the lines it
+changed and a count; `list` shows everything. The list lives in a hidden file of
+its own; a project's `todo.md` is never edited (an existing one only seeds it).

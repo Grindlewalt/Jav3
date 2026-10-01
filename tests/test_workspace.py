@@ -2,6 +2,7 @@ import httpx
 import pytest
 
 from backend.auth import hash_password
+from backend.config import settings
 from backend.db import get_db, init_db
 from backend.main import app
 from backend.memory import ensure_memory_seeds
@@ -66,8 +67,8 @@ async def test_todos(client):
     r = await client.post("/api/projects/demo/todos", json={"action": "toggle", "index": 0})
     assert r.json()["todos"][0]["done"] is True
     # persisted as a plain markdown checklist the agent can read
-    r = await client.get("/api/projects/demo/file", params={"path": "todo.md"})
-    assert "- [x] write physics sim" in r.json()["content"]
+    # (the agent's own hidden file, not the project's todo.md)
+    assert "- [x] write physics sim" in (settings.projects_dir / "demo" / ".todo.md").read_text()
     r = await client.post("/api/projects/demo/todos", json={"action": "delete", "index": 0})
     assert r.json()["todos"] == []
 

@@ -11,6 +11,6 @@ parameters:
   properties:
     entry:
       type: string
-      description: One concise journal line.
+      description: One concise line, under 300 characters. Do not start it with a date; the date is added.
   required: [entry]
 ---
