@@ -23,6 +23,10 @@ CGROUP_ROOT = "/sys/fs/cgroup"
 WORK = "jav3-work"
 RESERVE_MB = 192          # what the kernel, the run-turn server and vsock keep, at least
 RESERVE_PCT = 20          # ...or this share of the guest's RAM, whichever is more
+# Why the reserve is not smaller (measured 2026-10-01, 1280 MB desktop box, guest 1218 MB,
+# cap 975): an idle guest uses 148 MB (kernel, run-turn and shell servers), and with the
+# cgroup at its cap MemAvailable bottomed out at 69-85 MB. The 243 MB reserve is that 148
+# plus about 95 of slack; there is nothing to hand back to the cap.
 MIN_LIMIT_MB = 128
 OOM_ADJ = b"1000"         # /proc/<pid>/oom_score_adj: raising it never needs a privilege
 
@@ -104,6 +108,37 @@ def confine() -> None:
                 os.close(fd)
         except OSError:
             pass
+
+
+def confine_session(sid: int, proc_root: str = "/proc") -> int:
+    """Put every process of session `sid` at the top of the OOM list. Chromium
+    sets its own children's oom_score_adj (renderers 300, measured 2026-10-01 on
+    the Pi), which ranks them BEHIND everything else in the work cgroup: at its
+    limit the kernel killed the node dev server and the python that was watching
+    (adj 1000) while a 700 MB renderer lived on. How many it changed; never raises."""
+    n = 0
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return 0
+    for d in names:
+        if not d.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc_root, d, "stat")) as f:
+                st = f.read()
+            if int(st[st.rindex(")") + 2:].split()[3]) != sid:
+                continue
+            path = os.path.join(proc_root, d, "oom_score_adj")
+            with open(path) as f:
+                if f.read().strip() == OOM_ADJ.decode():
+                    continue
+            with open(path, "w") as f:
+                f.write(OOM_ADJ.decode())
+            n += 1
+        except (OSError, ValueError, IndexError):
+            continue
+    return n
 
 
 def _events_path() -> str | None:
