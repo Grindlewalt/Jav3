@@ -9,7 +9,7 @@ colours) and **no shift+arrows** (every key route needs a plain key).
 - Install: `curl -fsSL http://10.0.0.82:8000/cli/install.sh | sh`, then `jav3 login` (paste the
   line from Settings → Add computer; chat only) or `jav3 login --password` (full access: /vms,
   /security). `jav3 --server 10.0.0.82:8000` points one run at another server with the saved login.
-  An installed copy updates itself: `/update` (or `jav3 update`) after the status row notice
+  An installed copy updates itself: `/update` (or `jav3 update`) after the notice
   "a newer jav3 is on the server"; a checkout says `git pull` instead.
 - What to try, per page (a build is fine if each of these does what it says):
   - Home: `/help` lists the keys; `←` on the empty prompt opens agents; `ctrl+p` palette.
