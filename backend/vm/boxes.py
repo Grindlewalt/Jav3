@@ -22,7 +22,8 @@ Runtimes (`Box.runtime`, operator choice per profile, `box_runtime`):
 
     kvm      a QEMU/KVM guest (lifecycle.GuestVM). The host<->guest channel is
              AF_VSOCK: the guest dials CID 2 : settings.vm_vsock_port, the host
-             dials the box CID on 5556 (run-turn), 5557 (shell), 5558 (svcd).
+             dials the box CID on 5556 (run-turn), 5557 (shell), 5558 (svcd),
+             5559 (display: the desktop, KVM only).
     docker   a hardened container (WP8). The SAME protocol runs over per-box
              AF_UNIX sockets in <vm_dir>/sock/<cid>/, bind-mounted into the
              container at /run/jav3. No TCP, never the docker socket.
@@ -77,6 +78,7 @@ GATEWAY_OPS: dict[str, frozenset[str]] = {
 PORT_RUNTURN = 5556
 PORT_SHELL = 5557
 PORT_SVCD = 5558
+PORT_DISPLAY = 5559        # the live desktop (guest/backend/display.py); host-dialed
 
 SHARED_ID = "shared"
 SHARED_MAC = "52:54:00:12:34:60"
@@ -265,7 +267,8 @@ class Box:
                 "gateway": t.gateway_endpoint(),
                 "listen": {"runturn": t.guest_listen(PORT_RUNTURN),
                            "shell": t.guest_listen(PORT_SHELL),
-                           "svcd": t.guest_listen(PORT_SVCD)}}
+                           "svcd": t.guest_listen(PORT_SVCD),
+                           "display": t.guest_listen(PORT_DISPLAY)}}
 
     def to_json(self) -> dict:
         """The static half of the /api/vm/boxes row (see status_json)."""

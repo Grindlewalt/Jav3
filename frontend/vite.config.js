@@ -12,6 +12,9 @@ const cookie = process.env.JAV3_COOKIE || ''
 
 export default defineConfig({
   plugins: [react()],
+  // @novnc/novnc 1.7 uses a top-level await (core/util/browser.js), which the default
+  // target (es2020, safari14) refuses. es2022 allows it, in browsers from 2021 on.
+  build: { target: ['es2022', 'chrome89', 'edge89', 'firefox89', 'safari15'] },
   server: {
     proxy: {
       '/api': {
