@@ -1039,3 +1039,104 @@ async def test_reaped_orphans_leave_a_stopped_event(tmp_env, harness):
             "stopped", "app", "project", proj, "docker")
         assert "removed at startup" in ev["reason"] and "exited" in ev["reason"]
     assert await boxlog.events("p-other") == []                # another install's: untouched
+
+
+# --- G1: a lost guest says why; a variant with no Docker image is refused -------------
+
+class _State(FakeCLI):
+    """`docker inspect --format {{json .State}}` answers with a canned state."""
+    state = None
+    logs = ""
+
+    async def run(self, *args, timeout=120):
+        if args[0] == "inspect" and "json .State" in args[2]:
+            self.calls.append(list(args))
+            if self.state is None:
+                return 1, "", "Error: No such object: jav3-p-alpha"
+            return 0, json.dumps(self.state) + "\n", ""
+        if args[0] == "logs":
+            self.calls.append(list(args))
+            return 0, self.logs, ""
+        return await super().run(*args, timeout=timeout)
+
+
+async def test_death_note_reads_the_container_state_and_last_output(harness, monkeypatch):
+    """The turn's error used to say only 'the guest crashed, ran out of memory or its
+    VM was reaped' (benchmark-game, 2026-10-01); the container knew which."""
+    fake = _State()
+    fake.state = {"Status": "exited", "Running": False, "OOMKilled": True, "ExitCode": 137,
+                  "Error": ""}
+    fake.logs = "GUEST-RUNTURN-SERVER: listening\nKilled\n"
+    monkeypatch.setattr(dr, "cli", fake)
+    note = await boxes.controller(harness["box"]).death_note()
+    assert "exited (exit code 137, killed)" in note
+    assert "killed for running out of memory (limit 512 MB)" in note
+    assert "last output: GUEST-RUNTURN-SERVER: listening | Killed" in note
+
+
+async def test_death_note_for_a_container_that_is_still_up_or_gone(harness, monkeypatch):
+    fake = _State()
+    fake.state = {"Status": "running", "Running": True, "OOMKilled": True, "ExitCode": 0}
+    monkeypatch.setattr(dr, "cli", fake)
+    ctl = boxes.controller(harness["box"])
+    note = await ctl.death_note()
+    # docker's OOMKilled is true when ANY process in the container was killed, so it
+    # is reported as that, not as the container's death
+    assert "still running" in note and "a process in it was killed" in note
+    fake.state = None
+    assert "container is gone" in await ctl.death_note()
+
+    class Down(FakeCLI):
+        async def run(self, *args, timeout=120):
+            return 1, "", "Cannot connect to the Docker daemon"
+    monkeypatch.setattr(dr, "cli", Down())
+    assert await ctl.death_note() == ""                 # a daemon that will not say: no note
+
+
+async def test_a_variant_with_no_docker_image_is_refused_before_anything_starts(
+        harness, monkeypatch):
+    """The Desktop profile asks for the `desktop` variant, a KVM layer: with the
+    runtime on docker the box failed with 'jav3-guest-turn:desktop is not built, run
+    docker-setup', advice that could never work (no Docker image of it is built)."""
+    class NoImage(FakeCLI):
+        async def run(self, *args, timeout=120):
+            if tuple(args[:2]) == ("image", "inspect"):
+                self.calls.append(list(args))
+                return 1, "", "Error: No such image: jav3-guest-turn:desktop"
+            return await super().run(*args, timeout=timeout)
+    fake = NoImage()
+    monkeypatch.setattr(dr, "cli", fake)
+    box = harness["box"]
+    box.image = ("desktop", None)
+    ctl = boxes.controller(box)
+    with pytest.raises(dr.DockerError) as e:
+        await ctl.acquire()
+    msg = str(e.value)
+    assert "`desktop` image variant" in msg and "no Docker image" in msg
+    assert "KVM" in msg and "`main`" in msg and "docker-setup" not in msg
+    assert fake.ran("run") == [] and ctl.state == "failed"        # nothing was started
+    assert fake.ran("image")[0][-1] == "jav3-guest-turn:desktop"
+
+
+async def test_a_variant_image_someone_built_by_hand_still_runs(harness):
+    box = harness["box"]
+    box.image = ("desktop", None)
+    ctl = boxes.controller(box)
+    await ctl.acquire()                           # FakeCLI: `image inspect` succeeds
+    assert harness["cli"].ran("run")[0][-1] == "jav3-guest-turn:desktop"
+    ctl.release()
+    await ctl.teardown()
+
+
+async def test_a_down_daemon_is_not_reported_as_a_missing_variant(harness, monkeypatch):
+    class Down(FakeCLI):
+        async def run(self, *args, timeout=120):
+            if tuple(args[:2]) == ("image", "inspect"):
+                return 1, "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+            return await super().run(*args, timeout=timeout)
+    monkeypatch.setattr(dr, "cli", Down())
+    box = harness["box"]
+    box.image = ("desktop", None)
+    with pytest.raises(dr.DockerError) as e:
+        await boxes.controller(box).acquire()
+    assert "no Docker image" not in str(e.value)       # the daemon probe speaks, not this
