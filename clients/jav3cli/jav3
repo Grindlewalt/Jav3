@@ -1848,9 +1848,10 @@ class PanelSplit:
         self.sizes = list(sizes) if sizes else [1.0 / n] * n
 
     def __eq__(self, other) -> bool:
+        """The same shape (direction and children); the fractions are compared by whoever
+        cares (tests do)."""
         return (isinstance(other, PanelSplit) and self.dir == other.dir
-                and self.children == other.children
-                and all(abs(a - b) < 1e-9 for a, b in zip(self.sizes, other.sizes)))
+                and self.children == other.children)
 
     def __repr__(self) -> str:
         return f"{self.dir}({', '.join(map(repr, self.children))})"
@@ -3021,6 +3022,11 @@ def build_tui(base: str, token: str, **kw):
                 event.stop()
                 event.prevent_default()
                 app.cycle_permission()
+                return
+            if key == "tab" and len(app.chats) > 1 and not app.paged:
+                event.stop()
+                event.prevent_default()
+                app.chat.log.focus()
                 return
             if key == "left" and not self.text:
                 event.stop()
@@ -9072,8 +9078,11 @@ def build_tui(base: str, token: str, **kw):
             if self.leader:
                 keys = "  ".join(f"[$primary]{c.leader}[/] {name}"
                                  for name, c in self.unique_commands() if c.leader)
+                panels = ("  [$primary]←↑↓→[/] panel  [$primary]1-4[/] jump  "
+                          "[$primary]z[/] zoom  [$primary]0[/] close"
+                          if len(self.chats) > 1 else "")
                 self._set_status(left, f"[$warning b]ctrl+x[/]  {keys}  "
-                                       "[$primary]b[/] notifications")
+                                       f"[$primary]b[/] notifications{panels}")
                 self._set_status(right, "")
                 return
             # both sides share one row: the width is the row's, not the left
@@ -10501,6 +10510,11 @@ def build_tui(base: str, token: str, **kw):
             self.turn, self.busy, self.stop_requested = None, False, False
 
         def action_toggle_sidebar(self) -> None:
+            if len(self.chats) > 1:
+                self.notify("the sidebar is hidden while there are several panels (it needs "
+                            "the width): close down to one to bring it back",
+                            severity="warning")
+                return
             if self.size.width < SIDEBAR_MIN_COLS:
                 self.notify(f"the sidebar needs {SIDEBAR_MIN_COLS} columns; this window has "
                             f"{self.size.width}", severity="warning")
@@ -12450,8 +12464,9 @@ def cmd_tui(args) -> int:
                     model=getattr(args, "model", None), resume=getattr(args, "resume", None),
                     cont=getattr(args, "cont", False), prompt=prompt)
     app.run()
-    if app.busy and app.cid:
-        print(f"the turn keeps running on the server — `jav3 -r {app.cid}` re-attaches")
+    for chat in app.chats.values():
+        if chat.busy and chat.cid:
+            print(f"the turn keeps running on the server — `jav3 -r {chat.cid}` re-attaches")
     if getattr(app, "return_code", 0):
         return app.return_code
     return 0
