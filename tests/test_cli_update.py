@@ -228,7 +228,7 @@ async def test_a_different_client_on_the_server_is_one_quiet_notice(installed):
     srv = UpdSrv()
     app = await boot(srv)
     toasts = []
-    async with app.run_test(size=(80, 24)) as pilot:        # narrow: no sidebar, so a toast would show
+    async with app.run_test(size=(80, 24)):        # narrow: no sidebar, so a toast would show
         app.notify = lambda *a, **k: toasts.append(a)
         assert await wait_for(lambda: any(t == jav3.UPDATE_NOTICE for _, _, t in app.notices))
         assert [n for n in app.notices if n[2] == jav3.UPDATE_NOTICE][0][1] == "info"
@@ -251,7 +251,7 @@ async def test_a_second_start_within_the_hour_notices_from_the_stamp_without_ask
     srv = UpdSrv()
     for run in (1, 2):
         app = await boot(srv)
-        async with app.run_test(size=(120, 40)) as pilot:
+        async with app.run_test(size=(120, 40)):
             assert await wait_for(lambda: any(t == jav3.UPDATE_NOTICE for _, _, t in app.notices))
         assert srv.calls.count(("GET", "/cli/version")) == 1, run
 
