@@ -415,8 +415,9 @@ class Session:
 
     def resize(self, cols: int, rows: int) -> None:
         self.cols, self.rows = cols, rows
-        self.child.setwinsize(rows, cols)
         self.screen.resize(rows, cols)
+        self.screen.reset()         # what the client does not repaint after SIGWINCH is lost
+        self.child.setwinsize(rows, cols)
         self.settle(quiet=0.3, cap=2.0)
 
     def close(self) -> None:
@@ -587,9 +588,10 @@ def child_env(config_home: str | None, tz: str | None, clock: float | None, cwd:
     env = {k: v for k, v in os.environ.items()
            if not (k in ("COLORTERM", "FORCE_COLOR", "NO_COLOR", "TERM_PROGRAM",
                          "TERM_PROGRAM_VERSION", "TERM_SESSION_ID", "TMUX", "STY")
+                   or k in ("COLUMNS", "LINES")     # the size is the pty's, so resize works
                    or k.startswith(("TEXTUAL", "ITERM", "KITTY", "WEZTERM", "VTE_")))}
-    env.update(TERM=TERM, PROMPT_TOOLKIT_NO_CPR="1", COLUMNS=str(cols), LINES=str(rows),
-               PYTHONUNBUFFERED="1", PYTHONDONTWRITEBYTECODE="1")
+    env.update(TERM=TERM, PROMPT_TOOLKIT_NO_CPR="1", PYTHONUNBUFFERED="1",
+               PYTHONDONTWRITEBYTECODE="1")
     env.setdefault("LANG", "en_US.UTF-8")
     if not env.get("LC_ALL", "").upper().endswith(("UTF-8", "UTF8")) and env.get("LC_ALL"):
         env["LC_ALL"] = "en_US.UTF-8"
