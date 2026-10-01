@@ -127,6 +127,9 @@ KNOWN_KINDS = {
     "browser_rate_limited": "warn", "browser_paused_refusal": "warn",
     "device_enrolled": "info", "local_session": "info", "host_run": "info",
     "grounding_probe": "info",
+    # the operator's own actions from a Queue card (backend/secactions.py)
+    "write_reverted": "info", "host_uncut": "info", "process_killed": "info",
+    "run_stopped": "info",
 }
 # requests that wait on an operator decision in their own queue (services,
 # packages): they ping at the default level whatever severity they carry

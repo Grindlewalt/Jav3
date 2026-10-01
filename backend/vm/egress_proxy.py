@@ -229,7 +229,7 @@ async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None 
         if queued:
             await egress.note_denied(db, slug or egress.GENERAL, host,
                                      box_id=att["box_id"])
-        if verdict == "allow":
+        if verdict == "allow" and not egress.in_uncut_grace(slug, host):
             a = await anomaly.check_host(db, slug, host)
             if a:
                 egress.mark_cut(slug, host)

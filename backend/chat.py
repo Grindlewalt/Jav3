@@ -561,7 +561,9 @@ async def get_messages(conversation_id: int):
         except json.JSONDecodeError:
             args = {}
         result = c["result"] or ""
-        return {"name": c["tool"], "args": args, "result": result,
+        # `step`: the tool_calls row, so a link can open the chat AT this step
+        # (a security card's "Open chat at step")
+        return {"name": c["tool"], "args": args, "result": result, "step": c["id"],
                 "ok": not result.startswith(("error:", "duplicate call:")),
                 "done": True}
 

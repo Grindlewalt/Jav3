@@ -896,6 +896,96 @@ async def rpc_ps(box) -> Any:
     return reply.get("snapshot")
 
 
+class KillRefused(ValueError):
+    """Kill process will not signal this pid (it is gone, it changed, the
+    snapshot is too old...). The text is written for the operator."""
+
+
+Killer = Callable[[Any, dict], Awaitable[Any]]
+_killers: dict[str, Killer] = {}
+
+
+def register_killer(kind: str, fn: Killer) -> None:
+    """Override how a kind of box is asked to kill a pid (tests)."""
+    _killers[kind] = fn
+
+
+async def rpc_kill(box, spec: dict) -> Any:
+    """Default kill: newline JSON `{"mode":"kill_pid", pid, exe, start_ticks, cmd,
+    sig}` on the same port as `ps`; reply `{"type":"kill","ok":..,"why":..,
+    "error":..}`. The guest re-checks the pid against /proc before it signals."""
+    port = boxes.PORT_SVCD if box.kind == "service" else boxes.PORT_RUNTURN
+    sock = await box.transport.connect(port)
+    try:
+        loop = asyncio.get_running_loop()
+        await loop.sock_sendall(sock, json.dumps({"mode": "kill_pid", **spec}).encode() + b"\n")
+        line = await _read_line(sock, 64 * 1024)
+    finally:
+        sock.close()
+    reply = json.loads(line)
+    if not isinstance(reply, dict) or reply.get("type") != "kill":
+        raise ValueError("not a kill reply (this box's guest may predate the verb)")
+    return reply
+
+
+def _find_box(box_id: str):
+    for b in boxes.all_boxes():
+        if b.id == box_id:
+            return b
+    return None
+
+
+async def kill_process(box_id: str, pid: int, exe: str, *, cmd: str | None = None,
+                       start_ticks: int | None = None, boot_id: str | None = None,
+                       sig: str = "TERM") -> dict:
+    """Kill one process an alert named, but only if it is still THAT process: the
+    host's last ps snapshot of the box must hold the same pid with the same
+    program (and the same start time, else the same command line), and the box
+    must not have rebooted since; then the guest re-checks the same against its
+    live /proc before it signals. Anything else raises KillRefused with the reason.
+    Returns {"pid", "sig", "box_id"}."""
+    if sig not in ("TERM", "KILL"):
+        raise KillRefused("signal must be TERM or KILL")
+    if not box_id or not isinstance(pid, int) or isinstance(pid, bool) or pid < 2:
+        raise KillRefused("this alert does not name a process in a box")
+    box = _find_box(box_id)
+    st = _state.get(box_id)
+    if box is None or not _pollable(box):
+        raise KillRefused(f"box {box_id} is not running, so there is nothing to kill")
+    if st is None or st.snap is None or st.reported_at is None:
+        raise KillRefused("no process snapshot of this box yet: try again in a few seconds")
+    if is_stale(st, time.time()):
+        raise KillRefused("the last process snapshot of this box is out of date: "
+                          "the process list cannot be checked right now")
+    snap = st.snap
+    if boot_id and snap["boot_id"] != boot_id:
+        raise KillRefused("this box has rebooted since the alert: the process is gone")
+    p = snap["procs"].get(pid)
+    if p is None:
+        raise KillRefused(f"process {pid} is no longer running")
+    if p["exe"] != (exe or ""):
+        raise KillRefused(f"pid {pid} is now {p['exe'] or 'another program'}, not {exe}: "
+                          "not killing it")
+    if start_ticks is not None:
+        if p["start_ticks"] != start_ticks:
+            raise KillRefused(f"pid {pid} was started again since the alert: not killing it")
+    elif cmd is not None and p["cmd"] != cmd:
+        raise KillRefused(f"pid {pid} runs a different command now: not killing it")
+    elif cmd is None:
+        raise KillRefused("this alert has neither a start time nor a command line to check")
+    spec = {"pid": pid, "exe": p["exe"], "start_ticks": p["start_ticks"], "cmd": p["cmd"],
+            "sig": sig}
+    try:
+        reply = await asyncio.wait_for(_killers.get(box.kind, rpc_kill)(box, spec),
+                                       FETCH_TIMEOUT_S * 2)
+    except (OSError, ValueError, asyncio.TimeoutError) as e:
+        raise KillRefused(f"could not reach the box: {clean_str(str(e) or type(e).__name__, 'error')}")
+    if not isinstance(reply, dict) or reply.get("ok") is not True:
+        why = clean_str((reply or {}).get("error") if isinstance(reply, dict) else "", "error")
+        raise KillRefused(why or "the box refused to kill it")
+    return {"pid": pid, "sig": sig, "box_id": box_id}
+
+
 _pw_mod = None
 
 

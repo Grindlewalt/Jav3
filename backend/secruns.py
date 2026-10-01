@@ -41,6 +41,7 @@ import aiosqlite
 from . import security
 
 TIER_RANK = {"critical": 3, "approval": 2, "alert": 1, "record": 0}
+SEV_RANK = {"info": 0, "warn": 1}          # a severity not listed (the top one) ranks above both
 SETTLE_S = 300            # a run with nothing live and nothing done this long has ended
 FILTERED_DAYS = 14        # the "filtered as normal work" count looks this far back
 SCAN_WAITING = 3000       # rows read per request: bounded, newest first
@@ -277,8 +278,8 @@ def _card(g: dict, running) -> dict:
     if worst is None and g["report"]:
         worst = "record"
     sevs = [ev["severity"] for ev in g["need"] if ev.get("tier") == worst]
-    sev = "critical" if "critical" in sevs else (sevs[0] if sevs else
-                                                 (g["report"][0]["severity"] if g["report"] else None))
+    sevs = sevs or [ev["severity"] for ev in g["report"]]
+    sev = max(sevs, key=lambda s: SEV_RANK.get(s, 2), default=None)   # the worst in the card
     newest = max((ev["id"] for ev in rows), default=0)
     stamps = [ev.get("last_seen") or ev.get("created_at") or "" for ev in rows]
     c = g["conv"]
