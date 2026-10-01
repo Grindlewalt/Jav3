@@ -4435,3 +4435,20 @@ a:has(> .nav-dot) { position: relative; }
   .settings-page > .page-head > .scroll-hint > .tabs > a { flex: 1 1 auto; justify-content: center; }
   .notif-kinds-tools > input { flex-basis: 100%; }
 }
+/* tools as the model sees them: a merged tool is one wide card listing its actions */
+.tools-help { margin: 0 0 var(--sp-6); max-width: 78ch; line-height: 1.45; }
+.tools-bar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-6);
+  margin-bottom: var(--sp-6); }
+.tools-bar input { flex: 1 1 260px; min-width: 0; }
+.tools-sec { margin: var(--sp-9) 0 var(--sp-4); font-size: var(--fs-base); font-weight: 600;
+  color: var(--text); }
+.tools-sec .dim { font-weight: 400; }
+.tool-card.tool-merged { grid-column: 1 / -1; }
+.tool-actions { list-style: none; margin: var(--sp-5) 0 0; padding: 0; display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 0 var(--sp-9); }
+.tool-action { padding: var(--pad-row-sm); border-top: 1px solid var(--border); min-width: 0; }
+.tool-action-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-3);
+  min-width: 0; }
+.tool-old { overflow-wrap: anywhere; }
+.tool-gate { font-size: var(--fs-xs); }
+.tool-card .tool-reqs { margin-top: var(--sp-3); }
