@@ -248,8 +248,13 @@ def style_contrast(st: tuple) -> float:
     return contrast(colour_rgb(fg, DEFAULT_FG), colour_rgb(bg, DEFAULT_BG))
 
 
+def _decor(txt: str) -> bool:
+    """Only rules, boxes and block glyphs (the cursor bar, scrollbars): not text to read."""
+    return all(c.isspace() or "\u2500" <= c <= "\u259f" for c in txt)
+
+
 def text_runs(screen):
-    """Yield (y, x0, x1, text, style) for each run of same-styled cells that holds ink."""
+    """Yield (y, x0, x1, text, style) for each run of same-styled cells that holds text."""
     for y in range(screen.lines):
         row = screen.buffer[y]
         x = 0
@@ -259,7 +264,7 @@ def text_runs(screen):
             while x1 + 1 < screen.columns and cell_style(screen, row[x1 + 1]) == st:
                 x1 += 1
             txt = "".join(row[k].data for k in range(x, x1 + 1))
-            if txt.strip():
+            if txt.strip() and not _decor(txt):
                 yield y, x, x1, txt, st
             x = x1 + 1
 
@@ -357,23 +362,27 @@ class Session:
         self.stream.feed(data)
         return True
 
-    def settle(self, quiet: float = 0.25, cap: float = 3.0, first: bool = False) -> None:
-        """Read until the client has been quiet for `quiet` seconds (at most `cap`):
-        a snapshot is then a whole frame, not half of one. `first` waits for some output."""
+    def settle(self, quiet: float = 0.25, cap: float = 3.0, first_timeout: float = 0.0) -> None:
+        """Read until the client has been quiet for `quiet` seconds, or for at most `cap`
+        (a spinner never goes quiet): a snapshot is then a whole frame, not half of one.
+        `first_timeout` > 0: first wait that long for any output at all."""
+        if first_timeout:
+            end = time.time() + first_timeout
+            while self.alive and time.time() < end and not self._read(0.05):
+                pass
         end = time.time() + cap
         last = time.time()
-        got = False
         while self.alive and time.time() < end:
             if self._read(0.03):
-                last, got = time.time(), True
-            elif (got or not first) and time.time() - last >= quiet:
+                last = time.time()
+            elif time.time() - last >= quiet:
                 return
 
     def send(self, data: str, quiet: float = 0.2) -> None:
         if not self.alive:
             return
         self.child.send(data.encode())
-        self.settle(quiet=quiet, cap=1.5)
+        self.settle(quiet=quiet, cap=0.6)
 
     def text(self) -> str:
         return "\n".join(screen_text(self.screen))
@@ -487,7 +496,7 @@ class Runner:
     # waiting and asserting
     def do_wait(self, val: str) -> None:
         self.s.pump(float(val or 1))
-        self.s.settle(quiet=0.15, cap=1.0)
+        self.s.settle(quiet=0.15, cap=0.5)
 
     do_sleep = do_wait
 
@@ -678,7 +687,7 @@ def main(argv: list[str] | None = None) -> int:
         run = Runner(sess, a.timeout)
         code = 0
         try:
-            sess.settle(quiet=0.5, cap=a.startup, first=True)
+            sess.settle(quiet=0.5, cap=2.5, first_timeout=a.startup)
             if not sess.alive:
                 run.emit(run.screen_dump(f"the client exited at startup (status {sess.status})"))
                 return 1
