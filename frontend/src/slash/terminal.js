@@ -21,6 +21,8 @@ export const TERMINAL_ONLY = {
   permissions: 'the permission mode (yolo / auto / ask) is the picker in the chat’s '
     + 'toolbar, at the top of the chat',
   persona: 'agent presets live on the Agents page — /agents takes you there',
+  dnd: 'do not disturb is in Settings → Notifications; while it is on, the top bar '
+    + 'says so',
 }
 
 // the terminal client's aliases for the above
