@@ -3123,11 +3123,14 @@ body.nav-locked .notice-pill { display: none; }
 .notice-x:hover { color: var(--text); background: none; }
 
 /* --- in-page confirm / prompt (ask.jsx) -------------------------------------
-   Same layer as the security board's modal (4000), which is deliberately above
-   .notices (3000): a toast must never be clickable through an open dialog,
-   because tapping one navigates away mid-question. */
+   Above every other layer: .notices (3000), so a toast is never clickable
+   through an open dialog (tapping one navigates away mid-question); the sheets
+   and modals (4000), because a confirm is often asked FROM one (the Projects
+   sheet's Delete): at an equal z-index the sheet, portaled to <body> after the
+   app root, painted over the dialog, the click landed on the sheet, and the
+   dialog read it as "outside" and cancelled; and floating menus (5000). */
 .ask-scrim {
-  position: fixed; inset: 0; z-index: 4000; background: var(--overlay);
+  position: fixed; inset: 0; z-index: 6000; background: var(--overlay);
   display: flex; align-items: center; justify-content: center;
   padding: max(24px, var(--sat)) 20px max(24px, var(--sab));
   animation: scrim-in 0.14s ease both;
