@@ -202,7 +202,7 @@ test('a frame that cannot be placed falls back after detaching', async () => {
   assert.ok(r.debugMs >= 0);
 });
 
-test('an element outside the visible page falls back; a hidden one is refused', async () => {
+test('an element outside the visible page, or with no area, falls back to the script click', async () => {
   const frames = [{ frameId: 0, parentFrameId: -1, url: 'https://x.test/' }, { frameId: 3, parentFrameId: 0, url: 'https://f.example/' }];
   const d = fake({
     0: { frameInfo: () => ({ vp: { w: 1000, h: 800 }, self: null, iframes: [{ src: 'https://f.example/', x: 0, y: 790, w: 500, h: 400 }] }) },
@@ -211,7 +211,7 @@ test('an element outside the visible page falls back; a hidden one is refused', 
   assert.equal((await clickElementTrusted(d, { tabId: 7, frameId: 3, n: 1, frames })).fallback, 'offscreen');
   const hidden = fake({ 0: topPage({ measureEl: () => ({ ok: false, code: 'offscreen', err: 'the element has no visible area to click' }) }) });
   const r = await clickElementTrusted(hidden, { tabId: 7, frameId: 0, n: 1, frames });
-  assert.equal(r.ok, false);
+  assert.equal(r.fallback, 'offscreen');
   assert.deepEqual(cmds(hidden.log), ['attach', 'detach']);
 });
 
@@ -245,6 +245,13 @@ test('a page that navigated on the click (the listener is gone) still counts as 
   const d = fake({ 0: topPage({ takeClick: () => ({ ok: true, lost: true }) }) });
   const r = await clickElementTrusted(d, { tabId: 7, frameId: 0, n: 1, frames: [] });
   assert.deepEqual([r.ok, r.lost], [true, true]);
+});
+
+test('a page that swallows mousedown and click still counts as reached: no second, script click', async () => {
+  const d = fake({ 0: topPage({ takeClick: () => ({ ok: true, lost: false, seen: 2, down: null, click: null }) }) });
+  const r = await clickElementTrusted(d, { tabId: 7, frameId: 0, n: 1, frames: [] });
+  assert.equal(r.ok, true);
+  assert.match(r.text, /the page took the mouse events itself/);
 });
 
 test('says so when the mouse landed on something else', async () => {

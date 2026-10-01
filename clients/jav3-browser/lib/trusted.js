@@ -159,7 +159,7 @@ async function arrived(d, frameId) {
   let got = null;
   try { got = await d.inject(frameId, takeClick, []); } catch { got = { ok: true, lost: true }; }
   if (!got || got.lost) return { lost: true };            // the frame navigated: the click did something
-  if (!got.down && !got.click) return null;
+  if (!got.seen && !got.down && !got.click) return null;   // nothing reached the page
   return got;
 }
 
@@ -175,7 +175,8 @@ export async function clickElementTrusted(d, req) {
     await d.sleep(BAR_MS);
     const m = await settled(d, () => d.inject(frameId, measureEl, [n]), sameMeasure);
     if (!m) return { fallback: 'input_failed', detail: 'the frame cannot be scripted right now' };
-    if (!m.ok) return m;                                   // stale / nothing visible to click
+    if (!m.ok && m.code === 'offscreen') return { fallback: 'offscreen', detail: m.err };   // no area to aim at: a script click may still reach it
+    if (!m.ok) return m;                                   // stale
     if (m.covered) {
       return { ok: false, code: 'covered', cover: m.covered.n, coverName: m.covered.name,
                err: 'element is covered by another element' };
@@ -203,6 +204,8 @@ export async function clickElementTrusted(d, req) {
       let text = `clicked ${m.label}`;
       if (got.down && got.down.onEl === false) {
         text += `; the mouse landed on ${got.down.hit}, not on it — something is over it`;
+      } else if (!got.lost && !got.down && !got.click) {
+        text += '; the page took the mouse events itself (no mousedown or click reached Jav3)';
       }
       return { ok: true, text, trusted: true, lost: !!got.lost };
     } finally {

@@ -826,7 +826,7 @@ _VIA_WHY = {
     "input_failed": "Chrome did not take the mouse event ({detail})",
     "no_event": "the page got no mouse event from the real click (is the tab hidden?)",
     "frame_unplaced": "Jav3 could not tell where that iframe sits on the page",
-    "offscreen": "the element is outside the visible part of the page",
+    "offscreen": "the element has no visible area to aim at, or is outside the visible page",
     "outside_after_attach": "the point is under Chrome's debugging bar",
 }
 

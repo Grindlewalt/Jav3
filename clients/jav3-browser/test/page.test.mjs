@@ -118,7 +118,8 @@ test('armClick / takeClick: what the mouse hit, whether it was the element, and 
   p.fire('click', p.els[0], 50, 20);
   const got = takeClick();
   assert.deepEqual([got.lost, got.down.hit, got.down.onEl, got.down.trusted, got.click.onEl], [false, 'button "Save"', true, true, true]);
-  assert.deepEqual((p.listeners.mousedown || []).concat(p.listeners.click || []), []);   // listeners removed
+  assert.equal(got.seen, 3);                                                // mousedown, mouseup, click
+  assert.deepEqual(Object.values(p.listeners).flat(), []);                  // listeners removed
   assert.deepEqual(takeClick(), { ok: true, lost: true });
 
   armClick(1);                                                              // the mouse landed on something else
@@ -128,9 +129,16 @@ test('armClick / takeClick: what the mouse hit, whether it was the element, and 
   armClick(null);                                                           // by coordinates: no element to compare
   armClick(null);                                                           // arming again replaces the first listener
   assert.equal(p.listeners.mousedown.length, 1);
+  assert.equal(p.listeners.click.length, 1);
   p.fire('mousedown', p.els[1], 250, 20);
   const c = takeClick();
   assert.deepEqual([c.down.hit, c.down.onEl, c.click], ['div "Overlay"', null, null]);
   armClick(1);
-  assert.deepEqual(takeClick(), { ok: true, lost: false, down: null, click: null });   // armed, nothing arrived
+  assert.deepEqual(takeClick(), { ok: true, lost: false, seen: 0, down: null, click: null });   // armed, nothing arrived
+
+  armClick(1);                                                              // a page that swallows mousedown / click at the window
+  p.fire('mousemove', p.els[0], 50, 20);
+  p.fire('mouseup', p.els[0], 50, 20);
+  const swallowed = takeClick();
+  assert.deepEqual([swallowed.seen, swallowed.down, swallowed.click], [2, null, null]);   // the mouse still reached the page
 });

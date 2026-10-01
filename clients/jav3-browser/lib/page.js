@@ -227,26 +227,28 @@ export function hitIframe(x, y, src) {
   return { ok: false, what: hit ? D.describeEl(hit) : 'nothing' };
 }
 
-// Listen (capture phase, so the page cannot hide it) for the mouse events of the
-// click that is about to arrive in this frame; takeClick reads what they hit.
-// `id` is the element a click by id aimed at (null for a click by coordinates).
+// Listen (capture phase, on the window) for the mouse events of the click that is
+// about to arrive in this frame; takeClick reads what they hit. Several event
+// types are counted (`seen`) so a page that swallows mousedown or click at the
+// window still shows that the mouse reached it: only a click nothing reached is
+// safe to repeat as a script click. `id` is the element a click by id aimed at
+// (null for a click by coordinates).
+const CLICK_EVENTS = ['mousemove', 'pointerdown', 'mousedown', 'mouseup', 'click'];
 export function armClick(id) {
   const D = globalThis.__jav3Dom;
   if (globalThis.__jav3Click) globalThis.__jav3Click.stop();
   const el = id ? D.findJav3(document, id) : null;
-  const st = { down: null, click: null };
+  const st = { seen: 0, down: null, click: null };
   const rec = e => {
+    st.seen += 1;
+    if (e.type !== 'mousedown' && e.type !== 'click') return;
     const t = (e.composedPath && e.composedPath()[0]) || e.target;
     const o = { x: e.clientX, y: e.clientY, trusted: e.isTrusted, hit: D.describeEl(t),
                 onEl: el ? !D.pointMoved(el, t) : null };
     if (e.type === 'mousedown') { if (!st.down) st.down = o; } else if (!st.click) st.click = o;
   };
-  window.addEventListener('mousedown', rec, true);
-  window.addEventListener('click', rec, true);
-  st.stop = () => {
-    window.removeEventListener('mousedown', rec, true);
-    window.removeEventListener('click', rec, true);
-  };
+  for (const t of CLICK_EVENTS) window.addEventListener(t, rec, true);
+  st.stop = () => { for (const t of CLICK_EVENTS) window.removeEventListener(t, rec, true); };
   globalThis.__jav3Click = st;
   return { ok: true };
 }
@@ -257,7 +259,7 @@ export function takeClick() {
   if (!st) return { ok: true, lost: true };
   st.stop();
   globalThis.__jav3Click = null;
-  return { ok: true, lost: false, down: st.down, click: st.click };
+  return { ok: true, lost: false, seen: st.seen, down: st.down, click: st.click };
 }
 
 // browser_type with no element: into whatever has focus.
