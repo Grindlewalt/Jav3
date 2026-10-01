@@ -97,6 +97,7 @@ KNOWN_KINDS = {
     "always_loaded_held": "warn", "always_loaded_approved": "info",
     "always_loaded_rejected": "info",
     "memory_deleted": "info", "memory_approved": "info", "memory_refused": "warn",
+    "memory_proposed": "warn", "journal_unverified": "info",
     "desk_session": "info", "desk_killed": "warn", "desk_shell": "info",
     "desk_refused": "warn", "desk_shell_refused": "warn",
     "browser_session": "info", "browser_killed": "warn", "browser_refused": "warn",

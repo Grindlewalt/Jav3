@@ -600,3 +600,42 @@ async def test_the_migration_is_idempotent_and_old_rows_read_as_unmarked(db):
         assert security.raise_sync(con, kind="skill_import_flag", summary="old db") is not None
     finally:
         con.close()
+
+
+async def test_an_agent_deleting_a_note_alerts_and_the_operators_own_delete_does_not(
+        client, db, feed):
+    """The same kind (`memory_deleted`) from both sides. The agent's goes through
+    the memory_write tool, in a task that inherits the operator's request
+    context; the operator's through DELETE /api/memory/notes/{name}."""
+    import importlib.util
+    from backend import memory
+    await security.set_notify_level(db, "all")
+    d = memory.notes_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    for name in ("agent-victim", "my-own-note"):
+        (d / f"{name}.md").write_text("Editor: vim\nNever use em dashes\n")
+    spec = importlib.util.spec_from_file_location(
+        "mw_secsettings", settings.tools_dir / "memory_write" / "handler.py")
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+
+    tokens = (runtime.web_session.set("operator-request"), runtime.conversation_id.set(9))
+    try:
+        out = await asyncio.create_task(tool.run("agent-victim", "", mode="delete"))
+    finally:
+        runtime.conversation_id.reset(tokens[1])
+        runtime.web_session.reset(tokens[0])
+    assert "deleted" in out
+    pings = _pings(feed)
+    assert [p["kind"] for p in pings] == ["memory_deleted"]
+    r = await client.delete("/api/memory/notes/my-own-note")
+    assert r.status_code == 200
+    assert not _pings(feed)
+
+    agent_row, mine = (await _rows(db, "memory_deleted"))
+    assert agent_row["actor"] is None and agent_row["acknowledged"] == 0
+    assert agent_row["severity"] == "warn" and "agent-victim" in agent_row["summary"]
+    assert mine["actor"] == "operator" and mine["acknowledged"] == 1
+    # the badge holds the agent's, not the operator's own
+    body = (await client.get("/api/notifications")).json()
+    assert body["count"] == 1 and body["ping_count"] == 1
