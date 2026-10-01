@@ -365,10 +365,7 @@ async def display_start(box_id: str, user: dict = Depends(require_user)):
     if not g.get("ok"):
         raise HTTPException(status_code=409, detail=g.get("error") or "the desktop did not start")
     bus.publish(boxes.BUS_CHAN, {"type": "display", "box_id": box.id, "state": "running"})
-    try:
-        await boxdesk.ensure(box)              # the agent can drive it from here (P2)
-    except (boxdesk.BoxDeskError, OSError, asyncio.TimeoutError):
-        pass                                   # status()["desk"]["error"] says why
+    await boxdesk.ensure_quietly(box)          # the agent can drive it from here (P2)
     return await status(box)
 
 

@@ -241,6 +241,18 @@ async def ensure(box) -> desk.Desk:
         return d
 
 
+async def ensure_quietly(box) -> desk.Desk | None:
+    """ensure() for callers that must not fail because the agent's seat did:
+    the reason lands in state()["error"] instead."""
+    try:
+        return await ensure(box)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — the operator's start / status read goes on
+        _failed[box.id] = (time.monotonic(), str(e) or type(e).__name__)
+        return None
+
+
 async def _read(box_id: str, d: desk.Desk, lines: _Lines) -> None:
     """The guest's frames into desk.on_frame, until the connection ends: the
     screen stopped, the box stopped, a Stop, or the client went silent."""
@@ -291,9 +303,7 @@ def sync(box) -> None:
 
     async def go():
         try:
-            await ensure(box)
-        except (BoxDeskError, OSError, asyncio.TimeoutError):
-            pass                       # recorded in _failed; state() reports it
+            await ensure_quietly(box)      # a failure is recorded; state() reports it
         finally:
             _syncing.discard(box.id)
 
