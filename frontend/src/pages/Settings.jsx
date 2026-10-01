@@ -90,6 +90,11 @@ function NotificationsPanel() {
     } catch (e) { notifyError(e) }
   }
 
+  return <NotificationsView s={s} save={save} setDnd={setDnd} />
+}
+
+// the card itself, from the server's view: exported so a test can render it
+export function NotificationsView({ s, save, setDnd }) {
   if (s === null || s === false) {
     return (
       <Card title="Notifications" headingLevel={2} id="notifications">
