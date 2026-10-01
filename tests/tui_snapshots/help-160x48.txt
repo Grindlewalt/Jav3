@@ -17,7 +17,7 @@
                                                  model key is used
                            in /security          y approve · n reject (services: 1 2 3 placement, ↑↓ port, space expose) · a
                                                  acknowledge / add · e edit · p project · enter open · s stop · d delete / revoke
-                           /vms (ctrl+x c)       boxes · images · catalogue: s start/stop, d destroy, b build, y n packages        ▅▅
+                           /vms (ctrl+x c)       boxes · images · catalogue: s start/stop, d destroy, b build, y n packages        ▇▇
                            profile form          ↑↓ field · enter edit/toggle/pick · Save row or ctrl+s · runtime and placement
                                                  have no default
                            ctrl+j · \⏎           new line (shift+enter / alt+enter only where the terminal reports them)

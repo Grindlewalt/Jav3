@@ -11,6 +11,7 @@
     jav3 chat [message]        one turn, or the TUI with no message
     jav3 whoami
     jav3 logout
+    jav3 update                replace this jav3 with the server's newer one (also /update)
 
 Credentials live in $XDG_CONFIG_HOME/jav3/credentials.json (default
 ~/.config/jav3), file 0600 in a 0700 directory: {"address", "token"} for a
@@ -7462,6 +7463,7 @@ def build_tui(base: str, token: str, **kw):
             self.set_interval(0.1, self._tick)
             self.refresh_chrome()
             self.run_worker(self._startup(), group="startup")
+            self.run_worker(check_for_update(self), group="update-check")
 
         async def _startup(self) -> None:
             self.client = self._new_client()
@@ -9546,6 +9548,8 @@ def build_tui(base: str, token: str, **kw):
                                  "or your password (full access)", "[line|password]"),
                 "logout": Command(self.c_logout, "log out: /logout says who, /logout yes does it "
                                  "(a device token is revoked)", "[yes]", takes_arg=True),
+                "update": Command(self.c_update, "replace this jav3 with the server's newer one "
+                                  "(restart to use it)", busy_ok=True),
                 "exit": Command(self.c_exit, "quit (a running turn keeps going)",
                                 busy_ok=True, leader="q"),
             }
@@ -10160,6 +10164,14 @@ def build_tui(base: str, token: str, **kw):
             url = self.base + (f"/c/{self.cid}" if self.cid else "/")
             webbrowser.open(url)
             self.notify(f"opened {url}")
+
+        async def c_update(self, arg: str) -> None:
+            """/update: swap this client file for the one the server serves (the old one
+            is kept as jav3.bak-<date>); the running TUI keeps its code until a restart."""
+            if not self.base:
+                raise CliError(NOT_LOGGED_IN)
+            await self.note(await asyncio.to_thread(update_client, self.base,
+                                                    transport=self.transport))
 
         async def c_status(self, arg: str) -> None:
             info = self.info or {}
@@ -11202,16 +11214,198 @@ def cmd_print(args, out=sys.stdout) -> int:
     return 0
 
 
+# --- updating this client from its server -------------------------------------------------
+# The server serves the client it holds at /cli/jav3 and says which one that is at
+# /cli/version (both unauthenticated, like the installer). Only this file is replaced:
+# the launcher and the venv belong to install.sh.
+
+UPDATE_CHECK_EVERY = 3600          # seconds between asking the server (a stamp in the config dir)
+UPDATE_NOTICE = "a newer jav3 is on the server: /update"
+
+
+def _client_file() -> Path:
+    return Path(__file__).resolve()
+
+
+def _in_checkout(path: Path) -> bool:
+    """clients/jav3cli/jav3 inside a git checkout of the repo: a developer running from
+    source, who updates with git (a dotfiles repo around ~ does not count)."""
+    d = path.parent
+    return d.name == "jav3cli" and d.parent.name == "clients" and (d.parent.parent / ".git").exists()
+
+
+def _sha256(data: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(data).hexdigest()
+
+
+def _version_tuple(s: str) -> tuple[int, ...]:
+    m = re.match(r"\d+(?:\.\d+)*", s.strip())
+    return tuple(int(n) for n in m.group(0).split(".")) if m else ()
+
+
+def _spec_ok(version: str, spec: str) -> bool:
+    """`version` against pip-style bounds such as '>=8,<9' (>= <= == != > <)."""
+    have = _version_tuple(version)
+    for op, want in re.findall(r"(>=|<=|==|!=|>|<)\s*(\d[\d.]*)", spec):
+        w = _version_tuple(want)
+        n = max(len(have), len(w))
+        h, w = have + (0,) * (n - len(have)), w + (0,) * (n - len(w))
+        if not {">=": h >= w, "<=": h <= w, "==": h == w, "!=": h != w,
+                ">": h > w, "<": h < w}[op]:
+            return False
+    return True
+
+
+def _lib_problems(requires) -> list[str]:
+    """The pins from install.sh that a library this client runs on does not meet, like
+    'textual 7.1 (needs >=8,<9)'. A library that is not installed is no problem here:
+    without textual the client runs as the plain REPL."""
+    from importlib import metadata
+    out = []
+    for pin in requires if isinstance(requires, list) else []:
+        m = re.match(r"([A-Za-z0-9_.-]+)\s*(.*)", str(pin))
+        if not m:
+            continue
+        try:
+            have = metadata.version(m.group(1))
+        except metadata.PackageNotFoundError:
+            continue
+        if not _spec_ok(have, m.group(2)):
+            out.append(f"{m.group(1)} {have} (needs {m.group(2)})")
+    return out
+
+
+def _http_pull(base: str, path: str, transport=None):
+    with httpx.Client(base_url=base, timeout=30.0, follow_redirects=False, transport=transport,
+                      headers={"User-Agent": "jav3-cli"}) as c:
+        try:
+            return c.get(path)
+        except httpx.HTTPError as e:
+            raise CliError(f"could not reach {base}: {net_error_text(e)}")
+
+
+def update_client(base: str, path: Path | None = None, transport=None,
+                  today: str | None = None) -> str:
+    """Replace this client file with the server's, keeping the old one as
+    jav3.bak-<date>. Returns what to tell the user; a CliError says why it did not."""
+    import ast
+    import shutil
+    path = path or _client_file()
+    install = f"curl -fsSL {base}/cli/install.sh | sh"
+    if _in_checkout(path):
+        raise CliError(f"you are running from a checkout ({path}); git pull instead")
+    if not (os.access(path, os.W_OK) and os.access(path.parent, os.W_OK)):
+        raise CliError(f"{path} is not writable by you, so jav3 cannot update itself there; "
+                       f"re-run the installer: {install}")
+    r = _http_pull(base, "/cli/jav3", transport)
+    if r.is_redirect:
+        raise CliError(redirect_hint(base, r.headers.get("location", "")))
+    if r.status_code != 200:
+        raise CliError(f"server said {r.status_code} for /cli/jav3: no client to update to")
+    data = r.content
+    try:
+        ast.parse(data.decode("utf-8"))
+    except (SyntaxError, ValueError):          # UnicodeDecodeError is a ValueError
+        raise CliError(f"what {base} sent is not valid Python; your jav3 is untouched")
+    if _sha256(data) == _sha256(path.read_bytes()):
+        return "jav3 is up to date: this file is the one the server serves"
+    v = _http_pull(base, "/cli/version", transport)
+    problems = _lib_problems(v.json().get("requires") if v.status_code == 200 else None)
+    if problems:
+        raise CliError("the newer jav3 needs newer libraries than this one runs on: "
+                       + "; ".join(problems) + f". Run the installer, which updates them "
+                       f"too: {install}")
+    day = today or time.strftime("%Y-%m-%d")
+    bak = path.with_name(f"{path.name}.bak-{day}")
+    n = 1
+    while bak.exists():                         # a second update the same day keeps both
+        n += 1
+        bak = path.with_name(f"{path.name}.bak-{day}-{n}")
+    tmp = path.with_name(path.name + ".update")     # same directory: the rename is atomic
+    try:
+        tmp.write_bytes(data)
+        with contextlib.suppress(OSError):
+            shutil.copymode(path, tmp)
+        shutil.copy2(path, bak)
+        os.replace(tmp, path)
+    except OSError as e:
+        raise CliError(f"could not write the update next to {path}: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+    return f"jav3 updated ({path}); the old one is kept as {bak.name}. Restart jav3 to use it."
+
+
+async def _server_client_sha(base: str, transport=None, now: float | None = None) -> str | None:
+    """The sha256 of the client the server serves. It is asked once an hour at most:
+    what it said (or that it had no answer, as an older server has no /cli/version) waits
+    in update-check.json, so a restart in between costs no request. A server that does
+    not answer is not stamped: the next start asks again."""
+    now = time.time() if now is None else now
+    stamp = config_dir() / "update-check.json"
+    try:
+        last = json.loads(stamp.read_text())
+    except (OSError, ValueError):
+        last = None
+    if (isinstance(last, dict) and last.get("base") == base
+            and isinstance(last.get("at"), (int, float)) and 0 <= now - last["at"] < UPDATE_CHECK_EVERY):
+        return last.get("sha256")
+    async with httpx.AsyncClient(base_url=base, timeout=10.0, follow_redirects=False,
+                                 transport=transport,
+                                 headers={"User-Agent": "jav3-cli"}) as c:
+        r = await c.get("/cli/version")
+    sha = None
+    if r.status_code == 200:
+        try:
+            sha = r.json().get("sha256")
+        except ValueError:
+            pass
+        if not (isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{64}", sha)):
+            sha = None
+    try:
+        stamp.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        stamp.write_text(json.dumps({"base": base, "at": now, "sha256": sha}))
+    except OSError:
+        pass
+    return sha
+
+
+async def check_for_update(app) -> None:
+    """Run in the background at TUI start: one quiet notice (listed, no toast) when the
+    server serves a different client than this file. Nothing here may bother anyone:
+    an unreachable or older server, a checkout, an unreadable stamp are all silence."""
+    try:
+        path = _client_file()
+        if not app.base or _in_checkout(path):
+            return
+        sha = await _server_client_sha(app.base, app.transport)
+        if sha and sha != _sha256(path.read_bytes()):
+            app.push_notice(UPDATE_NOTICE, "info", toast=False)
+    except Exception:       # noqa: BLE001 - see above
+        pass
+
+
+def cmd_update(args, out=sys.stdout, transport=None) -> int:
+    """`jav3 update`: replace this client with the one the server serves."""
+    creds = load_credentials()
+    address = args.server or (creds or {}).get("address")
+    if not address:
+        raise CliError("no server to update from: log in first, or jav3 --server host:port update")
+    print(update_client(base_url(address), transport=transport), file=out)
+    return 0
+
+
 # --- arguments ---------------------------------------------------------------------------
 
-SUBCOMMANDS = ("login", "chat", "whoami", "logout")
+SUBCOMMANDS = ("login", "chat", "whoami", "logout", "update")
+
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="jav3", description="Terminal client for a Jav3 server. With no command, "
         "starts the interactive TUI (optionally with a first message).",
-        usage="jav3 [options] [message ...]\n       jav3 {login,chat,whoami,logout} ...")
+        usage="jav3 [options] [message ...]\n       jav3 {login,chat,whoami,logout,update} ...")
     p.add_argument("--server", help="server address (host:port or URL), overriding the saved one")
     p.add_argument("-p", "--print", dest="print_mode", action="store_true",
                    help="send the message (or stdin), print the reply, exit")
@@ -11234,6 +11428,7 @@ def build_parser() -> argparse.ArgumentParser:
     ch.add_argument("--project", help="pin a new conversation to this project slug")
     sub.add_parser("whoami", help="show who the saved token authenticates as")
     sub.add_parser("logout", help="revoke this computer's token and forget it")
+    sub.add_parser("update", help="replace this jav3 with the newer one on the server")
     return p
 
 
@@ -11268,7 +11463,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         args = parse_args(argv)
         cmds = {"login": cmd_login, "chat": cmd_chat, "whoami": cmd_whoami,
-                "logout": cmd_logout}
+                "logout": cmd_logout, "update": cmd_update}
         if args.cmd:
             return cmds[args.cmd](args)
         if args.print_mode or not sys.stdin.isatty():
