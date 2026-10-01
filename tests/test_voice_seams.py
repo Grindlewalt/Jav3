@@ -180,7 +180,7 @@ async def test_rewrite_rules_default_still_rewrites(tmp_env, monkeypatch):
     second-pass rewrite (behavior unchanged for non-voice turns)."""
     from backend.agent import loop as loop_mod
 
-    async def fake_enforce(content, rules):
+    async def fake_enforce(content, rules, conversation_id=None):
         return "REWRITTEN"
 
     monkeypatch.setattr(loop_mod, "model", _fake_model())
@@ -198,7 +198,7 @@ async def test_rewrite_rules_off_skips_enforce(tmp_env, monkeypatch):
     diverge from what the operator heard."""
     from backend.agent import loop as loop_mod
 
-    async def exploding_enforce(content, rules):
+    async def exploding_enforce(content, rules, conversation_id=None):
         raise AssertionError("_enforce_rules must not run for voice turns")
 
     monkeypatch.setattr(loop_mod, "model", _fake_model())

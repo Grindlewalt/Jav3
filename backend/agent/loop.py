@@ -209,6 +209,11 @@ def _assemble_messages(system_prompt: str, history: list[dict],
 # own thin model shim. '｜' is U+FF5C.
 _TOOL_MARKUP = re.compile(r"<｜+\s*DSML\s*｜+")
 
+# A reply the output cap cuts off (finish_reason length) is asked to continue, or
+# for a smaller tool call, this many times a turn before the cut text is returned.
+_MAX_CUTS = 2
+_CUT_NOTE = "\n\n(the reply was cut off at the model's output limit)"
+
 
 def has_tool_markup(content: str) -> bool:
     return bool(content) and _TOOL_MARKUP.search(content) is not None
@@ -235,10 +240,12 @@ async def _force_conclusion(messages: list[dict], conversation_id: int,
                 conversation_id=conversation_id,
                 model_name=model_name, base_url=base_url,
             ):
-                if ev["type"] == "token":
+                if ev["type"] in ("token", "retry"):
                     yield ev
                 else:
                     conclusion = ev["content"] or ""
+                    if conclusion.strip() and ev.get("finish_reason") == "length":
+                        conclusion += _CUT_NOTE
         except Exception:  # noqa: BLE001 — conclusion is best-effort
             conclusion = ""
         if conclusion.strip():
@@ -249,7 +256,7 @@ async def _force_conclusion(messages: list[dict], conversation_id: int,
                  "unknown.")
     if conclusion.strip():
         if rules and rewrite_rules:
-            conclusion = await _enforce_rules(conclusion, rules)
+            conclusion = await _enforce_rules(conclusion, rules, conversation_id)
         yield {"type": "final", "content": conclusion}
     else:
         yield {"type": "final", "content":
@@ -415,6 +422,9 @@ async def _run_turn(
     # Cleared whenever a mutating tool runs — state may have changed under it.
     seen_calls: dict[tuple, dict] = {}
     markup_retries = 0           # tool-call markup that arrived as unparsed text
+    cuts = 0                     # rounds the output cap cut off (finish_reason length)
+    carry: list[str] = []        # the cut-off text of the answer being continued
+    truncated = False            # the answer is still cut off after the continues
     edited: dict[str, int] = {}  # project path -> round of its last edit/write
     evicted_spans: list[tuple] = []   # (path, first line, last line) of dropped reads
     for i in range(n_iter):
@@ -445,8 +455,8 @@ async def _run_turn(
                 messages, tools=call_tools, conversation_id=conversation_id,
                 model_name=model_name, base_url=base_url,
             ):
-                if event["type"] == "token":
-                    yield event
+                if event["type"] in ("token", "retry"):
+                    yield event       # retry: the stream dropped, the text so far is void
                 else:
                     final = event
         except BudgetExceeded as e:
@@ -461,15 +471,43 @@ async def _run_turn(
         if any(str(tc.get("id", "")).startswith("dsml_")
                for tc in final["tool_calls"] or ()):
             stats["dsml_recovered"] += 1
+        # a reply the output cap cut off is not an answer, and its last tool
+        # call is cut mid-argument: nothing from a cut round runs
+        cut = final.get("finish_reason") == "length" and bool(
+            final["tool_calls"] or (final["content"] or "").strip())
+        if cut and final["tool_calls"]:
+            if i < n_iter - 1 and cuts < _MAX_CUTS:
+                cuts += 1
+                messages.append({"role": "assistant",
+                                 "content": final["content"] or "(cut off at the output limit)"})
+                messages.append({"role": "user", "content": (
+                    "Harness note: your last reply hit the output limit in the "
+                    "middle of a tool call, so nothing ran. Make the call again "
+                    "with less in it (write a large file in several smaller parts).")})
+                continue
+            yield {"type": "final", "content": "".join(carry) + (final["content"] or "")
+                   + _CUT_NOTE}
+            return
+        if cut and not has_tool_markup(final["content"] or ""):
+            if i < n_iter - 1 and cuts < _MAX_CUTS:
+                cuts += 1
+                carry.append(final["content"])
+                messages.append({"role": "assistant", "content": final["content"]})
+                messages.append({"role": "user", "content": (
+                    "Harness note: your last reply was cut off at the output "
+                    "limit. Continue from exactly where it stopped; do not "
+                    "repeat what you already wrote.")})
+                continue
+            truncated = True
         if not final["tool_calls"]:
-            content = final["content"] or ""
+            content = "".join(carry) + (final["content"] or "")
             # tool-call markup the gateway could not parse is a harness fault,
             # not an answer: ending the turn on it voided every item of a plan
             # run (plan_report never ran). Ask for the call again, twice at most.
             if call_tools and markup_retries < 2 and has_tool_markup(content):
                 markup_retries += 1
                 stats["markup_retries"] = markup_retries
-                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "assistant", "content": final["content"] or ""})
                 messages.append({"role": "user", "content": (
                     "Harness note: your last reply contained tool-call markup "
                     "as plain text, so nothing ran. Make the call again through "
@@ -484,12 +522,12 @@ async def _run_turn(
             # rewrite — the text was already SPOKEN as it streamed, so a
             # post-hoc rewrite would silently diverge from what was heard.
             if rules and content.strip() and rewrite_rules:
-                content = await _enforce_rules(content, rules)
+                content = await _enforce_rules(content, rules, conversation_id)
             if force_conclude:
                 stats["stop"] = "dead_end"       # the breaker withdrew the tools
             elif i == n_iter - 1:
                 stats["cap_hit"], stats["stop"] = 1, "cap"   # answered on the last round
-            yield {"type": "final", "content": content}
+            yield {"type": "final", "content": content + (_CUT_NOTE if truncated else "")}
             return
 
         if call_tools is None or (report_only and any(
@@ -515,16 +553,32 @@ async def _run_turn(
         if final.get("provider_blocks"):
             turn["provider_blocks"] = final["provider_blocks"]
         messages.append(turn)
+        carry.clear()
+        cuts = 0
         parsed = []
+        bad_json: dict[int, str] = {}    # id(tool call) -> why its arguments were refused
         # per call: (note for its result, error that replaces its dispatch),
         # from mapping what the model called onto the real tool
         mapped: dict[int, tuple[str, str | None]] = {}
         for tc in final["tool_calls"]:
             name = tc["function"]["name"]
+            raw_args = tc["function"]["arguments"] or "{}"
             try:
-                args = json.loads(tc["function"]["arguments"] or "{}")
-            except json.JSONDecodeError:
-                args = {}
+                args = json.loads(raw_args)
+            except json.JSONDecodeError as e:
+                # not JSON at all (an unescaped quote or newline in a string,
+                # a cut-off call): never dispatched as an empty call, which
+                # would tell the model it forgot arguments it did send. It is
+                # told what was wrong and sees the start of what it wrote.
+                shown = raw_args if len(raw_args) <= 200 else raw_args[:200] + "..."
+                bad_json[id(tc)] = (
+                    f"error: the arguments you sent for {name} were not valid JSON "
+                    f"({e.msg}, at character {e.pos}), so nothing ran. They began: "
+                    f"{shown}\nEscape quotes and newlines inside string values "
+                    f"(\\\" and \\n) and call {name} again.")
+                parsed.append((tc, name, {"_invalid_json": raw_args[:2000]}))
+                yield {"type": "tool", "id": tc["id"], "name": name, "args": parsed[-1][2]}
+                continue
             if not isinstance(args, dict):
                 # valid JSON but not an object ([..], null, "x"): an empty call,
                 # so argcheck names the missing arguments and the model retries,
@@ -539,6 +593,8 @@ async def _run_turn(
             yield {"type": "tool", "id": tc["id"], "name": name, "args": args}
 
         async def _run_one(name: str, args: dict, call_id=None, tc=None) -> str:
+            if id(tc) in bad_json:
+                return bad_json[id(tc)]
             if view.is_meta(name):
                 return view.meta_call(args)
             note, err = mapped.get(id(tc), ("", None))
@@ -858,11 +914,14 @@ def _evict_stale_results(messages: list[dict], tool_msgs: list[dict],
     return dropped
 
 
-async def _enforce_rules(content: str, rules: str) -> str:
+async def _enforce_rules(content: str, rules: str,
+                         conversation_id: int | None = None) -> str:
     """No-tools verification pass. flash obeys rules ~100% without tool schemas
     attached, so this reliably fixes violations the tool-laden turn let through.
     Preserves meaning and structure; only touches rule breaks. Falls back to the
-    original text on any error so a failed check never blocks the reply."""
+    original text on any error so a failed check never blocks the reply — or on
+    a rewrite the output cap cut off, which would replace a whole answer with
+    half of one. `conversation_id` attributes the call's cost to its chat."""
     prompt = [
         {"role": "system", "content":
             "You are a strict copy editor for another assistant's reply. Rewrite "
@@ -875,9 +934,10 @@ async def _enforce_rules(content: str, rules: str) -> str:
     try:
         revised = ""
         # temperature 0: this is a deterministic editing task, not creative
-        async for ev in model.complete(prompt, temperature=0.0):  # no tools -> reliably obeys
+        async for ev in model.complete(prompt, temperature=0.0,   # no tools -> reliably obeys
+                                       conversation_id=conversation_id):
             if ev["type"] == "message":
-                revised = ev["content"]
+                revised = "" if ev.get("finish_reason") == "length" else ev["content"]
         return revised.strip() or content
     except Exception:  # noqa: BLE001 — never let the check block the answer
         return content

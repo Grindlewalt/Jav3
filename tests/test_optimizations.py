@@ -157,7 +157,10 @@ async def test_model_does_not_retry_4xx(monkeypatch):
     assert calls["n"] == 1
 
 
-async def test_model_does_not_retry_after_tokens_streamed(monkeypatch):
+async def test_model_retries_after_tokens_streamed_and_says_so(monkeypatch):
+    """ROBUST-15: a stream that drops after a token is asked again (no tool has
+    run: the call is only acted on once whole); the partial text is announced
+    as dropped with a retry event so a client can clear it."""
     from backend.agent.model import Model
     monkeypatch.setattr(settings, "model_retries", 2)
     monkeypatch.setattr(settings, "model_retry_backoff_seconds", 0)
@@ -170,10 +173,12 @@ async def test_model_does_not_retry_after_tokens_streamed(monkeypatch):
 
     monkeypatch.setattr(Model, "_stream_once", fake_stream)
     m = Model(api_key="test")
+    seen = []
     with pytest.raises(httpx.ReadError):
-        async for _ in m.complete([{"role": "user", "content": "x"}]):
-            pass
-    assert calls["n"] == 1   # a retry would duplicate the streamed token
+        async for ev in m.complete([{"role": "user", "content": "x"}]):
+            seen.append(ev["type"])
+    assert calls["n"] == 3                       # the first try and both retries
+    assert seen == ["token", "retry", "token", "retry", "token"]
 
 
 # --- memory: active-project context budget --------------------------------------
