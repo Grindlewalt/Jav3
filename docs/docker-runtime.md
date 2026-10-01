@@ -83,6 +83,12 @@ listener (below).
 - `--pids-limit docker_box_pids`, `--memory` = `--memory-swap` (no swap),
   `--cpus docker_box_cpus`, `--ulimit core=0 nofile=1024:4096`,
   `--oom-score-adj 500` (on a 4 GB Pi the box dies before the app does).
+  Inside it, what the agent runs (run_code, screenshot) takes oom_score_adj 1000
+  (`backend/memguard.py`; the container is not root and its cgroup tree is
+  read-only, so it cannot get the KVM guest's capped sub-cgroup), so a command
+  that outgrows the box is the OOM killer's pick, not the run-turn server. A
+  turn that still loses its guest reports the container's exit code, whether a
+  process was OOM-killed, and its last output lines (`DockerBox.death_note`).
 - `--ipc private`, `--cgroupns private`, and no `--pid/--uts/--userns host`.
   `--restart no`, json-file logs capped at 2 x 1 MB, `--no-healthcheck`.
 - **gVisor:** `--runtime runsc` whenever the daemon has runsc registered.
@@ -158,6 +164,13 @@ with BuildKit (`COPY --chmod`). Variants: `docker_recipe.render_dockerfile(recip
 renders from the contract's variant shape `{name, from, packages:[{manager,
 package, version}]}`. It is an **adapter**: WP5's `.recipe` file format was not
 visible yet, so WP5 only needs to parse its file into that dict.
+
+Nothing builds a Docker image of a variant (`desktop`, `dev`, ...): variants are
+KVM layers. A docker box whose image is not `main` checks for the image before it
+starts anything and, when there is none, refuses with a message that says to run
+the project in a KVM box or use `main` (`no_variant_image_message`). It does not
+fall back to `main`: a box that quietly lacks chromium and Xvfb sends the model, and
+the `screenshot` tool's own "set the profile's image to desktop", round in a circle.
 
 ## 7. Residual risk (the docker runtime is weaker than KVM)
 

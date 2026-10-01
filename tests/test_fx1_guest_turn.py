@@ -242,6 +242,99 @@ async def test_a_stream_that_ends_without_final_is_an_error(env, monkeypatch):
     assert all(_books_clear().values()), _books_clear()
 
 
+class NotedCtl(Ctl):
+    """A controller that can say why its guest went (docker_runtime / lifecycle)."""
+
+    def __init__(self, note="", *, boom=False):
+        super().__init__()
+        self.note, self.boom = note, boom
+
+    async def death_note(self):
+        if self.boom:
+            raise RuntimeError("daemon down")
+        return self.note
+
+
+async def _lost_stream(monkeypatch, ctl, *, reset=False):
+    """A turn whose guest streams two tokens and is then gone. Returns the error."""
+    guest_sock, ctl = _wire(monkeypatch, ctl)
+    loop = asyncio.get_running_loop()
+
+    async def guest():
+        await _read_spec(loop, guest_sock)
+        await _send(loop, guest_sock, {"type": "token", "content": "par"})
+        await asyncio.sleep(0.05)
+        guest_sock.close()
+
+    if reset:
+        real = gt._recv_line
+        calls = []
+
+        async def flaky(*a, **kw):
+            calls.append(1)
+            if len(calls) > 1:
+                raise ConnectionResetError(104, "Connection reset by peer")
+            return await real(*a, **kw)
+        monkeypatch.setattr(gt, "_recv_line", flaky)
+
+    task = asyncio.create_task(guest())
+
+    async def consume():
+        async for _ev in gt.guest_turn(7, "sys", [], op_id="op-fx1", envelope=_env(),
+                                       active_slug="fx1", push_workspace=True):
+            pass
+    try:
+        with pytest.raises(gt.GuestStreamError) as e:
+            await asyncio.wait_for(consume(), 10)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    return str(e.value)
+
+
+def _history(monkeypatch):
+    from backend.vm import boxlog
+    seen = []
+
+    async def record(box, event, **kw):
+        seen.append((event, kw.get("reason"), kw.get("actor")))
+    monkeypatch.setattr(boxlog, "record", record)
+    return seen
+
+
+async def test_a_lost_guest_says_why_in_the_error_and_the_box_history(env, monkeypatch):
+    """The turn read 'the guest crashed, ran out of memory or its VM was reaped' and
+    nothing else, though the console / container held the answer (benchmark-game,
+    2026-10-01: the guest kernel's OOM killer)."""
+    seen = _history(monkeypatch)
+    note = "the guest's console shows its kernel killing chromium (pid 821, 938 MB)"
+    msg = await _lost_stream(monkeypatch, NotedCtl(note))
+    assert msg.startswith("guest closed the connection mid-turn")
+    assert msg.endswith(". " + note[0].upper() + note[1:])
+    assert seen == [("error", f"a turn lost its guest: {note}", "app")]
+    assert all(_books_clear().values()), _books_clear()
+
+
+async def test_a_controller_that_cannot_say_leaves_the_plain_message(env, monkeypatch):
+    seen = _history(monkeypatch)
+    for ctl in (NotedCtl(""), NotedCtl(boom=True), Ctl()):        # nothing / raises / no method
+        msg = await _lost_stream(monkeypatch, ctl)
+        assert msg == ("guest closed the connection mid-turn (no final answer: the guest "
+                       "crashed, ran out of memory or its VM was reaped)")
+    assert seen == []
+
+
+async def test_a_reset_connection_is_a_lost_guest_too(env, monkeypatch):
+    """A vsock reset reaches the host as an error from recv, not an EOF: the turn
+    used to fail with a bare '[Errno 104] Connection reset by peer'."""
+    seen = _history(monkeypatch)
+    msg = await _lost_stream(monkeypatch, NotedCtl("the container exited (exit code 137)"),
+                             reset=True)
+    assert msg.startswith("the connection to the guest broke mid-turn (ConnectionResetError:")
+    assert "The container exited (exit code 137)" in msg
+    assert seen and seen[0][0] == "error"
+
+
 async def test_a_stream_with_final_still_ends_normally(env, monkeypatch):
     async def fine(loop, sock, spec):
         await _send(loop, sock, {"type": "token", "content": "x"})

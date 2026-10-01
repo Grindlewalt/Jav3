@@ -22,7 +22,7 @@ from ..agent.budget import Budget
 from .. import taintpaths
 from .. import turnstats
 from ..config import settings
-from . import boxes, broker, workspace_xfer
+from . import boxes, broker, deathnote, workspace_xfer
 from . import persist as persist_mod
 
 log = logging.getLogger("jav3.guest_turn")
@@ -145,6 +145,7 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
     ws_held = owns_ws = staged_done = saw_final = False
     persist_fact, persist_gen = None, 0
     held_final = None       # the owner's `final`, held until its edits are applied
+    lost = None             # how the stream broke, when it broke with an error
     loop = asyncio.get_running_loop()
     s = None
     try:
@@ -241,8 +242,13 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
         while True:
             # once the answer is held the write buffer is due within seconds: a
             # guest that stalls there must not hold the answer forever
-            line = await _recv_line(loop, s, buf, MAX_LINE,
-                                    RPC_TIMEOUT if held_final is not None else None)
+            try:
+                line = await _recv_line(loop, s, buf, MAX_LINE,
+                                        RPC_TIMEOUT if held_final is not None else None)
+            except GuestStreamError:
+                raise
+            except OSError as e:          # a vsock reset arrives as an error, not an EOF
+                lost, line = f"{type(e).__name__}: {e}", None
             if line is None:
                 break                     # the guest closed the connection
             if not line.strip():
@@ -286,9 +292,7 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                     raise GuestLoopError(str(ev["error"])[:500])
             yield ev
         if not saw_final:
-            raise GuestStreamError(
-                "guest closed the connection mid-turn (no final answer: the guest "
-                "crashed, ran out of memory or its VM was reaped)")
+            raise GuestStreamError(await _lost_message(box, guest_vm, lost))
         if held_final is not None:
             if not staged_done:
                 # `final` came but the edits did not: fetch them while the guest is up
@@ -345,6 +349,32 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
                     broker.release_turn(op_id)
                 if owns_budget:
                     budget_mod.release(op_id)
+
+
+DEATH_NOTE_TIMEOUT = 8.0
+
+
+async def _lost_message(box, guest_vm, lost: str | None) -> str:
+    """The error for a stream that ended with no `final`: what happened, plus what
+    the box can say about WHY (a container's exit state and last output, a KVM
+    guest's OOM line), also written to the box's history. It used to read only "the
+    guest crashed, ran out of memory or its VM was reaped" and the evidence was
+    never looked at (benchmark-game, 2026-10-01). Never raises."""
+    msg = ("guest closed the connection mid-turn (no final answer: the guest crashed, "
+           "ran out of memory or its VM was reaped)" if not lost
+           else f"the connection to the guest broke mid-turn ({lost})")
+    try:
+        note = await asyncio.wait_for(guest_vm.death_note(), DEATH_NOTE_TIMEOUT)
+    except Exception:  # noqa: BLE001 -- a controller without one, or a daemon that will not say
+        note = ""
+    if note:
+        try:
+            from . import boxlog
+            await boxlog.record(box, "error", reason=f"a turn lost its guest: {note}",
+                                actor="app")
+        except Exception:  # noqa: BLE001 -- the history is advice
+            pass
+    return deathnote.with_note(msg, note)
 
 
 def _workspace_b64(slug: str) -> str:
