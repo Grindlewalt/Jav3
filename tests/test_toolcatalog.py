@@ -74,7 +74,7 @@ async def test_folded_and_standalone_tools(client):
 async def test_gating_labels(client):
     rows = await _builtin(client)
     assert "needs desk" in rows["desk_click"]["gating"]
-    assert "needs desk + shell" in rows["desk_shell"]["gating"]
+    assert rows["desk_shell"]["gating"] == ["needs desk", "needs shell"]
     assert rows["local_shell"]["gating"] == ["local chats only"]
     assert rows["plan_report"]["gating"] == ["plan items only"]
     assert rows["inbox_fetch"]["gating"] == ["harness only"]

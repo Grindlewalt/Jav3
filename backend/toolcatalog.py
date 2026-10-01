@@ -42,10 +42,10 @@ def gating(e: dict) -> list[str]:
         out.append("in-guest")
     if e.get("requires_local") is True:
         out.append("local chats only")
-    if e.get("requires_desk") == "shell":
-        out.append("needs desk + shell")
-    elif e.get("requires_desk"):
+    if e.get("requires_desk"):
         out.append("needs desk")
+        if e["requires_desk"] == "shell":
+            out.append("needs shell")      # granted in Settings, allowed at that computer
     if e.get("requires_browser") is True:
         out.append("needs extension")
     if e.get("requires_project"):

@@ -85,7 +85,7 @@ See and operate the operator's connected computer.
 | `desk_move` | `desk(action="move")` |  | needs desk |
 | `desk_open` | `desk(action="open")` |  | needs desk |
 | `desk_scroll` | `desk(action="scroll")` |  | needs desk |
-| `desk_shell` | `desk(action="shell")` |  | needs desk + shell |
+| `desk_shell` | `desk(action="shell")` |  | needs desk, needs shell |
 | `desk_type` | `desk(action="type")` |  | needs desk |
 | `desk_wait` | `desk(action="wait")` |  | needs desk |
 
