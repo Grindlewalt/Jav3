@@ -21,7 +21,7 @@ export default function DndMark({ dnd }) {
     + 'Click to change it.'
   return (
     <button type="button" className="dnd-mark" title={tip}
-            onClick={() => navigate('/settings#notifications')}>
+            onClick={() => navigate('/settings/alerts#notifications')}>
       <span className="dnd-dot" aria-hidden="true" />
       <span>DND</span>
       {left && <span className="dnd-left">· {left}</span>}

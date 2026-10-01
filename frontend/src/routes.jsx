@@ -38,7 +38,17 @@ const AgentDefinitions = lazy(() => import('./pages/Agents.jsx')
 const SkillsPanel = lazy(() => import('./SkillsPanel.jsx'))
 const AgentOutputs = lazy(() => import('./AgentOutputs.jsx'))
 const Tools = lazy(() => import('./pages/Tools.jsx'))
+// Settings is a layout route like Agents: the shell + tab strip is the default
+// export, Models the index child, Alerts / Access / System siblings.
 const Settings = lazy(() => import('./pages/Settings.jsx'))
+const SettingsModels = lazy(() => import('./pages/Settings.jsx')
+  .then((m) => ({ default: m.ModelsTab })))
+const SettingsAlerts = lazy(() => import('./pages/Settings.jsx')
+  .then((m) => ({ default: m.AlertsTab })))
+const SettingsAccess = lazy(() => import('./pages/Settings.jsx')
+  .then((m) => ({ default: m.AccessTab })))
+const SettingsSystem = lazy(() => import('./pages/Settings.jsx')
+  .then((m) => ({ default: m.SystemTab })))
 
 // Review is a layout route: the shell (title + tab strip) is the default
 // export and the queue is the index child, so the tabs are real URLs —
@@ -142,7 +152,12 @@ export default function AppRoutes({ onLogin, onSetup, authed }) {
           <Route path="catalogue" element={<Catalogue />} />
         </Route>
         <Route path="/tools" element={<Tools />} />
-        <Route path="/settings" element={<Settings />} />
+        <Route path="/settings" element={<Settings />}>
+          <Route index element={<SettingsModels />} />
+          <Route path="alerts" element={<SettingsAlerts />} />
+          <Route path="access" element={<SettingsAccess />} />
+          <Route path="system" element={<SettingsSystem />} />
+        </Route>
 
         {/* the ⋯ menu */}
         <Route path="/memory" element={<Memory />} />
