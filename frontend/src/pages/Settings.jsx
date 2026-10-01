@@ -4,13 +4,15 @@
  * one control is one size across the page (Model and Music used to be bare
  * <select>/<input> at the body's 15px beside Backup's 13px fields). */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { api } from '../api.js'
+import { useLocation } from 'react-router-dom'
+import { api, subscribeSse } from '../api.js'
+import { dndBody, dndPresets, dndUntil } from '../dnd.js'
 import { useAsk } from '../ask.jsx'
 import { Copy } from '../copy.jsx'
 import { ts } from '../format.js'
 import { notifyError } from '../notify.js'
 import { useAuth } from '../auth.jsx'
-import { Button, Card, EmptyState, Input, Select, Tag } from '../components/index.js'
+import { Button, Card, EmptyState, Input, Select, Tag, Toggle } from '../components/index.js'
 import Page from '../components/Page.jsx'
 import BackupPanel from '../BackupPanel.jsx'
 import BrowserPanel from '../BrowserPanel.jsx'
@@ -44,38 +46,139 @@ export default function Settings() {
 }
 
 // --- notifications ---------------------------------------------------------------
-// One server-side level (backend/security.py) that the web toasts and the
-// terminal client's sidebar both follow. It only decides what interrupts:
-// every event is still in Security's queue and log either way.
+// What interrupts, and what the operator did themselves, are the server's
+// calls (backend/security.py); the web toasts and the terminal client's sidebar
+// both follow them. None of it hides anything: every event is still in
+// Security's queue and history, and the badge still counts what waits.
 const LEVEL_OPTIONS = [
   { value: 'critical', label: 'Critical only' },
   { value: 'approvals', label: 'Needs my approval' },
   { value: 'all', label: 'Everything' },
 ]
+const MODES = [['ping', 'Ping'], ['badge', 'Badge'], ['record', 'Record']]
 
 function NotificationsPanel() {
-  const [level, setLevel] = useState(null)
+  const [s, setS] = useState(null)             // the server's view; false = could not load
+  const { hash } = useLocation()
   useEffect(() => {
-    api('/api/notifications/settings').then((r) => setLevel(r.level))
-      .catch(() => setLevel(''))
+    api('/api/notifications/settings').then(setS).catch(() => setS(false))
   }, [])
-  async function change(v) {
-    const was = level
-    setLevel(v)
+  // do not disturb can be switched from the terminal, or end by itself
+  useEffect(() => subscribeSse('/api/security/stream', (ev) => {
+    if (ev.type !== 'dnd_changed') return
+    setS((v) => (v ? { ...v, dnd: { on: ev.on, since: ev.since, until: ev.until,
+                                    break_critical: ev.break_critical } } : v))
+  }), [])
+  useEffect(() => {
+    if (hash === '#notifications' && s) document.getElementById('notifications')?.scrollIntoView()
+  }, [hash, !!s]) // eslint-disable-line
+
+  async function save(patch, optimistic) {
+    const was = s
+    if (optimistic) setS({ ...s, ...optimistic })
     try {
-      const r = await api('/api/notifications/settings',
-        { method: 'PUT', body: JSON.stringify({ level: v }) })
-      setLevel(r.level)
-    } catch (e) { setLevel(was); notifyError(e) }
+      setS(await api('/api/notifications/settings',
+        { method: 'PUT', body: JSON.stringify(patch) }))
+    } catch (e) { setS(was); notifyError(e) }
   }
+  async function setDnd(choice) {
+    const body = dndBody(choice)
+    if (!body) return
+    try {
+      const d = await api('/api/notifications/dnd', { method: 'PUT', body: JSON.stringify(body) })
+      setS((v) => ({ ...v, dnd: d }))
+    } catch (e) { notifyError(e) }
+  }
+
+  return <NotificationsView s={s} save={save} setDnd={setDnd} />
+}
+
+// the card itself, from the server's view: exported so a test can render it
+export function NotificationsView({ s, save, setDnd }) {
+  if (s === null || s === false) {
+    return (
+      <Card title="Notifications" headingLevel={2} id="notifications">
+        <p className="dim small settings-note">
+          {s === null ? 'Loading…' : 'Could not load the notification settings.'}
+        </p>
+      </Card>
+    )
+  }
+  const dnd = s.dnd || { on: false }
+  const dndOptions = [
+    { value: 'off', label: 'Off' },
+    ...(dnd.on ? [{ value: 'current', label: `On ${dndUntil(dnd)}` }] : []),
+    ...dndPresets(),
+  ]
   return (
-    <Card title="Notifications" headingLevel={2}>
+    <Card title="Notifications" headingLevel={2} id="notifications">
       <div className="settings-inline">
-        <Select label="Ping me for" value={level || 'approvals'} disabled={level === null}
-                onChange={(e) => change(e.target.value)} options={LEVEL_OPTIONS} />
+        <Select label="Ping me for" value={s.level}
+                onChange={(e) => save({ level: e.target.value }, { level: e.target.value })}
+                options={LEVEL_OPTIONS} />
+        <span className="dim small notif-aside">critical always pings</span>
+      </div>
+      <div className="notif-row">
+        <Toggle checked={s.self_quiet} label="Things I did myself: record only"
+                onChange={(v) => save({ self_quiet: v }, { self_quiet: v })} />
+        <span>Things I did myself: record only</span>
       </div>
       <p className="dim small settings-note">
-        Critical alerts always ping; everything is still recorded in Security.
+        A profile edit, a LAN change, a package you approve, made by you in the web app or
+        the terminal, is filed as “by you”, already acknowledged: no ping, not in the badge.
+        The same change made by an agent still alerts. Critical alerts are never quieted.
+      </p>
+
+      <div className="settings-inline notif-dnd">
+        <Select label="Do not disturb" value={dnd.on ? 'current' : 'off'}
+                onChange={(e) => e.target.value !== 'current' && setDnd(e.target.value)}
+                options={dndOptions} />
+        <div className="notif-row">
+          <Toggle checked={s.dnd_break_critical} label="Critical alerts break through do not disturb"
+                  onChange={(v) => save({ dnd_break_critical: v }, { dnd_break_critical: v })} />
+          <span>critical breaks through</span>
+        </div>
+      </div>
+      <p className="dim small settings-note">
+        While it is on nothing pings and the top bar says DND. Alerts still count in Security
+        and everything is still recorded; approvals a chat is waiting on stay where they
+        are. When it ends you get one summary.
+      </p>
+
+      <div className="notif-kinds" role="group" aria-label="What each kind of alert does">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Per kind</th>
+              {MODES.map(([m, label]) => <th key={m} scope="col" className="notif-mode">{label}</th>)}
+              <th scope="col"><span className="sr-only">reset</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {s.kinds.map((k) => (
+              <tr key={k.kind} className={k.chosen ? 'chosen' : ''}>
+                <th scope="row" className="mono small" title={`usually ${k.usual}`}>{k.kind}</th>
+                {k.locked ? (
+                  <td colSpan={3} className="dim small">locked: always pings</td>
+                ) : MODES.map(([m, label]) => (
+                  <td key={m} className="notif-mode">
+                    <input type="radio" name={`mode-${k.kind}`} checked={k.mode === m}
+                           aria-label={`${k.kind}: ${label}`} title={m === k.default ? 'default' : ''}
+                           onChange={() => save({ kinds: { [k.kind]: m } })} />
+                  </td>))}
+                <td className="notif-reset">
+                  {k.chosen && !k.locked && (
+                    <button type="button" className="ghost small" title={`back to the default (${k.default})`}
+                            onClick={() => save({ kinds: { [k.kind]: null } })}>reset</button>)}
+                </td>
+              </tr>))}
+          </tbody>
+        </table>
+      </div>
+      <p className="dim small settings-note">
+        Ping: a toast, and the terminal's sidebar. Badge: counts in Security until you
+        acknowledge it, never pings. Record: filed already acknowledged, kept in the history.
+        A kind you have not set follows “Ping me for”.
       </p>
     </Card>
   )

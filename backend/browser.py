@@ -528,14 +528,15 @@ async def disconnect(device_id: int, reason: str = "stopped") -> bool:
     return True
 
 
-async def stop(device_id: int, by: str = "") -> dict:
+async def stop(device_id: int, by: str = "", by_operator: bool = False) -> dict:
     """Settings' Stop: every grant for this browser off, then kill."""
     for g in await list_grants(device_id):
         await set_grant(device_id, g["project"], read=False, act=False)
     name = _browsers[device_id].name if device_id in _browsers else str(device_id)
     was = await disconnect(device_id, "stopped from Settings")
     await _event("browser_killed", f"browser use on '{name}' stopped by {by or 'operator'}",
-                 detail={"device_id": device_id, "was_connected": was, "by": by})
+                 detail={"device_id": device_id, "was_connected": was, "by": by},
+                 by_operator=by_operator)
     return {"ok": True}
 
 

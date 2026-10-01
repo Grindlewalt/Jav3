@@ -2,6 +2,7 @@ import { useContext, useEffect, useState } from 'react'
 import { Link, Outlet, useLocation } from 'react-router-dom'
 import { api, subscribeSse } from '../api.js'
 import SecurityBoard from '../SecurityBoard.jsx'
+import SecurityHistory from '../SecurityHistory.jsx'
 import TriagePanel from '../TriagePanel.jsx'
 import Posture from '../Posture.jsx'
 import ScrollHint from '../ScrollHint.jsx'
@@ -157,6 +158,9 @@ export function ReviewQueue({ slug }) {
   useEffect(() => {
     return subscribeSse('/api/security/stream', (ev) => {
       if (ev.type !== 'security_event') return
+      // filed already acknowledged (their own action, or a Record-only kind):
+      // it is history, not a queue item
+      if (ev.acknowledged) return
       const proj = ev.project_slug || ev.project
       if (slug && proj !== slug) return
       setAlerts((a) => a.some((x) => x.id === ev.id)
@@ -165,7 +169,8 @@ export function ReviewQueue({ slug }) {
         : [{
           id: ev.id, kind: ev.kind, severity: ev.severity, project_slug: proj,
           summary: ev.summary, detail: ev.detail, acknowledged: false,
-          created_at: ev.created_at, count: ev.count || 1, tier: ev.tier }, ...a])
+          created_at: ev.created_at, count: ev.count || 1, tier: ev.tier,
+          actor: ev.actor }, ...a])
     })
   }, [slug])
 
@@ -479,6 +484,9 @@ function AlertRow({ a, onAck, onOpen }) {
           <span className={`tag sev-${sev}-tag`}>{a.severity}</span>
           <span className="mono small">{a.kind}</span>
           {a.project_slug && <span className="tag">{a.project_slug}</span>}
+          {a.actor === 'operator' && (
+            <span className="tag by-you" title="You did this from the web app or the terminal">
+              by you</span>)}
           {/* the same alert again while this row waited: counted, not re-listed */}
           {a.count > 1 && (
             <span className="tag" title={`first ${ts(a.created_at)}, last ${ts(a.last_seen)} UTC`}>
@@ -581,6 +589,7 @@ export function ReviewHome() {
       <Posture />
       <TriagePanel />
       <ReviewQueue />
+      <SecurityHistory />
     </div>
   )
 }

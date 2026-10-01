@@ -284,7 +284,7 @@ def pending_total() -> int:
 
 
 async def approve(slug: str, item_id: str, *, sha256: str | None = None,
-                  force: bool = False) -> str:
+                  force: bool = False, by_operator: bool = False) -> str:
     """Land a held change. The operator read the diff, so the file is vouched
     for: it leaves the tainted-paths ledger. `sha256` binds the approval to the
     exact text they read (HeldChanged if the agent held a newer one since); a
@@ -306,17 +306,17 @@ async def approve(slug: str, item_id: str, *, sha256: str | None = None,
     _drop(slug, item_id)
     await _audit("always_loaded_approved", "info", slug,
                  f"held change to always-loaded file {item['path']} approved",
-                 {"path": item["path"], "by": "operator"})
+                 {"path": item["path"], "by": "operator"}, by_operator=by_operator)
     return item["path"]
 
 
-async def reject(slug: str, item_id: str) -> str | None:
+async def reject(slug: str, item_id: str, *, by_operator: bool = False) -> str | None:
     item = _read(slug, item_id)
     if item is None or not _drop(slug, item_id):
         return None
     await _audit("always_loaded_rejected", "info", slug,
                  f"held change to always-loaded file {item['path']} rejected",
-                 {"path": item["path"], "by": "operator"})
+                 {"path": item["path"], "by": "operator"}, by_operator=by_operator)
     return item["path"]
 
 
@@ -338,7 +338,8 @@ def prompt_note(slug: str) -> str:
 # --- alerts --------------------------------------------------------------------
 
 async def _audit(kind: str, severity: str, slug: str, summary: str,
-                 detail: dict | None = None, cause: str | None = None) -> None:
+                 detail: dict | None = None, cause: str | None = None, *,
+                 by_operator: bool = False) -> None:
     """Best-effort: the write or the approval stands whether or not the alert can
     be recorded."""
     try:
@@ -349,7 +350,7 @@ async def _audit(kind: str, severity: str, slug: str, summary: str,
             await security.raise_event(
                 db, kind=kind, severity=severity, project=slug, summary=summary,
                 detail={**(detail or {}), "conversation_id": runtime.conversation_id.get()},
-                cause=cause)
+                cause=cause, actor=security.OPERATOR if by_operator else None)
         finally:
             await db.close()
     except Exception:  # noqa: BLE001

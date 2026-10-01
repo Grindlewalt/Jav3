@@ -294,7 +294,8 @@ async def _project_exists(db, slug: str) -> bool:
 
 
 async def set_(db: aiosqlite.Connection, slug: str, *, enabled: bool | None = None,
-               allow: list[str] | None = None, actor: str = "operator") -> dict:
+               allow: list[str] | None = None, actor: str = "unmarked",
+               by_operator: bool = False) -> dict:
     """Update a project's LAN access. Any change raises a `lan_access_changed`
     security event (warn when it is on, info when it was turned off)."""
     from . import egress, security
@@ -335,7 +336,8 @@ async def set_(db: aiosqlite.Connection, slug: str, *, enabled: bool | None = No
             summary=summary,
             detail={"enabled": new_enabled, "was_enabled": cur["enabled"],
                     "allow": new_allow, "added": added, "removed": removed,
-                    "actor": actor})
+                    "actor": actor},
+            actor=security.OPERATOR if by_operator else None)
     return {"ok": True, "slug": slug, "enabled": new_enabled, "allow": new_allow}
 
 

@@ -224,6 +224,9 @@ export default function SecurityBoard({ eventId, seed, onClose, onAck }) {
                 <> · seen {ev.count}×{ev.last_seen
                   && `, last ${String(ev.last_seen).replace('T', ' ').slice(0, 19)}`}</>)}
               {ev.acknowledged ? <> · acknowledged</> : null}
+              {/* their own click, filed already acknowledged (Settings → Notifications) */}
+              {ev.actor === 'operator' && <> · by you</>}
+              {ev.quiet === 'kind' && <> · recorded only</>}
             </div>
           </div>
           <button className="ghost" onClick={onClose} title="close (Esc)">✕</button>

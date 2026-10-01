@@ -478,7 +478,7 @@ async def _audit_config_change(before: dict, after: dict) -> None:
             db, kind="backup_config_changed", severity="warn" if where else "info",
             summary=("backup destination changed: " if where else
                      "backup settings changed: ") + ", ".join(changed),
-            detail=shown)
+            detail=shown, actor=security.OPERATOR)
     except Exception:  # noqa: BLE001 — the log line above still records it
         pass
     finally:

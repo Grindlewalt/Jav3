@@ -780,6 +780,7 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE agent_messages ADD COLUMN "
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
+        await _migrate_secsettings(db)
         await _migrate_peer_trust(db)
         await _migrate_narration(db)
         await _migrate_turnstats(db)
@@ -992,6 +993,18 @@ async def _migrate_secnotify(db: aiosqlite.Connection) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_security_events_cause "
         "ON security_events(kind, cause, acknowledged)")
+
+
+async def _migrate_secsettings(db: aiosqlite.Connection) -> None:
+    """Who caused a security event, and why a row was filed already
+    acknowledged (backend/security.py). `actor` is 'operator' only when an
+    operator-facing route said so explicitly; `quiet` is 'operator' (their own
+    action, "record only") or 'kind' (that kind is set to Record only).
+    Old rows read as NULL/NULL: not operator, not quieted. Idempotent."""
+    await _add_columns(db, "security_events", (
+        ("actor", "TEXT"),
+        ("quiet", "TEXT"),
+    ))
 
 
 async def _migrate_boxlog(db: aiosqlite.Connection) -> None:

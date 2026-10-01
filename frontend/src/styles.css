@@ -4369,3 +4369,42 @@ a:has(> .nav-dot) { position: relative; }
   .resume-bar { margin-left: 0; }
 }
 .msg.error + .resume-bar { justify-content: center; margin-left: 0; }
+/* notification settings: own actions, a mode per kind, do not disturb */
+.settings-page .notif-aside { align-self: center; }
+.notif-row { display: flex; align-items: center; gap: var(--sp-5); margin: var(--sp-5) 0; }
+.notif-dnd { margin-top: var(--sp-8); align-items: flex-end; }
+.notif-kinds { margin-top: var(--sp-8); max-height: 22rem; overflow: auto;
+  border: 1px solid var(--border); border-radius: 8px; }
+.notif-kinds table { width: 100%; border-collapse: collapse; }
+.notif-kinds th, .notif-kinds td { padding: 4px 10px; text-align: left; font-weight: 400;
+  border-bottom: 1px solid var(--border); }
+.notif-kinds thead th { position: sticky; top: 0; background: var(--panel-2);
+  color: var(--dim); font-size: 12px; z-index: 1; }
+.notif-kinds tbody tr:last-child th, .notif-kinds tbody tr:last-child td { border-bottom: 0; }
+.notif-kinds .notif-mode { text-align: center; width: 4.5rem; }
+.notif-kinds .notif-reset { width: 3.5rem; text-align: right; }
+.notif-kinds tr.chosen > th { color: var(--text); }
+.notif-kinds input[type="radio"] { margin: 0; accent-color: var(--accent); }
+.notif-kinds .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; }
+.tag.by-you { color: var(--accent); }
+.sec-history { margin-top: var(--sp-9); }
+.sec-history > summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+.sec-history-filter { display: flex; gap: var(--sp-4); margin: var(--sp-5) 0; flex-wrap: wrap; }
+.sec-history-filter .ghost.on { background: var(--panel-2); color: var(--text); }
+.sec-history-row { opacity: 0.85; }
+/* top bar, while do-not-disturb is on */
+.dnd-mark { display: inline-flex; align-items: center; gap: 6px; background: none;
+  border: 1px solid var(--amber); color: var(--amber); border-radius: 999px;
+  padding: 0 10px; height: 26px; font-size: 12px; font-family: inherit;
+  white-space: nowrap; cursor: pointer; margin-right: var(--sp-4); }
+.dnd-mark:hover:not(:disabled) { background: var(--panel-2); filter: none; transform: none; }
+.dnd-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
+.rail-links ~ .dnd-mark { margin-right: 0; padding: 0 6px; font-size: 11px; }
+.rail-links ~ .dnd-mark .dnd-left { display: none; }
+@media (max-width: 768px) {
+  .notif-kinds { max-height: 18rem; }
+  .notif-kinds th, .notif-kinds td { padding: 4px 6px; }
+  .notif-kinds .notif-mode { width: 3.5rem; }
+  .dnd-mark { padding: 0 8px; margin-right: 0; }
+}

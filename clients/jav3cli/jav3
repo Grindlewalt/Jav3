@@ -7350,6 +7350,7 @@ def build_tui(base: str, token: str, **kw):
             self.notices: list[tuple[float, str, str]] = []   # (time, kind, text), newest first
             self.unread = 0
             self.crit_unread = 0                  # of those, critical security alerts
+            self.dnd: dict | None = None          # the server's do-not-disturb, while on
             self.options: dict = {}
             self.convs: list[dict] = []
             self.info: dict | None = None
@@ -7546,6 +7547,7 @@ def build_tui(base: str, token: str, **kw):
                             continue
                         if r.status_code < 400:
                             backoff = 2.0
+                            await self._load_dnd()        # it may have changed while we were away
                             async for ev in aiter_sse(r.aiter_lines()):
                                 if "topic" in ev:          # /api/events wraps each one
                                     ev = ev.get("event") or {}
@@ -7555,6 +7557,11 @@ def build_tui(base: str, token: str, **kw):
                                     self.push_notice("◆ " + _short(ev.get("summary") or "storage is filling up", 300), "warn")
                                 elif ev.get("type") == "security_event":
                                     await self._security_notice(ev)
+                                elif ev.get("type") == "dnd_changed":
+                                    self._set_dnd(ev)
+                                elif ev.get("type") == "dnd_summary":
+                                    self.push_notice("◆ " + _short(ev.get("summary") or "", 200),
+                                                     "warn", dnd_break=True)
                 except (httpx.HTTPError, ValueError):
                     pass
                 await asyncio.sleep(backoff)
@@ -7580,7 +7587,7 @@ def build_tui(base: str, token: str, **kw):
             if crit and not self.sidebar_shown():
                 self.crit_unread += 1
             self.push_notice(text, "error" if crit else "warn",
-                             timeout=20 if crit else 5)
+                             timeout=20 if crit else 5, dnd_break=True)
             if crit and self.busy and self.turn is not None and self._in_this_turn(ev, proj):
                 from textual.css.query import NoMatches
                 try:
@@ -7610,19 +7617,109 @@ def build_tui(base: str, token: str, **kw):
                 self.push_notice(f"◆ {who}{where} finished in {ev.get('took', '?')}{tail}",
                                  "done")
 
+        # -- do not disturb ---------------------------------------------------------------------
+
+        def _set_dnd(self, d: dict | None) -> None:
+            """The server's do-not-disturb state (`on`, `until`, `break_critical`): a
+            mark in the status row, and pings (sidebar count, toasts) held back in
+            push_notice. The server already stamps what pings, so a security event
+            needs nothing from this beyond the mark."""
+            self.dnd = dict(d) if isinstance(d, dict) and d.get("on") else None
+            self.refresh_chrome()
+
+        async def _load_dnd(self) -> None:
+            try:
+                r = await self.api("GET", "/api/notifications/dnd")
+            except CliError:
+                return                  # an older server has no do-not-disturb
+            self._set_dnd(r)
+
+        def _dnd_end(self):
+            from datetime import datetime, timezone
+            u = (self.dnd or {}).get("until")
+            try:
+                d = datetime.fromisoformat(str(u).replace("Z", "+00:00")) if u else None
+            except ValueError:
+                return None
+            return d if d is None or d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+        def _dnd_left(self) -> str:
+            """'47m' or '1h 12m' left, '' when it runs until turned off."""
+            from datetime import datetime, timezone
+            end = self._dnd_end()
+            if end is None:
+                return ""
+            mins = max(0, -(-int((end - datetime.now(timezone.utc)).total_seconds()) // 60))
+            h, m = divmod(mins, 60)
+            return f"{mins}m" if not h else f"{h}h {m}m" if m else f"{h}h"
+
+        def _dnd_until_text(self) -> str:
+            end = self._dnd_end()
+            if end is None:
+                return "until you turn it off (/dnd off)"
+            local, now = end.astimezone(), time.localtime()
+            same_day = (local.year, local.month, local.day) == (now.tm_year, now.tm_mon,
+                                                                 now.tm_mday)
+            return f"until {'' if same_day else local.strftime('%a ')}{local:%H:%M}"
+
+        @staticmethod
+        def _dnd_request(arg: str) -> dict:
+            """The PUT body for `/dnd <arg>`: '' and 'on' (until turned off), '1h',
+            '90m', '2d', 'tomorrow' (the next 08:00 local), 'off'."""
+            from datetime import datetime, timedelta, timezone
+            a = (arg or "").strip().lower()
+            if a in ("", "on"):
+                return {"on": True}
+            if a in ("off", "stop", "end"):
+                return {"on": False}
+            if a in ("tomorrow", "morning"):
+                now = datetime.now().astimezone()
+                t = now.replace(hour=8, minute=0, second=0, microsecond=0)
+                if t <= now:
+                    t += timedelta(days=1)
+                return {"on": True,
+                        "until": t.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
+            m = re.fullmatch(r"(\d+)\s*(m|min|mins|h|hr|hrs|hour|hours|d|day|days)?", a)
+            if m is None or int(m.group(1)) <= 0:
+                raise CliError(f"dnd: {arg!r} is not a time: try 1h, 90m, tomorrow or off")
+            unit = (m.group(2) or "m")[0]
+            return {"on": True, "minutes": int(m.group(1)) * {"m": 1, "h": 60, "d": 1440}[unit]}
+
+        async def c_dnd(self, arg: str) -> None:
+            """/dnd [1h|4h|90m|tomorrow|off]: do not disturb. Nothing pings (no toast,
+            no sidebar count) until it ends; alerts still count in /security and are
+            still recorded. A critical alert breaks through unless Settings says not.
+            /dnd alone turns it on until you turn it off."""
+            self._need_full("do not disturb")
+            body = self._dnd_request(arg)
+            if body["on"] and not arg.strip() and self.dnd:
+                await self.note("do not disturb is on " + self._dnd_until_text()
+                                + " — /dnd off turns it off")
+                return
+            r = await self.api("PUT", "/api/notifications/dnd", json=body)
+            self._set_dnd(r)
+            if not body["on"]:
+                await self.note("do not disturb is off")
+            else:
+                await self.note("do not disturb is on " + self._dnd_until_text()
+                                + ": nothing pings; alerts still count in /security")
+
         # -- notifications ---------------------------------------------------------------------
 
         def sidebar_shown(self) -> bool:
             return bool(self.sidebar_pref) and self.size.width >= SIDEBAR_MIN_COLS
 
         def push_notice(self, text: str, kind: str = "info", toast: bool = True,
-                        timeout: float = 5) -> None:
+                        timeout: float = 5, dnd_break: bool = False) -> None:
             """Newest first, capped. With the sidebar hidden it also counts as
-            unread (the badge in the status row) and shows as a toast."""
+            unread (the badge in the status row) and shows as a toast. While do not
+            disturb is on a notice that would ping (`toast`) is only listed, unless
+            `dnd_break`: the server let it through (a critical alert) or it is the
+            end-of-DND summary."""
             from textual.css.query import NoMatches
             self.notices.insert(0, (time.time(), kind, text))
             del self.notices[NOTICE_CAP:]
-            if not self.sidebar_shown():
+            if not self.sidebar_shown() and not (toast and self.dnd and not dnd_break):
                 self.unread += 1
                 if toast:
                     self.notify(text, timeout=timeout,
@@ -7957,6 +8054,11 @@ def build_tui(base: str, token: str, **kw):
             """The right side: unread counts (critical security alerts not yet seen get
             their own red one), then the leader and palette keys."""
             parts = []
+            if self.dnd:
+                left = self._dnd_left()
+                parts.append((f"DND {left}".strip(),
+                              "[$warning b]DND[/]" + (f" [$text-muted]{left}[/]" if left else ""),
+                              0))
             if self.crit_unread:
                 parts.append((f"✗ {self.crit_unread}", f"[$error b]✗ {self.crit_unread}[/]", 0))
             if self.unread:
@@ -9431,6 +9533,8 @@ def build_tui(base: str, token: str, **kw):
                                        "running, across projects (← on an empty prompt; "
                                        "/persona starts one)",
                                        busy_ok=True, leader="g"),
+                "dnd": Command(self.c_dnd, "do not disturb: silence pings (full access)",
+                               "[1h|4h|90m|tomorrow|off]", takes_arg=True, busy_ok=True),
                 "security": Command(self.c_security, "the Security area: "
                                     + ", ".join(SecurityScreen.TABS) + " (full access)",
                                     "[" + "|".join(SecurityScreen.TABS) + "]",
