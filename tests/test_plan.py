@@ -877,3 +877,54 @@ async def test_an_item_inside_one_long_tool_call_is_not_stalled(client, monkeypa
     it = _by_id(plan_mod.load(SLUG))["i1"]
     assert it["status"] == "done" and it["stalls"] == 0 and it["attempts"] == 1, it
     assert len(cids) == 1
+
+
+async def _sender_cid() -> int:
+    from backend.db import open_conversation
+    db = await get_db()
+    try:
+        return await open_conversation(db, project=SLUG, title="sender", kind="agent")
+    finally:
+        await db.close()
+
+
+async def test_notes_reach_blocked_and_failed_items_and_a_question_mark_keeps_the_message(
+        client):
+    """PLANS-12: a note to a blocked or failed item came back 'cannot reach'
+    although a retry shows its brief the notes (the orchestrator re-sent the
+    same text as plan_fix briefs), and `to:"?"` with a message returned the
+    roster and dropped the message."""
+    await _put(client, [{"title": "a", "brief": "a"}, {"title": "b", "brief": "b"},
+                        {"title": "c", "brief": "c"}, {"title": "d", "brief": "d"}])
+    async with plan_mod.edit(SLUG) as plan:
+        st = {"i1": "blocked", "i2": "failed", "i3": "done", "i4": "todo"}
+        for it in plan["items"]:
+            it["status"] = st[it["id"]]
+    cid = await _sender_cid()
+    db = await get_db()
+    try:
+        for target in ("i1", "i2", "i4"):
+            out = await agentmsg.send(db, sender_cid=cid, to=f"item:{target}",
+                                      body=f"note for {target}")
+            assert not out.get("error") and out.get("note_for") == target, out
+        out = await agentmsg.send(db, sender_cid=cid, to="item:i3", body="too late")
+        assert "done" in out["error"] and "outcome" in out["error"], out
+        # `?` lists the addresses and holds the message; the follow-up needs only `to`
+        out = await agentmsg.send(db, sender_cid=cid, to="?", body="the real message")
+        assert "was not sent" in out["error"] and "Running turns" in out["error"], out
+        out = await agentmsg.send(db, sender_cid=cid, to="item:i1", body="")
+        assert out.get("note_for") == "i1", out
+    finally:
+        await db.close()
+    items = _by_id(plan_mod.load(SLUG))
+    assert [n["body"] for n in items["i1"]["notes"]] == ["note for i1", "the real message"]
+    assert [n["body"] for n in items["i2"]["notes"]] == ["note for i2"]
+    assert items["i3"]["notes"] == []
+    assert "the real message" in plan_mod._item_task(plan_mod.load(SLUG), items["i1"], [])
+    # an empty message with nothing held is still refused
+    db = await get_db()
+    try:
+        out = await agentmsg.send(db, sender_cid=cid, to="item:i1", body="")
+        assert "needs a message" in out["error"], out
+    finally:
+        await db.close()

@@ -81,6 +81,12 @@ def _agent_exists(slug: str) -> bool:
     return (settings.agents_dir / slug / "AGENT.md").is_file()
 
 
+# A message that arrived with to="?" (a roster lookup), by sender conversation:
+# the follow-up send takes it from here. In-process and small on purpose.
+_held: dict[int, str] = {}
+_HELD_MAX = 256
+
+
 def _norm(to: str) -> str:
     """`#42`, `@builder`, `Builder` and `builder` are all the same address —
     the model writes what it sees in the roster or in a message header."""
@@ -333,6 +339,8 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
     addr = _norm(to)
     body = (body or "").strip()
     if not body:
+        body = _held.get(sender_cid, "")        # the follow-up to a `?` that carried one
+    if not body:
         return {"error": "send_message needs a message body."}
     if len(body) > MAX_BODY:
         body = body[:MAX_BODY] + f"\n...(truncated at {MAX_BODY} chars)"
@@ -347,6 +355,16 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
                 + format_plan_siblings(await _plan_siblings(db, sender_cid)))
 
     if not addr or addr in ("?", "list", "who"):
+        if body:
+            # a message that came with a lookup was dropped (PLANS-12): keep it, so
+            # the follow-up needs only the address
+            if len(_held) >= _HELD_MAX:
+                _held.pop(next(iter(_held)))
+            _held[sender_cid] = body
+            return {"error": "Your message was not sent: an address of \"?\" only lists "
+                             "who you can reach. It is kept: call send_message again with "
+                             "the address in `to` and an empty message (or the same "
+                             "message). " + await roster()}
         return {"error": "send_message needs an address. " + await roster()}
 
     to_cid, to_slug = None, None
@@ -358,12 +376,13 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
         me = await _sender(db, sender_cid)
         to_cid = plan_mod.resolve_item(me["project"], item_id)
         if to_cid is None:
-            why = await plan_mod.leave_note(me["project"], item_id, sender=me["label"],
-                                            body=body)
+            why, status = await plan_mod.leave_note(me["project"], item_id,
+                                                    sender=me["label"], body=body)
             if why:
                 return {"error": f"cannot reach item {item_id!r}: {why}. " + await roster()}
+            _held.pop(sender_cid, None)
             return {"id": None, "to_cid": None, "to_slug": None, "running": [],
-                    "note_for": item_id}
+                    "note_for": item_id, "note_status": status}
         if to_cid == sender_cid:
             return {"error": "that item is this turn — you cannot message yourself."}
         addr = str(to_cid)
@@ -388,6 +407,7 @@ async def send(db, *, sender_cid: int, to: str, body: str) -> dict:
                              f"no running turn answers to it. " + await roster()}
 
     me = await _sender(db, sender_cid)
+    _held.pop(sender_cid, None)
     cur = await db.execute(
         "INSERT INTO agent_messages (from_conversation_id, from_label, "
         "to_conversation_id, to_agent_slug, project_slug, body) "
@@ -562,8 +582,11 @@ async def send_tool(to: str, message: str) -> str:
     if out.get("error"):
         return "error: " + out["error"]
     if out.get("note_for"):
-        return (f"kept as a note for item {out['note_for']} — it has not started yet, "
-                "so it will read this in its brief when it does. Do not wait for a "
+        st = out.get("note_status")
+        when = ("it has not started yet, so it will read this in its brief when it does"
+                if st in (None, "todo") else
+                f"it is {st} now, so it will read this in its brief if it is run again")
+        return (f"kept as a note for item {out['note_for']} — {when}. Do not wait for a "
                 "reply this turn.")
     if out["to_cid"] is not None:
         target = f"conversation {out['to_cid']}"

@@ -703,24 +703,35 @@ def resolve_item(project: str | None, item_id: str) -> int | None:
     return hits[0][0] if hits else None
 
 
+NOTE_STATUSES = ("todo", "blocked", "failed")   # items that will read a note on their next run
+
+
 async def leave_note(project: str | None, item_id: str, *, sender: str,
-                     body: str) -> str | None:
+                     body: str) -> tuple[str | None, str | None]:
     """A message to an item that is not running: kept on the item and shown in
-    its brief when it starts. Returns None when queued, else why not."""
+    its brief when it next starts. A blocked or failed item keeps it too — a
+    retry (plan_fix, the operator's reset) shows the brief with its notes, and
+    the alternative was the orchestrator re-sending the same text as a fix
+    brief (PLANS-12). Returns (why not, None) or (None, the item's status)."""
     if not project:
-        return "you are not in a project, so there is no plan to leave a note in"
+        return "you are not in a project, so there is no plan to leave a note in", None
     try:
         async with edit(project) as plan:
             it = index(plan).get(item_id)
             if it is None:
-                return f"the plan for project {project} has no item {item_id!r}"
-            if it["status"] != "todo":
+                return f"the plan for project {project} has no item {item_id!r}", None
+            if it["status"] == "running":
+                # no live conversation yet (just spawned) or none left (a lost run):
+                # its brief is already built, so a note would be read by no one
+                return (f"item {item_id} is starting up and cannot read a message yet — "
+                        "send it again in a moment"), None
+            if it["status"] not in NOTE_STATUSES:
                 return (f"item {item_id} is {it['status']}, not running — it will not "
-                        "read a message now; its outcome is in the plan")
+                        "read a message now; its outcome is in the plan"), None
             it["notes"].append({"from": sender, "body": body[:SUMMARY_CHARS], "at": _now()})
+            return None, it["status"]
     except LookupError:
-        return f"project {project} has no plan"
-    return None
+        return f"project {project} has no plan", None
 
 
 async def report(slug: str, *, cid: int | None, item_id: str | None,
