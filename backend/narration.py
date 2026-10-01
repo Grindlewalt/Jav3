@@ -45,8 +45,10 @@ class Recorder:
             self._buf.append(event.get("text") or "")
         elif kind == "tool":
             await self._flush()        # a round's first call ends its narration
-        elif kind == "final":
-            self._buf.clear()          # what streamed last is the reply
+        elif kind in ("final", "retry"):
+            # final: what streamed last is the reply. retry: the model stream
+            # dropped mid-round and is re-asked, so its partial text is void.
+            self._buf.clear()
 
     async def _flush(self) -> None:
         text = "".join(self._buf).strip()

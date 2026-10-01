@@ -120,6 +120,16 @@ async def test_recorder_stores_text_between_calls_not_the_reply(tmp_env):
     assert {r["message_id"] for r in rows} == {mid}
 
 
+async def test_recorder_drops_text_a_retried_stream_had_streamed(tmp_env):
+    """M2: a model stream that drops mid-round is re-asked (a `retry` event);
+    the partial text must not be stored next to the full one."""
+    await init_db()
+    cid, _ = await _record([_tok("half a tho"), {"type": "retry"},
+                            _tok("Whole thought."), *_call(1)])
+    rows = await _rows("SELECT text FROM turn_narration WHERE conversation_id=?", cid)
+    assert [r["text"] for r in rows] == ["Whole thought."]
+
+
 async def test_recorder_skips_blank_text_and_parallel_calls(tmp_env):
     await init_db()
     # a round of two parallel calls yields two tool events but one stretch of

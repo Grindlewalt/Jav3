@@ -625,6 +625,8 @@ class Renderer:
         elif t == "token":
             self.text += ev.get("text", "")
             self._w(ev.get("text", ""))
+        elif t == "retry":
+            self._line("  · (model stream dropped, retrying)")
         elif t == "tool":
             self._line(f"  · {ev.get('name', '?')}({_short(ev.get('args') or {})})")
         elif t == "tool_result":
@@ -8357,6 +8359,15 @@ def build_tui(base: str, token: str, **kw):
                     turn.stream = Markdown.get_stream(turn.md)
                 turn.seg += chunk
                 await turn.stream.write(chunk)
+            elif t == "retry":
+                # the model stream dropped mid-round and is re-asked: the text it
+                # had streamed is void, so the segment goes instead of showing twice
+                if turn.stream is not None:
+                    await turn.stream.stop()
+                    turn.stream = None
+                if turn.md is not None:
+                    await turn.md.remove()
+                turn.md, turn.seg = None, ""
             elif t == "tool":
                 if turn.claim(ev):
                     return False

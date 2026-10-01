@@ -57,6 +57,10 @@ export function applyTurnEvent(m, ev, now = Date.now()) {
       parts.push({ kind: 'tool', id: ev.id, name: ev.name, args: {}, done: true,
                    ok: ev.ok, result: ev.result })
     }
+  } else if (ev.type === 'retry') {
+    // the model stream dropped mid-round and is being re-asked: the text that
+    // streamed since the last row is void (it would otherwise show twice)
+    if (parts[parts.length - 1]?.kind === 'text') parts.pop()
   } else if (ev.type === 'job') {
     // a tool launched a multi-agent job — mount its live tree inline (once: a
     // re-announced job must not draw a second tree)
