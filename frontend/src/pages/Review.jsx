@@ -2,6 +2,7 @@ import { useContext, useEffect, useState } from 'react'
 import { Link, Outlet, useLocation } from 'react-router-dom'
 import { api, subscribeSse } from '../api.js'
 import SecurityBoard from '../SecurityBoard.jsx'
+import SecurityHistory from '../SecurityHistory.jsx'
 import TriagePanel from '../TriagePanel.jsx'
 import Posture from '../Posture.jsx'
 import ScrollHint from '../ScrollHint.jsx'
@@ -588,6 +589,7 @@ export function ReviewHome() {
       <Posture />
       <TriagePanel />
       <ReviewQueue />
+      <SecurityHistory />
     </div>
   )
 }

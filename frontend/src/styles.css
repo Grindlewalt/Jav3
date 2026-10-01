@@ -4379,6 +4379,11 @@ a:has(> .nav-dot) { position: relative; }
 .notif-kinds .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden;
   clip: rect(0 0 0 0); white-space: nowrap; }
 .tag.by-you { color: var(--accent); }
+.sec-history { margin-top: var(--sp-9); }
+.sec-history > summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+.sec-history-filter { display: flex; gap: var(--sp-4); margin: var(--sp-5) 0; flex-wrap: wrap; }
+.sec-history-filter .ghost.on { background: var(--panel-2); color: var(--text); }
+.sec-history-row { opacity: 0.85; }
 /* top bar, while do-not-disturb is on */
 .dnd-mark { display: inline-flex; align-items: center; gap: 6px; background: none;
   border: 1px solid var(--amber); color: var(--amber); border-radius: 999px;
