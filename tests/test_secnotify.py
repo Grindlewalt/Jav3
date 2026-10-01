@@ -224,7 +224,7 @@ async def test_a_repeat_counts_onto_the_unacknowledged_row(db, feed):
 
 
 async def test_acknowledged_or_different_is_a_new_row(db):
-    kw = dict(kind="docker_weak_isolation", summary="no gVisor", project="docker-a")
+    kw = dict(kind="gateway_cap", summary="a flood", project="docker-a")
     first = await security.raise_event(db, **kw, severity="warn")
     await security.acknowledge(db, first)
     second = await security.raise_event(db, **kw, severity="warn")

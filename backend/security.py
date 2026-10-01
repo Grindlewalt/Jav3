@@ -21,12 +21,34 @@ The level (Settings -> Notifications) defaults to "approvals". A repeat of an
 unacknowledged event inside `security_coalesce_seconds` bumps that row's
 count instead of adding a row, and pings only if it is critical (at most once
 per ping window). Non-critical pings are rate limited per kind. Nothing here
-changes a severity, acknowledges or approves anything: quieter, same record.
+changes a severity or approves anything: quieter, same record.
+
+Three more things the operator sets (Settings -> Notifications), all kept in
+session_state next to the level:
+
+  * Things I did myself: record only (`self_quiet`, on by default). A row raised
+    with actor="operator" is filed already acknowledged and tagged "by you":
+    no ping, not in the badge. The mark is EXPLICIT: an operator-facing route
+    passes `actor="operator"`. It is never read from request or task context:
+    a chat turn is started by the operator's HTTP request and its task inherits
+    that context, so an agent's tool call would look like the operator's click.
+    Critical rows are never quieted this way.
+  * A mode per kind (`kinds`): ping | badge | record. A kind with no choice
+    follows the level and its tier, which is what happened before this existed
+    (DEFAULT_KIND_MODES names the exceptions). Record = filed acknowledged, kept
+    in history; badge = counts in Security until acknowledged, never pings.
+    Critical rows ignore it.
+  * Do not disturb (`notify_dnd`): while on, nothing pings (critical only when
+    `dnd_break_critical`, on by default). Badges still count and everything is
+    still recorded; when it ends, one `dnd_summary` goes out. Approvals that
+    hold a turn open (ask_user, permission asks, egress hosts) are not touched:
+    the turn still waits and the item stays in the queue, only its ping is quiet.
 """
+import asyncio
 import json
 import time
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
@@ -36,8 +58,55 @@ from .config import settings
 SECURITY_CHAN = "security"       # bus channel the bell + Review Center subscribe to
 
 NOTIFY_KEY = "notify_level"      # session_state: the operator's ping level
+PREFS_KEY = "notify_prefs"       # session_state JSON: {self_quiet, dnd_break_critical, kinds}
+DND_KEY = "notify_dnd"           # session_state JSON: {since, until, from_id} while on
 LEVELS = ("critical", "approvals", "all")
 DEFAULT_LEVEL = "approvals"
+MODES = ("ping", "badge", "record")
+OPERATOR = "operator"            # the one actor value that means "their own click"
+DND_MAX_DAYS = 14
+# what a kind does until the operator picks: nothing, except the kinds named
+# here. docker_weak_isolation is a standing note on every Docker box start, not
+# an event. provider_balance is no security event either, but "the model's
+# account is empty" must still reach someone who is not looking: it pings
+# (warn, not critical) until they say otherwise.
+DEFAULT_KIND_MODES = {"docker_weak_isolation": "record", "provider_balance": "ping"}
+# every kind the code raises, with the severity it usually carries (the table in
+# Settings -> Notifications lists these; a kind in the log but not here is
+# added when it is read). A kind whose usual severity is critical is locked.
+KNOWN_KINDS = {
+    "login_failed": "warn", "write_flag": "warn", "plan_paused": "warn",
+    "backup_config_changed": "warn", "mcp_unpinned_tools": "warn",
+    "skill_import_flag": "warn", "skill_pin_mismatch": "critical",
+    "provider_balance": "warn", "harness_fault": "info",
+    "profile_changed": "warn", "profiles_migrated": "info",
+    "lan_access_changed": "warn", "placement_changed": "info", "box_joined": "warn",
+    "persist_approved": "warn", "persist_revoked": "info", "persist_imported": "warn",
+    "persist_disk_deleted": "info", "persist_unplug_failed": "warn",
+    "service_requested": "info", "service_approved": "warn", "service_rejected": "info",
+    "service_revoked": "warn", "svc_unreported": "warn", "box_cap_refused": "info",
+    "package_requested": "info", "package_approved": "warn", "package_rejected": "warn",
+    "image_variant_built": "info", "gateway_cap": "warn",
+    "docker_weak_isolation": "warn", "docker_isolation_note": "info",
+    "docker_hardening_refused": "warn", "docker_socket_refused": "warn",
+    "unexpected_process": "warn", "proc_report_mismatch": "warn",
+    "proc_baseline_changed": "info",
+    "egress_anomaly": "critical", "host_cut": "critical", "secret_leak": "critical",
+    "egress_auto": "info",
+    "always_loaded_changed": "info", "always_loaded_refused": "warn",
+    "always_loaded_held": "warn", "always_loaded_approved": "info",
+    "always_loaded_rejected": "info",
+    "memory_deleted": "info", "memory_approved": "info", "memory_refused": "warn",
+    "desk_session": "info", "desk_killed": "warn", "desk_shell": "info",
+    "desk_refused": "warn", "desk_shell_refused": "warn",
+    "browser_session": "info", "browser_killed": "warn", "browser_refused": "warn",
+    "browser_paused": "warn", "browser_resumed": "info", "browser_blind": "warn",
+    "browser_cancelled": "warn", "browser_site_allowed": "info",
+    "browser_site_denied": "info", "browser_popup_adopted": "info",
+    "browser_rate_limited": "warn", "browser_paused_refusal": "warn",
+    "device_enrolled": "info", "local_session": "info", "host_run": "info",
+    "grounding_probe": "info",
+}
 # requests that wait on an operator decision in their own queue (services,
 # packages): they ping at the default level whatever severity they carry
 APPROVAL_KINDS = frozenset({"service_requested", "package_requested"})
@@ -48,7 +117,7 @@ ALWAYS_KINDS = frozenset({"egress_anomaly", "host_cut", "secret_leak",
 
 _COLUMNS = ("id, kind, severity, project_slug, summary, detail, acknowledged, "
             "created_at, acknowledged_at, triage_verdict, triage_reason, "
-            "count, last_seen, cause")
+            "count, last_seen, cause, actor, quiet")
 
 
 def tier(kind: str | None, severity: str | None) -> str:
@@ -114,6 +183,242 @@ async def set_notify_level(db: aiosqlite.Connection, level: str) -> str:
     return level
 
 
+# --- what the operator chose: per-kind modes, "my own actions", do not disturb --
+
+def _parse_json(raw) -> dict:
+    try:
+        v = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return {}
+    return v if isinstance(v, dict) else {}
+
+
+def _clean_prefs(raw: dict) -> dict:
+    """The stored prefs with anything unreadable dropped: a bad blob must not
+    turn pings off or on by accident, it reads as the defaults."""
+    kinds = raw.get("kinds")
+    return {"self_quiet": raw.get("self_quiet") is not False,
+            "dnd_break_critical": raw.get("dnd_break_critical") is not False,
+            "kinds": {k: m for k, m in (kinds.items() if isinstance(kinds, dict) else ())
+                      if isinstance(k, str) and m in MODES}}
+
+
+async def get_prefs(db: aiosqlite.Connection) -> dict:
+    from .db import get_state
+    try:
+        raw = await get_state(db, PREFS_KEY)
+    except Exception:                           # noqa: BLE001 — no table in a bare test
+        raw = None
+    return _clean_prefs(_parse_json(raw))
+
+
+def locked(kind: str) -> bool:
+    """A kind that always pings: it cannot be set to anything else."""
+    return kind in ALWAYS_KINDS or KNOWN_KINDS.get(kind) == "critical"
+
+
+async def known_kinds(db: aiosqlite.Connection) -> dict[str, str]:
+    """KNOWN_KINDS plus any kind already in the log (with a severity it carried),
+    so a kind this file does not list yet can still be set."""
+    out = dict(KNOWN_KINDS)
+    try:
+        async with db.execute("SELECT kind, MIN(severity) AS severity "
+                              "FROM security_events GROUP BY kind") as cur:
+            for r in await cur.fetchall():
+                out.setdefault(r["kind"], r["severity"] or "warn")
+    except Exception:                           # noqa: BLE001
+        pass
+    return out
+
+
+async def set_prefs(db: aiosqlite.Connection, *, self_quiet: bool | None = None,
+                    dnd_break_critical: bool | None = None,
+                    kinds: dict | None = None) -> dict:
+    """Merge a change into the prefs. `kinds` maps kind -> ping|badge|record, or
+    None to drop that kind's choice. Kinds and modes are checked here; a locked
+    kind (critical: always pings) is refused. Raises ValueError."""
+    from .db import set_state
+    cur = await get_prefs(db)
+    if self_quiet is not None:
+        cur["self_quiet"] = bool(self_quiet)
+    if dnd_break_critical is not None:
+        cur["dnd_break_critical"] = bool(dnd_break_critical)
+    if kinds:
+        known = await known_kinds(db)
+        for k, m in kinds.items():
+            if k not in known:
+                raise ValueError(f"unknown kind {k!r}")
+            if locked(k):
+                raise ValueError(f"{k} is critical: it always pings")
+            if m is None:
+                cur["kinds"].pop(k, None)
+            elif m in MODES:
+                cur["kinds"][k] = m
+            else:
+                raise ValueError(f"mode for {k} must be one of {', '.join(MODES)}")
+    await set_state(db, PREFS_KEY, json.dumps(cur))
+    return cur
+
+
+def mode_for(kind: str, severity: str | None, level: str, prefs: dict) -> tuple[str, bool]:
+    """(ping | badge | record, chosen). `chosen` is true when the mode is the
+    operator's pick or a named default: only then is a record-mode row filed
+    acknowledged. Without a pick, a kind follows the level and its tier, as it
+    always did (an info row is a record that stays unacknowledged and out of
+    the badge). Critical rows always ping."""
+    t = tier(kind, severity)
+    if t == "critical":
+        return "ping", False
+    pick = prefs["kinds"].get(kind) or DEFAULT_KIND_MODES.get(kind)
+    if pick:
+        return pick, True
+    if wants(t, level):
+        return "ping", False
+    return ("record" if t == "record" else "badge"), False
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_when(s) -> datetime | None:
+    try:
+        d = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def _dnd_view(state: dict, prefs: dict) -> dict:
+    return {"on": bool(state), "since": state.get("since"), "until": state.get("until"),
+            "break_critical": prefs["dnd_break_critical"]}
+
+
+async def dnd_status(db: aiosqlite.Connection) -> dict:
+    """{on, since, until, break_critical}. An expired DND ends HERE, whoever
+    asks first (the poll, a new event, the timer): the end is one atomic delete,
+    so the summary goes out once."""
+    from .db import get_state
+    prefs = await get_prefs(db)
+    try:
+        raw = await get_state(db, DND_KEY)
+    except Exception:                           # noqa: BLE001
+        raw = None
+    state = _parse_json(raw)
+    if not state:
+        return _dnd_view({}, prefs)
+    until = _parse_when(state.get("until")) if state.get("until") else None
+    if until is not None and until <= datetime.now(timezone.utc):
+        await _end_dnd(db, raw, state, prefs)
+        return _dnd_view({}, prefs)
+    if until is not None and _dnd_timer is None:
+        _arm_dnd_timer(until)                   # after a restart: the first look re-arms it
+    return _dnd_view(state, prefs)
+
+
+async def set_dnd(db: aiosqlite.Connection, on: bool, *, until: str | None = None) -> dict:
+    """Turn do not disturb on (optionally until an instant, ISO 8601) or off.
+    Turning it off while on ends it like an expiry does: one summary. Raises
+    ValueError for an end that is not in the future or is too far off."""
+    from .db import get_state, set_state
+    prefs = await get_prefs(db)
+    raw = await get_state(db, DND_KEY)
+    cur = _parse_json(raw)
+    if not on:
+        if cur:
+            await _end_dnd(db, raw, cur, prefs)
+        return _dnd_view({}, prefs)
+    end = None
+    if until:
+        end = _parse_when(until)
+        now = datetime.now(timezone.utc)
+        if end is None:
+            raise ValueError("until must be an ISO 8601 time")
+        if end <= now:
+            raise ValueError("until must be in the future")
+        if end > now + timedelta(days=DND_MAX_DAYS):
+            raise ValueError(f"until must be within {DND_MAX_DAYS} days")
+    async with db.execute("SELECT COALESCE(MAX(id), 0) AS m FROM security_events") as c:
+        top = (await c.fetchone())["m"]
+    # turning it on again keeps its start: the summary covers the whole stretch
+    state = {"since": cur.get("since") or _iso(datetime.now(timezone.utc)),
+             "until": _iso(end) if end else None,
+             "from_id": cur.get("from_id", top)}
+    await set_state(db, DND_KEY, json.dumps(state))
+    if end:
+        _arm_dnd_timer(end)
+    elif _dnd_timer is not None:
+        _dnd_timer.cancel()
+    view = _dnd_view(state, prefs)
+    bus.publish(SECURITY_CHAN, {"type": "dnd_changed", **view})
+    return view
+
+
+async def _end_dnd(db: aiosqlite.Connection, raw, state: dict, prefs: dict) -> None:
+    """Clear DND (once: whoever deletes the row it was read as wins) and say how
+    the stretch went: alerts that would have pinged and are still unacknowledged,
+    and approvals waiting now."""
+    cur = await db.execute("DELETE FROM session_state WHERE key = ? AND value = ?",
+                           (DND_KEY, raw))
+    await db.commit()
+    if _dnd_timer is not None:
+        _dnd_timer.cancel()
+    if cur.rowcount == 0:
+        return                                  # someone else ended it
+    level = await notify_level(db)
+    held = 0
+    async with db.execute(
+            "SELECT kind, severity, COUNT(*) AS n FROM security_events "
+            "WHERE acknowledged = 0 AND id > ? GROUP BY kind, severity",
+            (int(state.get("from_id") or 0),)) as c:
+        for r in await c.fetchall():
+            mode, _ = mode_for(r["kind"], r["severity"], level, prefs)
+            if mode == "ping" and not (tier(r["kind"], r["severity"]) == "critical"
+                                       and prefs["dnd_break_critical"]):
+                held += r["n"]
+    try:
+        from . import notifications_api
+        approvals = await notifications_api.approvals_waiting()
+    except Exception:                           # noqa: BLE001 — the summary is best effort
+        approvals = 0
+    bus.publish(SECURITY_CHAN, {"type": "dnd_changed", **_dnd_view({}, prefs)})
+    if held or approvals:
+        bits = [f"{held} alert{'' if held == 1 else 's'}",
+                f"{approvals} approval{'' if approvals == 1 else 's'} waiting"]
+        bus.publish(SECURITY_CHAN, {
+            "type": "dnd_summary", "alerts": held, "approvals": approvals, "ping": True,
+            "summary": "While you were in do-not-disturb: " + ", ".join(bits)})
+
+
+# the timer that ends a timed DND on the dot; the lazy check in dnd_status is
+# the backstop (a restart loses the timer)
+_dnd_timer: asyncio.TimerHandle | None = None
+
+
+def _arm_dnd_timer(until: datetime) -> None:
+    global _dnd_timer
+    if _dnd_timer is not None:
+        _dnd_timer.cancel()
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    delay = max(0.0, (until - datetime.now(timezone.utc)).total_seconds()) + 0.5
+    _dnd_timer = loop.call_later(delay, lambda: asyncio.ensure_future(_dnd_expired()))
+
+
+async def _dnd_expired() -> None:
+    try:
+        from .db import get_db
+        db = await get_db()
+        try:
+            await dnd_status(db)
+        finally:
+            await db.close()
+    except Exception:                           # noqa: BLE001 — the next poll ends it
+        pass
+
+
 # The two clocks, as functions so a replay of a real event log can drive them:
 # the SQL one (last_seen and the coalescing window, the created_at format) and
 # the rate limiter's.
@@ -144,52 +449,112 @@ def _rate_ok(key: str, limit: int) -> bool:
 
 
 async def _coalesce_target(db: aiosqlite.Connection, kind: str, severity: str,
-                           project: str | None, cause: str) -> dict | None:
+                           project: str | None, cause: str, *,
+                           actor: str | None = None, quiet: str | None = None) -> dict | None:
+    """The row a repeat counts onto: the same event, from the same actor, in the
+    same state (waiting in the queue, or filed quietly for a Record-only kind)."""
     if settings.security_coalesce_seconds <= 0:
         return None
     async with db.execute(
             "SELECT id, count, summary FROM security_events WHERE kind = ? AND severity = ? "
-            "AND project_slug IS ? AND cause = ? AND acknowledged = 0 "
+            "AND project_slug IS ? AND cause = ? AND acknowledged = ? "
+            "AND COALESCE(quiet, '') = ? AND COALESCE(actor, '') = ? "
             "AND COALESCE(last_seen, created_at) >= datetime(?, ?) "
             "ORDER BY id DESC LIMIT 1",
-            (kind, severity, project, cause, _utcnow(),
-             f"-{int(settings.security_coalesce_seconds)} seconds")) as cur:
+            (kind, severity, project, cause, 1 if quiet else 0, quiet or "", actor or "",
+             _utcnow(), f"-{int(settings.security_coalesce_seconds)} seconds")) as cur:
         r = await cur.fetchone()
     return dict(r) if r else None
 
 
+def _decide(kind: str, severity: str, actor: str | None, level: str, prefs: dict,
+            dnd_on: bool) -> dict:
+    """Everything the operator's settings say about one new event: its tier,
+    whether it is filed already acknowledged (`quiet`: 'operator' or 'kind'),
+    whether it pings, and whether do-not-disturb held a ping back."""
+    t = tier(kind, severity)
+    mode, chosen = mode_for(kind, severity, level, prefs)
+    quiet = None
+    if t != "critical":
+        if actor == OPERATOR and prefs["self_quiet"]:
+            quiet = "operator"
+        elif chosen and mode == "record":
+            quiet = "kind"
+    ping = quiet is None and mode == "ping"
+    breaks = bool(dnd_on and t == "critical" and prefs["dnd_break_critical"])
+    held = bool(ping and dnd_on and not breaks)
+    return {"tier": t, "quiet": quiet, "mode": mode, "held": held,
+            "ping": ping and not held, "breaks": breaks}
+
+
+async def decide(db: aiosqlite.Connection, kind: str, severity: str,
+                 actor: str | None) -> dict:
+    return _decide(kind, severity, actor, await notify_level(db), await get_prefs(db),
+                   (await dnd_status(db))["on"])
+
+
+def decide_sync(con, kind: str, severity: str, actor: str | None = None) -> dict:
+    """decide() for a caller with a plain sqlite3 connection and no event loop
+    (imported.alert). An expired DND reads as off; the async side ends it."""
+    def get(key):
+        try:
+            r = con.execute("SELECT value FROM session_state WHERE key = ?", (key,)).fetchone()
+        except Exception:                       # noqa: BLE001 — no table yet
+            return None
+        return r[0] if r else None
+    level = get(NOTIFY_KEY)
+    state = _parse_json(get(DND_KEY))
+    until = _parse_when(state.get("until")) if state.get("until") else None
+    on = bool(state) and (until is None or until > datetime.now(timezone.utc))
+    return _decide(kind, severity, actor, level if level in LEVELS else DEFAULT_LEVEL,
+                   _clean_prefs(_parse_json(get(PREFS_KEY))), on)
+
+
 async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
                       severity: str = "warn", project: str | None = None,
-                      detail: dict | None = None, cause: str | None = None) -> int:
-    """Record one event (or count a repeat onto its unacknowledged twin) and
-    publish it with the ping decision. `cause` is the coalescing key; the
-    summary unless the raise site names something steadier. Returns the row
-    id: a repeat returns the twin's."""
+                      detail: dict | None = None, cause: str | None = None,
+                      actor: str | None = None) -> int:
+    """Record one event (or count a repeat onto its twin) and publish it with
+    the ping decision. `cause` is the coalescing key; the summary unless the
+    raise site names something steadier. Returns the row id: a repeat returns
+    the twin's.
+
+    `actor="operator"` says the operator's own click caused it. Only an
+    operator-facing route may pass it (see the module doc); nothing is inferred.
+    """
     cause = (cause or summary)[:500]
-    t = tier(kind, severity)
-    twin = await _coalesce_target(db, kind, severity, project, cause)
+    actor = OPERATOR if actor == OPERATOR else None
+    d = await decide(db, kind, severity, actor)
+    t, quiet = d["tier"], d["quiet"]
+    # their own action is one row each time; a Record-only kind's repeats pile
+    # onto one quiet row; everything else onto its waiting twin
+    twin = (None if quiet == "operator"
+            else await _coalesce_target(db, kind, severity, project, cause,
+                                        actor=actor, quiet=quiet))
     if twin is not None:
         await db.execute("UPDATE security_events SET count = count + 1, "
                          "last_seen = ? WHERE id = ?", (_utcnow(), twin["id"]))
         await db.commit()
         # already in the queue: only a critical repeat interrupts again, and
         # at most once per ping window
-        ping = t == "critical" and _rate_ok(f"#{twin['id']}", 1)
+        ping = (t == "critical" and (not d["held"] or d["breaks"])
+                and _rate_ok(f"#{twin['id']}", 1))
         bus.publish(SECURITY_CHAN, {"type": "security_event", "id": twin["id"],
                                     "kind": kind, "severity": severity, "project": project,
                                     "summary": twin["summary"], "detail": detail,
                                     "count": twin["count"] + 1, "repeat": True,
-                                    "tier": t, "ping": ping})
+                                    "tier": t, "ping": ping, "acknowledged": bool(quiet),
+                                    "actor": actor})
         return twin["id"]
+    ping = d["ping"] and (t == "critical" or _rate_ok(kind, settings.security_ping_per_kind))
     cur = await db.execute(
         "INSERT INTO security_events(kind, severity, project_slug, summary, detail, "
-        "cause, last_seen) VALUES (?,?,?,?,?,?,?)",
+        "cause, last_seen, actor, quiet, acknowledged, acknowledged_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (kind, severity, project, summary,
-         json.dumps(detail) if detail is not None else None, cause, _utcnow()))
+         json.dumps(detail) if detail is not None else None, cause, _utcnow(),
+         actor, quiet, 1 if quiet else 0, _utcnow() if quiet else None))
     await db.commit()
-    level = await notify_level(db)
-    ping = wants(t, level) and (t == "critical"
-                                or _rate_ok(kind, settings.security_ping_per_kind))
     if t == "critical":
         _rate_ok(f"#{cur.lastrowid}", 1)        # its repeats stay quiet for a window
     # mirror the REST row shape (detail as an object) so live-SSE rows in the
@@ -197,7 +562,42 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
     bus.publish(SECURITY_CHAN, {"type": "security_event", "id": cur.lastrowid,
                                 "kind": kind, "severity": severity, "project": project,
                                 "summary": summary, "detail": detail,
-                                "count": 1, "repeat": False, "tier": t, "ping": ping})
+                                "count": 1, "repeat": False, "tier": t, "ping": ping,
+                                "acknowledged": bool(quiet), "actor": actor})
+    return cur.lastrowid
+
+
+def raise_sync(con, *, kind: str, summary: str, severity: str = "warn",
+               detail: dict | None = None) -> int | None:
+    """raise_event for a caller with a plain sqlite3 connection and no event loop
+    (imported.alert, run while the skills registry compiles). No coalescing: its
+    caller dedupes. Same decision, same stamped event. None if there is no table."""
+    import sqlite3
+    d = decide_sync(con, kind, severity)
+    quiet = d["quiet"]
+    blob = json.dumps(detail) if detail else None
+    try:
+        try:
+            cur = con.execute(
+                "INSERT INTO security_events(kind, severity, summary, detail, last_seen, "
+                "quiet, acknowledged, acknowledged_at) VALUES (?,?,?,?,?,?,?,?)",
+                (kind, severity, summary, blob, _utcnow(), quiet, 1 if quiet else 0,
+                 _utcnow() if quiet else None))
+        except sqlite3.OperationalError:        # a database from before the quiet column
+            cur = con.execute("INSERT INTO security_events(kind, severity, summary, detail) "
+                              "VALUES (?,?,?,?)", (kind, severity, summary, blob))
+        con.commit()
+    except sqlite3.Error:
+        return None
+    ping = d["ping"] and (d["tier"] == "critical"
+                          or _rate_ok(kind, settings.security_ping_per_kind))
+    if d["tier"] == "critical":
+        _rate_ok(f"#{cur.lastrowid}", 1)
+    bus.publish(SECURITY_CHAN, {"type": "security_event", "id": cur.lastrowid, "kind": kind,
+                                "severity": severity, "project": None, "summary": summary,
+                                "detail": detail, "count": 1, "repeat": False,
+                                "tier": d["tier"], "ping": ping, "acknowledged": bool(quiet),
+                                "actor": None})
     return cur.lastrowid
 
 
@@ -251,15 +651,32 @@ async def count_unacknowledged(db: aiosqlite.Connection) -> int:
         return (await cur.fetchone())["n"]
 
 
+async def tier_counts(db: aiosqlite.Connection) -> tuple[dict[str, int], dict[str, int]]:
+    """Unacknowledged rows per tier ({critical, approval, alert, record}), as the
+    operator's per-kind choices see them, and how many of each would ping.
+    A kind set to Record that is still waiting (it was chosen after the row
+    came in) counts as a record; an info kind set to Badge or Ping counts as an
+    alert. Critical rows are always critical and always ping."""
+    level, prefs = await notify_level(db), await get_prefs(db)
+    out = {"critical": 0, "approval": 0, "alert": 0, "record": 0}
+    pinging = {"critical": 0, "approval": 0, "alert": 0, "record": 0}
+    async with db.execute(
+            "SELECT kind, severity, COUNT(*) AS n FROM security_events "
+            "WHERE acknowledged = 0 GROUP BY kind, severity") as cur:
+        for r in await cur.fetchall():
+            t = tier(r["kind"], r["severity"])
+            mode, _ = mode_for(r["kind"], r["severity"], level, prefs)
+            if t != "critical":
+                t = "record" if mode == "record" else t if t == "approval" else "alert"
+            out[t] += r["n"]
+            if mode == "ping":
+                pinging[t] += r["n"]
+    return out, pinging
+
+
 async def count_by_tier(db: aiosqlite.Connection) -> dict[str, int]:
     """Unacknowledged rows per tier: {critical, approval, alert, record}."""
-    out = {"critical": 0, "approval": 0, "alert": 0, "record": 0}
-    async with db.execute(
-            f"SELECT {TIER_SQL} AS t, COUNT(*) AS n FROM security_events "
-            "WHERE acknowledged = 0 GROUP BY t") as cur:
-        for r in await cur.fetchall():
-            out[r["t"]] = r["n"]
-    return out
+    return (await tier_counts(db))[0]
 
 
 # --- harness self-report (report_harness_fault) ------------------------------
