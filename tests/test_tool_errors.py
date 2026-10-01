@@ -216,7 +216,9 @@ async def test_a_todo_is_checked_off_by_text(client):
     out = await registry.dispatch("todo_update",
                                   {"action": "check", "text": "build the dashboard"})
     assert "1. [x] Build the dashboard" in out
-    assert "0. [ ] Fetch the RSS feeds" in out, "only the named item moves"
+    assert "Fetch the RSS feeds" not in out, "the answer is the changed item, not the list"
+    listing = await registry.dispatch("todo_update", {"action": "list"})
+    assert "0. [ ] Fetch the RSS feeds" in listing, "only the named item moved"
 
 
 async def test_a_stale_index_answers_with_the_list(client):
