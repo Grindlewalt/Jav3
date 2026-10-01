@@ -1,8 +1,11 @@
-"""Settings > Gitea: status, the repo list, and the account basics (list,
-create, reset a password, disable). Operator-only: require_user takes the
-password session cookie and nothing else, so a device token (chat or cli)
-never reaches these. Every call goes to Gitea's admin API host-side with the
-operator's token, which never leaves the host."""
+"""The Git page (and the Gitea status the rest of the app asks for): the repo
+list, one repo's branches, history, agent pull requests, push status and who
+can open it, and the account basics (list, create, reset a password, disable).
+Operator-only: require_user takes the password session cookie and nothing
+else, so a device token (chat or cli) never reaches these. Every call goes to
+Gitea's admin API host-side with the operator's token, which never leaves the
+host. Approving or rejecting an agent pull request is not here: it is the
+existing /api/projects/{slug}/git/requests/{id}/approve|reject."""
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -27,6 +30,8 @@ async def _call(coro):
         raise HTTPException(status_code=400, detail=str(e))
     except gitea.GiteaOff as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except gitea.GiteaNotFound as e:
+        raise HTTPException(status_code=404, detail=gitea.scrub(str(e)))
     except gitea.GiteaError as e:
         raise HTTPException(status_code=502, detail=gitea.scrub(str(e)))
 
@@ -40,6 +45,70 @@ async def status():
 async def repos():
     _need()
     return {"repos": await _call(gitea.list_repos())}
+
+
+def _project(slug: str) -> None:
+    if not gitea._SLUG.match(slug) or not (settings.projects_dir / slug / "project.md").exists():
+        raise HTTPException(status_code=404, detail="no such project")
+
+
+@router.get("/repos/{slug}/branches")
+async def branches(slug: str):
+    _need()
+    return {"branches": await _call(gitea.branches(slug))}
+
+
+@router.get("/repos/{slug}/commits")
+async def commits(slug: str, branch: str = "main", page: int = 1, limit: int = 10):
+    _need()
+    return await _call(gitea.commits(slug, branch, page, limit))
+
+
+@router.get("/repos/{slug}/pulls")
+async def pulls(slug: str):
+    """The agent's pull requests (Jav3's own requests of kind push), waiting
+    and recently decided. Reconciles with Gitea, so read it on open or on a
+    click, not on a timer."""
+    _need()
+    return await _call(gitea.agent_pulls(slug))
+
+
+@router.get("/repos/{slug}/pulls/{number}/diff")
+async def pull_diff(slug: str, number: int):
+    _need()
+    return await _call(gitea.pull_diff(slug, number))
+
+
+@router.get("/repos/{slug}/sync")
+async def sync(slug: str):
+    """The host's main against Gitea's main."""
+    _need()
+    _project(slug)
+    return await _call(gitea.sync_status(slug))
+
+
+@router.post("/repos/{slug}/push")
+async def push_main(slug: str):
+    """Push main: the existing push_main, as the operator; see push_host_main."""
+    _need()
+    _project(slug)
+    return await _call(gitea.push_host_main(slug))
+
+
+@router.get("/repos/{slug}/access")
+async def access(slug: str):
+    _need()
+    return await _call(gitea.repo_access(slug))
+
+
+class Access(BaseModel):
+    permission: str
+
+
+@router.put("/repos/{slug}/access/{login}")
+async def set_access(slug: str, login: str, body: Access):
+    _need()
+    return await _call(gitea.set_access(slug, login, body.permission))
 
 
 @router.post("/repos/{slug}")
@@ -90,5 +159,5 @@ class Disabled(BaseModel):
 @router.post("/users/{login}/disable")
 async def disable(login: str, body: Disabled):
     _need()
-    await _call(gitea.set_disabled(login, body.disabled))
-    return {"ok": True, "disabled": body.disabled}
+    shared = await _call(gitea.set_disabled(login, body.disabled))
+    return {"ok": True, "disabled": body.disabled, **shared}
