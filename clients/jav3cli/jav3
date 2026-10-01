@@ -1223,6 +1223,158 @@ class AgentTree:
                 len({n.get("project") for n in nodes if n.get("project")}))
 
 
+def _conv_title(cv: dict) -> str:
+    return " ".join(str(cv.get("title") or cv.get("summary") or "").split())
+
+
+def running_chat_nodes(nodes: list[dict], running, convs: dict) -> tuple[list[dict], list]:
+    """Roots for the chats whose own turn runs but that GET /api/chat/agents
+    leaves out (a plain chat with no agent work under it: the server only
+    counts agent work as a tree), as agents-tree nodes. `running` is
+    /api/chat/running, `convs` is id -> a /api/conversations row. Returns the
+    extra nodes and the running ids nobody can name (incognito chats are not
+    listed; a chat that started a moment ago may not be yet)."""
+    have = {n.get("id") for n in nodes if isinstance(n, dict)}
+    extra, unknown = [], []
+    for cid in running or []:
+        if not isinstance(cid, int) or cid in have:
+            continue
+        cv = convs.get(cid)
+        if cv is None:
+            unknown.append(cid)
+            continue
+        extra.append({"id": cid, "parent_id": None, "kind": "chat", "role": "chat",
+                      "title": _conv_title(cv), "summary": cv.get("summary") or "",
+                      "status": "running", "needs": None, "running": True,
+                      "agent_slug": None, "project": cv.get("project_slug"),
+                      "model": cv.get("model"), "started_at": cv.get("started_at"),
+                      "ended_at": None})
+    return extra, unknown
+
+
+def agent_sections(tr: AgentTree, mode: str = "active",
+                   group_by: str = "project") -> list[tuple[str, list[dict]]]:
+    """An agents tree as the ← list shows it. Active mode: what runs, then what
+    waits on the operator (newest first inside each); finished mode: grouped by
+    project or by time."""
+    if mode == "active":
+        run = [r for r in tr.roots if tr.root_status(r["id"]) == "running"]
+        need = [r for r in tr.roots if tr.root_status(r["id"]) == "needs_you"]
+        return [("Active", run), ("Needs you", need)]
+    if group_by == "time":
+        buckets: dict = {}
+        # newest first inside each bucket: tr.roots is in project order,
+        # which read as shuffled once the rows were grouped by time
+        when = lambda r: str(r.get("ended_at") or r.get("started_at") or "")  # noqa: E731
+        for r in sorted(tr.roots, key=when, reverse=True):
+            buckets.setdefault(time_bucket(when(r)), []).append(r)
+        return [(b, buckets[b]) for b in TIME_BUCKETS if b in buckets]
+    return [(f"⌂ {p or 'no project'}", rs) for p, rs in tr.groups]
+
+
+class AgentsFeed:
+    """Everything running on the server, whoever started it: the data behind the
+    ← screen (and whatever else lists agents, e.g. a drawer), with no widgets.
+
+    GET /api/chat/agents?scope=active is every agent tree with something running
+    or waiting: orchestrator plans and their items, schedule runs, agent runs,
+    sub-agents. It leaves out a plain chat whose own turn streams, so
+    GET /api/chat/running is merged in (named from /api/conversations, fetched
+    only when a running id is new), the way the web sidebar's Active group does.
+    `api` is the app's async api(method, path) that raises CliError.
+    refresh() never raises: a failure lands in `error` and the last data stays."""
+
+    RETRY_S = 10        # how soon a chat the server could not name is looked up again
+    FINISHED_PAGE = 500
+
+    def __init__(self, api, convs=None) -> None:
+        self.api = api
+        self.convs: dict = {}
+        self.add_convs(convs)
+        self._tried: dict = {}                  # chat id -> when its name was last looked up
+        self.trees = {"active": AgentTree([]), "finished": AgentTree([])}
+        self.total_finished: int | None = None
+        self.finished_full = False              # `finished` holds the whole page, not a count
+        self.error: str | None = None
+
+    def add_convs(self, convs) -> None:
+        for cv in convs or ():
+            if isinstance(cv, dict) and isinstance(cv.get("id"), int):
+                self.convs[cv["id"]] = cv
+
+    async def _nodes(self, scope: str, limit: int | None = None):
+        q = f"?scope=finished&limit={limit or self.FINISHED_PAGE}" if scope == "finished" \
+            else "?scope=active"
+        data = await self.api("GET", f"/api/chat/agents{q}")
+        nodes = data.get("nodes") if isinstance(data, dict) else None
+        return ([n for n in nodes if isinstance(n, dict)] if isinstance(nodes, list) else [],
+                data.get("total") if isinstance(data, dict) else None)
+
+    async def _running(self) -> list:
+        try:
+            data = await self.api("GET", "/api/chat/running")
+        except NotLoggedIn:
+            raise
+        except CliError:
+            return []                           # a server without the route: the tree only
+        ids = data.get("running") if isinstance(data, dict) else None
+        return ids if isinstance(ids, list) else []
+
+    async def _name_chats(self, nodes: list[dict], running: list) -> list[dict]:
+        extra, unknown = running_chat_nodes(nodes, running, self.convs)
+        # a chat with no name yet is looked up again, but not on every reload
+        now = time.monotonic()
+        bare = [n["id"] for n in extra if not n["title"]]
+        stale = [i for i in unknown + bare if now - self._tried.get(i, -1e9) > self.RETRY_S]
+        if stale:
+            try:
+                self.add_convs((await self.api("GET", "/api/conversations")).get("conversations"))
+            except (CliError, AttributeError):
+                pass
+            for i in stale:
+                self._tried[i] = now
+            extra, _ = running_chat_nodes(nodes, running, self.convs)
+        return extra
+
+    async def refresh(self, full_finished: bool = False) -> None:
+        """Reload the active view. The finished side is fetched in full when
+        `full_finished` (the Finished view is open) or on the first load; a root
+        leaving the active set only re-counts it, so the Finished row stays right."""
+        try:
+            (nodes, _), running = await asyncio.gather(self._nodes("active"), self._running())
+            if nodes and not any("status" in n for n in nodes):
+                # an older server ignores `scope` and sends everything: split
+                # it here, by whether anything in a root's tree is running
+                whole = AgentTree(nodes)
+                act, fin = [], []
+                for r in whole.roots:
+                    grp = act if whole.root_status(r["id"]) in ("running", "needs_you") else fin
+                    grp += [r] + [k for k, _ in whole.descendants(r["id"])]
+                self.trees.update(active=AgentTree(act), finished=AgentTree(fin))
+                self.total_finished, self.finished_full = len(AgentTree(fin).roots), True
+            else:
+                before = {r["id"] for r in self.trees["active"].roots}
+                nodes = nodes + await self._name_chats(nodes, running)
+                self.trees["active"] = AgentTree(nodes)
+                left = before - {r["id"] for r in self.trees["active"].roots}
+                if full_finished or self.total_finished is None:
+                    fnodes, total = await self._nodes("finished")
+                    self.trees["finished"] = AgentTree(fnodes)
+                    self.total_finished = (total if isinstance(total, int)
+                                           else len(self.trees["finished"].roots))
+                    self.finished_full = True
+                elif left:
+                    _, total = await self._nodes("finished", limit=1)
+                    if isinstance(total, int):
+                        self.total_finished, self.finished_full = total, False
+            self.error = None
+        except CliError as e:
+            self.error = str(e)
+
+    def sections(self, mode: str = "active", group_by: str = "project"):
+        return agent_sections(self.trees[mode], mode, group_by)
+
+
 def _age(ts, now: float | None = None) -> str:
     """'12s' / '5m' / '3h' / '2d' since an ISO (naive = UTC) or epoch timestamp."""
     from datetime import datetime, timezone
@@ -3809,20 +3961,34 @@ def build_tui(base: str, token: str, **kw):
             Binding("pagedown", "page(1)", show=False),
         ]
 
+        RELOAD_S = 1.5          # a chat started in the web app shows within about 2 s
+
         def __init__(self, origin=None) -> None:
             super().__init__()
             self.origin = origin              # the conversation the operator came from
             self.mode = "active"              # or "finished"
             self.group_by = "project"         # finished view: or "time"
-            self.trees = {"active": AgentTree([]), "finished": AgentTree([])}
-            self.total_finished: int | None = None
+            # the data (what runs server-wide, merged and sorted) lives in the feed
+            self.feed = AgentsFeed(self._api)
+            self.trees = self.feed.trees
             self.sel = None                   # a root id, a child id, or "finished"
             self.in_kids = False              # ↑↓ walk the open root's agents
             self.open_root = None
             self.loaded = False
-            self.error: str | None = None
             self._lock = asyncio.Lock()
+            self._reloading = False
             self.frame = 0
+
+        async def _api(self, method: str, path: str, **kw):
+            return await self.app.api(method, path, **kw)
+
+        @property
+        def total_finished(self) -> int | None:
+            return self.feed.total_finished
+
+        @property
+        def error(self) -> str | None:
+            return self.feed.error
 
         def compose(self) -> ComposeResult:
             yield Static(id="ag-head")
@@ -3830,25 +3996,21 @@ def build_tui(base: str, token: str, **kw):
             yield Static(id="ag-foot")
 
         def on_mount(self) -> None:
+            self.feed.add_convs(self.app.convs)      # names for chats the app already listed
             self.render_chrome()
             self.run_worker(self._reload_safe(), group="ag-reload", exclusive=True)
-            self.set_interval(2, self._auto_reload)
+            self.set_interval(self.RELOAD_S, self._auto_reload)
             self.set_interval(0.15, self.spin)
 
         def _auto_reload(self) -> None:
-            if self.mode == "active":
+            # a fetch still going is left alone: a slow server would otherwise be
+            # asked again, and the answer cancelled, before it ever got through
+            if self.mode == "active" and not self._reloading:
                 self.run_worker(self._reload_safe(), group="ag-reload", exclusive=True)
 
         @property
         def tree(self) -> AgentTree:
             return self.trees[self.mode]
-
-        async def _fetch(self, scope: str):
-            q = "?scope=finished&limit=500" if scope == "finished" else "?scope=active"
-            data = await self.app.api("GET", f"/api/chat/agents{q}")
-            nodes = data.get("nodes") if isinstance(data, dict) else None
-            nodes = nodes if isinstance(nodes, list) else []
-            return nodes, (data.get("total") if isinstance(data, dict) else None)
 
         async def _reload_safe(self) -> None:
             # the fetch is slow; the operator may close the screen meanwhile, and
@@ -3862,29 +4024,11 @@ def build_tui(base: str, token: str, **kw):
                     raise
 
         async def reload(self) -> None:
+            self._reloading = True
             try:
-                nodes, _ = await self._fetch("active")
-                if nodes and not any("status" in n for n in nodes):
-                    # an older server ignores `scope` and sends everything: split
-                    # it here, by whether anything in a root's tree is running
-                    whole = AgentTree(nodes)
-                    act, fin = [], []
-                    for r in whole.roots:
-                        grp = act if whole.root_status(r["id"]) in ("running",
-                                                                    "needs_you") else fin
-                        grp += [r] + [k for k, _ in whole.descendants(r["id"])]
-                    self.trees = {"active": AgentTree(act), "finished": AgentTree(fin)}
-                    self.total_finished = len(AgentTree(fin).roots)
-                else:
-                    self.trees["active"] = AgentTree(nodes)
-                    if self.mode == "finished" or self.total_finished is None:
-                        fnodes, total = await self._fetch("finished")
-                        self.trees["finished"] = AgentTree(fnodes)
-                        self.total_finished = (total if isinstance(total, int)
-                                               else len(self.trees["finished"].roots))
-                self.error = None
-            except CliError as e:
-                self.error = str(e)
+                await self.feed.refresh(full_finished=self.mode == "finished")
+            finally:
+                self._reloading = False
             if not self.loaded:
                 self.loaded = True
                 self._select_origin()
@@ -3894,20 +4038,7 @@ def build_tui(base: str, token: str, **kw):
         # -- what is shown, in order --------------------------------------------------
 
         def _sections(self) -> list[tuple[str, list[dict]]]:
-            tr = self.tree
-            if self.mode == "active":
-                run = [r for r in tr.roots if tr.root_status(r["id"]) == "running"]
-                need = [r for r in tr.roots if tr.root_status(r["id"]) == "needs_you"]
-                return [("Active", run), ("Needs you", need)]
-            if self.group_by == "time":
-                buckets: dict = {}
-                # newest first inside each bucket: tr.roots is in project order,
-                # which read as shuffled once the rows were grouped by time
-                when = lambda r: str(r.get("ended_at") or r.get("started_at") or "")  # noqa: E731
-                for r in sorted(tr.roots, key=when, reverse=True):
-                    buckets.setdefault(time_bucket(when(r)), []).append(r)
-                return [(b, buckets[b]) for b in TIME_BUCKETS if b in buckets]
-            return [(f"⌂ {p or 'no project'}", rs) for p, rs in tr.groups]
+            return agent_sections(self.tree, self.mode, self.group_by)
 
         def _root_ids(self) -> list:
             ids = [r["id"] for _, rs in self._sections() for r in rs]
@@ -4113,7 +4244,7 @@ def build_tui(base: str, token: str, **kw):
         async def action_open(self) -> None:
             if self.sel == "finished":
                 self.mode, self.in_kids = "finished", False
-                if self.total_finished is None or not self.trees["finished"].roots:
+                if not self.feed.finished_full:       # only the count is loaded
                     await self.reload()
                 ids = self._root_ids()
                 self.sel = ids[0] if ids else None
