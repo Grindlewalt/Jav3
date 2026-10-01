@@ -15,6 +15,7 @@ import ResearchPanel from '../panels/ResearchPanel.jsx'
 import GitPanel from '../panels/GitPanel.jsx'
 import GrantsPanel from '../panels/GrantsPanel.jsx'
 import TerminalPanel from '../panels/TerminalPanel.jsx'
+import DesktopPanel from '../panels/DesktopPanel.jsx'
 import TaskBoardPanel from '../panels/TaskBoardPanel.jsx'
 import TodoPanel from '../panels/TodoPanel.jsx'
 
@@ -53,6 +54,7 @@ export default function WindowBody(props) {
     case 'network': return <NetworkPanel slug={props.slug} />
     case 'secrets': return <GrantsPanel slug={props.slug} />
     case 'terminal': return <TerminalPanel slug={props.slug} />
+    case 'desktop': return <DesktopPanel {...props} />
     default: return <EmptyState pad>unknown window “{WINDOW_TYPES[props.type]?.title || props.type}”</EmptyState>
   }
 }

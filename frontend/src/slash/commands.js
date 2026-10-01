@@ -38,6 +38,7 @@ export const WINDOW_TYPES = [
   ['git', 'Git — review, approve, push'],
   ['grants', 'Secrets — key grants for this project'],
   ['terminal', 'Terminal — shell in the guest VM'],
+  ['desktop', 'Desktop — watch the box’s screen'],
   ['taskboard', 'Task board — goal / plan / runs'],
   ['todo', 'To-dos'],
   ['plan', 'Plan — dump, checklist, agents'],
@@ -452,6 +453,19 @@ export const COMMANDS = [
       const h = env.host
       const slug = env.work.project || currentConvo(h)?.project_slug || h.pendingProject || h.active
       env.work.openWindow(t[0], slug ? { slug } : {})
+    },
+  },
+  {
+    name: 'desktop', busyOk: true,
+    help: 'watch the project’s box on a live screen (a Work window; web only)',
+    run: (_, env) => {
+      const h = env.host
+      const slug = env.work.project || currentConvo(h)?.project_slug || h.pendingProject || h.active
+      need(slug, 'which project? open a project chat in Work, then /desktop')
+      const id = env.work.openWindow('desktop', { slug })
+      need(id, 'the desktop opens as a window on the Work page, beside a project chat')
+      return 'the Desktop window watches the project’s box; Start desktop in it boots the '
+        + 'screen (and the box if it is off)'
     },
   },
   {

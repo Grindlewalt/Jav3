@@ -4435,3 +4435,18 @@ a:has(> .nav-dot) { position: relative; }
   .settings-page > .page-head > .scroll-hint > .tabs > a { flex: 1 1 auto; justify-content: center; }
   .notif-kinds-tools > input { flex-basis: 100%; }
 }
+
+/* live desktop window: the box's screen, watch only */
+.desktop-pane { overflow: hidden; }
+.desk-status.watching { color: var(--green); }
+.desk-status.lost, .desk-status.closed { color: var(--red); }
+.desk-warning { flex-shrink: 0; font-size: var(--fs-sm); color: var(--dim);
+  padding: 4px 10px; border-left: 3px solid var(--amber);
+  background: color-mix(in srgb, var(--amber) 10%, transparent); border-radius: 4px; }
+/* the remote desktop is dark whatever the theme: a fixed backdrop, like the terminal's */
+.desk-screen { position: relative; flex: 1 1 auto; min-height: 140px; overflow: hidden;
+  border-radius: var(--radius-md); background: #14161a; border: 1px solid var(--border); }
+.desk-idle { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-5);
+  padding: var(--sp-6) var(--sp-2); }
+.desk-idle p { margin: 0; max-width: 46ch; }
+.desk-idle-title { font-weight: 600; }
