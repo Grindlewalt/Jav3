@@ -6154,13 +6154,15 @@ def build_tui(base: str, token: str, **kw):
             self.call_after_refresh(self._foot_again)
 
         def _detail_more(self) -> bool:
-            wrap = self.query_one("#sec-detail-wrap", VerticalScroll)
-            return wrap.max_scroll_y > 0
+            wrap = self.query("#sec-detail-wrap")
+            return bool(wrap) and wrap.first(VerticalScroll).max_scroll_y > 0
 
         def _foot_again(self) -> None:
             """The footer names [ ] when the pane overflows; layout settles after the
-            text changes, so this runs once it has."""
-            if self._detail_more() != getattr(self, "_more", False):
+            text changes, so this runs once it has (a page that was left meanwhile has
+            no pane to measure: the callback outlives its children)."""
+            if self.query("#sec-detail-wrap") and self._detail_more() != getattr(
+                    self, "_more", False):
                 self.render_chrome()
 
         async def action_reload(self) -> None:
