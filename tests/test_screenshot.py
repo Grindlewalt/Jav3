@@ -142,14 +142,14 @@ def _fake_chromium(monkeypatch, png: bytes, calls: list):
     monkeypatch.setattr(shot.shutil, "which",
                         lambda n: "/usr/bin/" + n if n in ("chromium", "Xvfb", "scrot") else None)
 
-    async def fake_exec(argv, *, timeout, env=None, cwd=None):
+    async def fake_exec(argv, *, timeout, env=None, cwd=None, watch_oom=False):
         calls.append(argv)
         out = next((a.split("=", 1)[1] for a in argv if a.startswith("--screenshot=")), None)
         if out is None and argv[0] == "scrot":
             out = argv[-1]
         with open(out, "wb") as f:
             f.write(png)
-        return 0
+        return shot.Ran(0)
     monkeypatch.setattr(shot, "_exec", fake_exec)
 
 
@@ -298,3 +298,190 @@ def test_taint_note_wire(monkeypatch):
     assert asyncio.run(mod.taint_note("screenshot:url")) is True
     assert sent == [{"op": "taint_note", "op_id": "op-9", "op_token": "tok-9",
                      "source": "screenshot:url"}]
+
+
+# --- C1: why a screenshot failed ------------------------------------------------------
+# 2026-10-01, benchmark-game: a WebGL game page outgrew the 975 MB work cgroup, the
+# kernel killed chromium's renderer and the rest hung until the tool's 60 s timeout
+# (seven times in one turn). The result said only "chromium failed (exit -9)", so the
+# model retried it unchanged. Now the result names the cause and what to change.
+
+from backend import memguard  # noqa: E402
+
+
+def _counter(monkeypatch, seq):
+    """memguard.oom_kills reads from seq, then repeats its last value."""
+    it = iter(seq)
+    last = [seq[-1]]
+
+    def kills(path=None):
+        try:
+            last[0] = next(it)
+        except StopIteration:
+            pass
+        return last[0]
+    monkeypatch.setattr(memguard, "oom_kills", kills)
+    monkeypatch.setattr(memguard, "setup", lambda: None)
+
+
+def test_exec_stops_a_hung_chromium_after_the_kernel_kill(monkeypatch):
+    _counter(monkeypatch, [0, 0, 1])
+    monkeypatch.setattr(shot, "OOM_POLL_S", 0.05)
+    monkeypatch.setattr(shot, "OOM_GRACE_S", 0.1)
+    ran = asyncio.run(shot._exec(["sleep", "30"], timeout=20, watch_oom=True))
+    assert ran.rc == -9 and not ran.timed_out and ran.oom_kills == 1
+    assert ran.secs < 5                      # not the 20 s timeout
+
+
+def test_exec_plain_timeout_and_clean_exit(monkeypatch):
+    _counter(monkeypatch, [0])
+    ran = asyncio.run(shot._exec(["sleep", "30"], timeout=0.3, watch_oom=True))
+    assert ran.rc == -9 and ran.timed_out and ran.oom_kills == 0
+    ran = asyncio.run(shot._exec(["sleep", "30"], timeout=0.3))      # not watching: same
+    assert ran.rc == -9 and ran.timed_out
+    ran = asyncio.run(shot._exec(["true"], timeout=5, watch_oom=True))
+    assert ran == shot.Ran(0, False, 0, ran.secs)
+
+
+def test_exec_lets_chromium_finish_inside_the_grace(monkeypatch):
+    _counter(monkeypatch, [0, 1])
+    monkeypatch.setattr(shot, "OOM_POLL_S", 0.05)
+    monkeypatch.setattr(shot, "OOM_GRACE_S", 5)
+    ran = asyncio.run(shot._exec(["sleep", "0.3"], timeout=20, watch_oom=True))
+    assert ran.rc == 0 and ran.oom_kills == 1
+
+
+def test_failure_text_names_the_cause_and_what_to_change():
+    url = "http://127.0.0.1:5173/scripts/shot.html?rd=4"
+    oom = shot.failure_text("oom", url, shot.Ran(-9, False, 1, 9.4), 975)
+    assert oom.startswith("error: chromium was killed for using more than the 975 MB")
+    assert "about 575 MB" in oom and "raise this project's RAM" in oom
+    assert "smaller width and height" in oom and "exit -9" not in oom
+    assert "same failure" not in oom
+    to = shot.failure_text("timeout", url, shot.Ran(-9, True, 0, 60.2), 975)
+    assert "timed out after 60 s" in to and "wait_ms + 45 s" in to
+    assert "killed nothing for memory" in to and "shorter wait_ms" in to
+    kd = shot.failure_text("killed", url, shot.Ran(-9, False, 0, 3.0), 0)
+    assert "SIGKILL" in kd and "not by this tool's timeout" in kd
+    ex = shot.failure_text("exit", url, shot.Ran(1, False, 0, 2.0), 975)
+    assert "chromium failed (exit 1)" in ex and "nothing is listening" in ex
+    # no cap known (a box without a memory controller): no invented number
+    assert "MB" not in shot.failure_text("oom", url, shot.Ran(-9, False, 1, 9), 0).split("chromium was killed")[1].split("The turn")[0]
+    assert shot.failure_kind(shot.Ran(-9, True, 2, 60)) == "oom"      # the kill is the cause
+    assert shot.failure_kind(shot.Ran(-9, True, 0, 60)) == "timeout"
+    assert shot.failure_kind(shot.Ran(-9, False, 0, 5)) == "killed"
+    assert shot.failure_kind(shot.Ran(2, False, 0, 5)) == "exit"
+
+
+@pytest.fixture
+def _fresh_fails():
+    shot._fails.update(op=None, pages={})
+    yield
+    shot._fails.update(op=None, pages={})
+
+
+def _failing_chromium(monkeypatch, ran):
+    monkeypatch.setattr(shot.shutil, "which", lambda n: "/usr/bin/" + n)
+    calls = []
+
+    async def fake_exec(argv, *, timeout, env=None, cwd=None, watch_oom=False):
+        calls.append((timeout, watch_oom))
+        return ran
+    monkeypatch.setattr(shot, "_exec", fake_exec)
+    monkeypatch.setattr(memguard, "limit_now_mb", lambda: 975)
+    return calls
+
+
+def test_url_mode_says_why_and_flags_the_repeat(guest, monkeypatch, _fresh_fails):
+    calls = _failing_chromium(monkeypatch, shot.Ran(-9, False, 1, 9.0))
+    page = "http://127.0.0.1:5173/scripts/shot.html?seed=7&rd="
+    first = asyncio.run(shot.run(mode="url", url=page + "4", wait_ms=14000, width=960,
+                                 height=600))
+    assert first.startswith("error: chromium was killed for using more than the 975 MB")
+    assert "same failure" not in first
+    assert calls == [(59.0, True)]           # wait_ms/1000 + 45, and watching the kernel
+    again = asyncio.run(shot.run(mode="url", url=page + "4", wait_ms=14000, width=960,
+                                 height=600))
+    assert again.startswith("error: same failure as the previous call (2 in a row this "
+                            "turn), don't retry unchanged. ")
+    assert "Changing only the page's parameters" not in again      # the call was identical
+    changed = asyncio.run(shot.run(mode="url", url=page + "3", wait_ms=14000, width=960,
+                                   height=600))
+    assert "(3 in a row this turn)" in changed
+    assert "Changing only the page's parameters has not helped." in changed
+    other_page = asyncio.run(shot.run(mode="url", url="http://127.0.0.1:5173/probe.html"))
+    assert "same failure" not in other_page
+
+
+def test_repeat_count_is_per_turn_and_a_success_clears_it(guest, monkeypatch, _fresh_fails):
+    import backend.turnctx as tc
+    calls = _failing_chromium(monkeypatch, shot.Ran(-9, True, 0, 60.0))
+    url = "http://127.0.0.1:5173/scripts/shot.html"
+    a = asyncio.run(shot.run(mode="url", url=url))
+    assert "timed out after 60 s" in a and "same failure" not in a
+    assert "same failure" in asyncio.run(shot.run(mode="url", url=url))
+    tc.op_id.set("op-2")                       # the next turn starts clean
+    assert "same failure" not in asyncio.run(shot.run(mode="url", url=url))
+    assert "same failure" in asyncio.run(shot.run(mode="url", url=url))
+    # a different kind of failure is not "the same failure"
+    _failing_chromium(monkeypatch, shot.Ran(-9, False, 1, 9.0))
+    assert "same failure" not in asyncio.run(shot.run(mode="url", url=url))
+    # a capture that works clears the page's record
+    _fake_chromium(monkeypatch, _png(300, 200), [])
+    assert imageresult.split(asyncio.run(shot.run(mode="url", url=url)))[1] is not None
+    _failing_chromium(monkeypatch, shot.Ran(-9, True, 0, 60.0))
+    assert "same failure" not in asyncio.run(shot.run(mode="url", url=url))
+    assert calls
+
+
+def test_url_mode_keeps_an_image_that_chromium_wrote_before_it_was_stopped(
+        guest, monkeypatch, _fresh_fails):
+    calls = []
+    _fake_chromium(monkeypatch, _png(400, 300), calls)
+
+    async def exec_(argv, *, timeout, env=None, cwd=None, watch_oom=False):
+        out = next(a.split("=", 1)[1] for a in argv if a.startswith("--screenshot="))
+        with open(out, "wb") as f:
+            f.write(_png(400, 300))
+        return shot.Ran(-9, False, 1, 12.0)         # a kill showed, the file is there
+    monkeypatch.setattr(shot, "_exec", exec_)
+    text, img = imageresult.split(asyncio.run(shot.run(mode="url", url="http://localhost:1/")))
+    assert img is not None and "may be incomplete" in text
+
+
+def test_app_mode_names_a_memory_kill(guest, monkeypatch, tmp_path):
+    monkeypatch.setattr(shot.shutil, "which",
+                        lambda n: "/usr/bin/" + n if n in ("Xvfb", "xclock") else None)
+
+    class FakeX:
+        async def ensure(self, w, h):
+            pass
+
+        def arm_idle(self):
+            pass
+    monkeypatch.setattr(shot, "xvfb", FakeX())
+    tk = types.ModuleType("toolctx")
+
+    async def slug():
+        return "demo"
+    tk.active_slug = slug
+    import backend.agent.tools as bat
+    monkeypatch.setattr(bat, "toolctx", tk, raising=False)
+    monkeypatch.setitem(sys.modules, "backend.agent.tools.toolctx", tk)
+    monkeypatch.setattr(shot, "proxy_conns", lambda h, p: set())
+    _counter(monkeypatch, [0, 1])
+    monkeypatch.setattr(memguard, "limit_now_mb", lambda: 975)
+
+    class Proc:
+        pid = 999999
+
+        async def wait(self):
+            return 0
+
+    async def fake_spawn(*argv, **kw):
+        return Proc()
+    monkeypatch.setattr(shot.asyncio, "create_subprocess_exec", fake_spawn)
+    out = asyncio.run(shot.run(mode="app", command=["xclock"], wait_ms=0))
+    assert out.startswith("error: the app or its display was killed for using more than the "
+                          "975 MB")
+    assert "raise this project's RAM" in out
