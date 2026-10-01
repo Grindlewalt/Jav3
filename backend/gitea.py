@@ -360,9 +360,6 @@ async def push_main(slug: str) -> str | None:
 
 # --- the agent's push request --------------------------------------------------
 
-_NEVER_SNAPSHOT = (":(exclude).staging", ":(exclude).workspace.json", ":(exclude).context.json")
-
-
 async def _snapshot_commit(slug: str, message: str) -> str:
     """A commit of the live files on top of HEAD, built in a throwaway index:
     main, the real index and the working tree are untouched."""
@@ -373,9 +370,11 @@ async def _snapshot_commit(slug: str, message: str) -> str:
            "GIT_COMMITTER_NAME": "Jav3", "GIT_COMMITTER_EMAIL": settings.git_author_email}
     try:
         await gitgate.run_git(slug, "read-tree", "HEAD", extra_env=env, check=True)
-        # runtime files stay out even if the agent overwrote the host's .gitignore
-        await gitgate.run_git(slug, "add", "-A", "--", ".", *_NEVER_SNAPSHOT,
-                              extra_env=env, check=True)
+        # runtime files stay out even if the agent overwrote the host's .gitignore:
+        # ensure_repo wrote them into .git/info/exclude. (Not `:(exclude)` pathspecs:
+        # git fails the whole add when such a pathspec names a file the .gitignore
+        # also ignores, i.e. whenever a .workspace.json exists.)
+        await gitgate.run_git(slug, "add", "-A", extra_env=env, check=True)
         _, tree, _ = await gitgate.run_git(slug, "write-tree", extra_env=env, check=True)
         _, base, _ = await gitgate.run_git(slug, "rev-parse", "HEAD^{tree}", check=True)
         if tree.strip() == base.strip():
