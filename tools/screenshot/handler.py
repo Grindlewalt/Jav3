@@ -225,6 +225,7 @@ async def _exec(argv: list[str], *, timeout: float, env: dict | None = None,
             if not watch_oom:
                 timed_out = True
                 break
+        memguard.confine_session(proc.pid)      # chromium lowers its children's adj itself
         now = memguard.oom_kills()
         if kills0 is not None and now is not None and now > kills0:
             first_kill = first_kill or time.monotonic()

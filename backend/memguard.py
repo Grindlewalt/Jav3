@@ -106,6 +106,37 @@ def confine() -> None:
             pass
 
 
+def confine_session(sid: int, proc_root: str = "/proc") -> int:
+    """Put every process of session `sid` at the top of the OOM list. Chromium
+    sets its own children's oom_score_adj (renderers 300, measured 2026-10-01 on
+    the Pi), which ranks them BEHIND everything else in the work cgroup: at its
+    limit the kernel killed the node dev server and the python that was watching
+    (adj 1000) while a 700 MB renderer lived on. How many it changed; never raises."""
+    n = 0
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return 0
+    for d in names:
+        if not d.isdigit():
+            continue
+        try:
+            with open(os.path.join(proc_root, d, "stat")) as f:
+                st = f.read()
+            if int(st[st.rindex(")") + 2:].split()[3]) != sid:
+                continue
+            path = os.path.join(proc_root, d, "oom_score_adj")
+            with open(path) as f:
+                if f.read().strip() == OOM_ADJ.decode():
+                    continue
+            with open(path, "w") as f:
+                f.write(OOM_ADJ.decode())
+            n += 1
+        except (OSError, ValueError, IndexError):
+            continue
+    return n
+
+
 def _events_path() -> str | None:
     """The memory.events to watch: the work cgroup's, else this container's own
     (a docker box's cgroup root)."""

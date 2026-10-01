@@ -359,3 +359,25 @@ async def test_the_ready_timeout_carries_the_consoles_last_words(kvm, monkeypatc
     with pytest.raises(lifecycle.VMError) as e:
         await ctl._ensure_ready_locked()
     assert "did not become ready in time (the guest's console shows" in str(e.value)
+
+
+# --- C1: chromium lowers its own children's adj ----------------------------------------
+
+def test_confine_session_raises_chromiums_children_to_the_top(tmp_path):
+    """2026-10-01 on the Pi: chromium set its renderers to oom_score_adj 300, so at the
+    work cgroup's limit the kernel killed the node dev server and the watching python
+    (1000) and left a 700 MB renderer alone."""
+    def proc(pid, session, adj):
+        d = tmp_path / str(pid)
+        d.mkdir()
+        (d / "stat").write_text(f"{pid} (chromium (renderer)) S 1 {session} {session} 0 -1 0")
+        (d / "oom_score_adj").write_text(f"{adj}\n")
+    proc(100, 100, 300)       # the renderer, in the screenshot's session
+    proc(101, 100, 1000)      # already there
+    proc(102, 999, 0)         # someone else's: untouched
+    (tmp_path / "self").mkdir()
+    assert memguard.confine_session(100, str(tmp_path)) == 1
+    assert (tmp_path / "100" / "oom_score_adj").read_text() == "1000"
+    assert (tmp_path / "102" / "oom_score_adj").read_text() == "0\n"
+    assert memguard.confine_session(100, str(tmp_path)) == 0          # idempotent
+    assert memguard.confine_session(100, str(tmp_path / "nope")) == 0  # never raises
