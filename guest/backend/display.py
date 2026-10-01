@@ -12,10 +12,15 @@ line:
     {"mode":"start"}   start it (idempotent), reply the status
     {"mode":"status"}  reply the status, change nothing
     {"mode":"stop"}    stop the display and what runs on it, reply the status
+    {"mode":"desk"}    the agent's seat (P2): needs the display UP (it never
+                       starts it), replies {"ok":true}, then speaks the desk
+                       wire protocol as JSON lines (backend/desk.py) with
+                       jav3-desk's Session running as a child (deskbox.py)
 
-Errors reply {"ok":false,"error":"<what and what to do>"} and close. P2 adds a
-`desk` mode here (the agent's own screenshot / click / type seat on this same
-display); `Session.hold()` is its hook to keep the display up while it works.
+Errors reply {"ok":false,"error":"<what and what to do>"} and close. A desk
+connection holds the display (`Session.hold()`) while requests arrive and for
+HOLD_GRACE_S after the last one, so the idle timer cannot stop the screen under
+the agent; it ends when the display stops.
 
 The display is one Xvnc (:100, 1280x800 on purpose: the agent's screenshots are
 that size), an openbox window manager and, as a first thing to look at, an xterm
@@ -35,6 +40,7 @@ import os
 import shutil
 import signal
 import socket
+import sys
 import time
 
 from . import boxinfo, memguard
@@ -52,6 +58,11 @@ XVNC_NAMES = ("Xtigervnc", "Xvnc")        # Debian's tigervnc ships the first
 AUTOSTART = ("terminal",)                 # apps() names opened with the display
 TMUX_SESSION = "desk"
 PY_VENV_BIN = "/opt/jav3/py/bin"          # the image's pip venv (httpx, textual)
+HOLD_GRACE_S = 60                         # a desk request keeps the screen up this long
+PKG_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # holds `backend/`
+# the agent's seat: jav3-desk's Session as a child on DISPLAY=:100 (deskbox.py).
+# A list so the tests can stand a fake one in.
+DESK_ARGV = [sys.executable, "-m", "backend.deskbox"]
 
 
 class DisplayError(Exception):
@@ -144,6 +155,7 @@ class Session:
         self._x = None                    # the Xvnc process
         self._procs: list = []            # openbox and the autostarted apps
         self.viewers = 0
+        self.desks = 0                    # agent desk connections (mode "desk")
         self._holds = 0
         self._timer = None
         self._idle_at: float | None = None
@@ -158,7 +170,7 @@ class Session:
         if self._idle_at is not None:
             left = max(0, int(self._idle_at - time.monotonic()))
         return {"ok": True, "installed": _find_xvnc() is not None,
-                "running": self.running(), "viewers": self.viewers,
+                "running": self.running(), "viewers": self.viewers, "desks": self.desks,
                 "display": DISPLAY, "geometry": f"{WIDTH}x{HEIGHT}",
                 "idle_stop_in_s": left,
                 "uptime_s": (int(time.monotonic() - self.started_at)
@@ -172,13 +184,15 @@ class Session:
                 await self._start_locked()
         self._arm()
 
-    async def _spawn(self, argv: list[str], env: dict | None = None):
+    async def _spawn(self, argv: list[str], env: dict | None = None, *,
+                     cwd: str | None = None, piped: bool = False):
         # found on this process's PATH, not the app env's (which puts the image's
         # pip venv first and is only for what runs inside the display)
         argv = [shutil.which(argv[0]) or argv[0], *argv[1:]]
+        pipe = asyncio.subprocess.PIPE if piped else asyncio.subprocess.DEVNULL
         return await asyncio.create_subprocess_exec(
-            *argv, env=env if env is not None else _app_env(),
-            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.DEVNULL,
+            *argv, env=env if env is not None else _app_env(), cwd=cwd,
+            stdin=pipe, stdout=pipe,
             stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
             preexec_fn=memguard.confine)
 
@@ -287,7 +301,7 @@ class Session:
         self._arm()
 
     def hold(self) -> None:
-        """P2: the agent is working on the display, keep it up (pair with
+        """The agent is working on the display, keep it up (pair with
         release(), like a viewer)."""
         self._holds += 1
         self._arm()
@@ -365,6 +379,106 @@ async def _splice(loop, conn, first: bytes) -> None:
         x.close()
 
 
+class _DeskHold:
+    """The display stays up while the agent's requests arrive and HOLD_GRACE_S
+    after the last: one `Session.hold()` taken on the first request, released
+    by a timer that every request pushes back (and at once when the connection
+    ends)."""
+
+    def __init__(self):
+        self._held = False
+        self._timer = None
+
+    def touch(self) -> None:
+        if not self._held:
+            self._held = True
+            session.hold()
+        if self._timer is not None:
+            self._timer.cancel()
+        self._timer = asyncio.get_running_loop().call_later(HOLD_GRACE_S, self.drop)
+
+    def drop(self) -> None:
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
+        if self._held:
+            self._held = False
+            session.release()
+
+
+async def _to_child(loop, conn, proc, rest: bytes, hold: _DeskHold) -> None:
+    """Host -> the desk child, line by line. A request is the agent working:
+    it holds the display. Anything that is not a JSON object is dropped."""
+    buf = rest
+    while True:
+        while b"\n" in buf:
+            line, _, buf = buf.partition(b"\n")
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("type") == "req":
+                hold.touch()
+            proc.stdin.write(line + b"\n")
+            await proc.stdin.drain()
+        if len(buf) > 1 << 20:
+            return
+        data = await loop.sock_recv(conn, 65536)
+        if not data:
+            return
+        buf += data
+
+
+async def _from_child(loop, conn, proc) -> None:
+    while True:
+        data = await proc.stdout.read(65536)
+        if not data:
+            return
+        await loop.sock_sendall(conn, data)
+
+
+async def _until_stopped() -> None:
+    while session.running():
+        await asyncio.sleep(1)
+
+
+async def _desk(loop, conn, rest: bytes) -> None:
+    """The agent's seat. Refused unless the operator started the screen (the
+    RAM decision is theirs); ends when it stops."""
+    if not session.running():
+        await _reply(loop, conn, {"ok": False, "error":
+                     "the desktop is not running: start it (Work > Desktop) first"})
+        return
+    env = {**_app_env(), "PYTHONPATH": PKG_ROOT, "JAV3_DESK_APPS": APPS_PATH}
+    try:
+        proc = await session._spawn(DESK_ARGV, env, cwd=PKG_ROOT, piped=True)
+    except OSError as e:
+        await _reply(loop, conn, {"ok": False, "error": f"the desk client did not start: {e}"})
+        return
+    hold = _DeskHold()
+    session.desks += 1
+    tasks = [asyncio.ensure_future(c) for c in (
+        _to_child(loop, conn, proc, rest, hold), _from_child(loop, conn, proc),
+        _until_stopped())]
+    try:
+        await _reply(loop, conn, {"ok": True})
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            t.cancel()
+            if t.done() and not t.cancelled():
+                t.exception()               # a pipe that broke: nothing to report
+        _killpg(proc.pid)
+        session.desks -= 1
+        hold.drop()
+        try:
+            await asyncio.wait_for(proc.wait(), 2)
+        except asyncio.TimeoutError:
+            pass
+
+
 async def _handle(loop, conn) -> None:
     conn.setblocking(False)
     try:
@@ -387,6 +501,8 @@ async def _handle(loop, conn) -> None:
             elif mode == "stop":
                 await session.stop()
                 await _reply(loop, conn, session.status())
+            elif mode == "desk":
+                await _desk(loop, conn, rest)
             else:
                 await _reply(loop, conn, {"ok": False,
                                           "error": f"unknown display mode {mode!r}"})
