@@ -36,6 +36,9 @@ _COPY_MODULES = {
     # the memory cgroup + OOM priority run_code and screenshot start their
     # processes under, so a runaway command cannot take the box down with it
     "backend/memguard.py": "backend/memguard.py",
+    # the operator's computer-use client, as it is: the box desktop's agent seat
+    # (guest/backend/deskbox.py) runs its Session on display :100
+    "backend/jav3_desk.py": "clients/jav3-desk/jav3-desk",
 }
 
 # IN_GUEST_TOOLS and BOX_ONLY_TOOLS live in backend/agent/tools/inguest.py (imported

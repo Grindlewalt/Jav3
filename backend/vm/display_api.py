@@ -32,7 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from .. import bus
 from ..auth import COOKIE_NAME, require_user, user_from_token
 from ..config import settings
-from . import boxes, boxlog, images
+from . import boxdesk, boxes, boxlog, images
 from .lifecycle import VMError
 
 router = APIRouter(prefix="/api/vm/boxes", tags=["vm-display"])
@@ -302,7 +302,7 @@ async def status(box, *, ask_guest: bool = True) -> dict:
            "session": "off" if running else "stopped",
            "viewers": _viewers.get(box.id, 0), "need_mb": need, "free_mb": free,
            "fits": need <= free, "geometry": GEOMETRY, "watch_only": True,
-           "guest": None, "note": None}
+           "guest": None, "note": None, "desk": boxdesk.state(box.id)}
     if why is None and running and ask_guest:
         try:
             g = await _guest_call(box, "status", timeout=4)
@@ -313,6 +313,9 @@ async def status(box, *, ask_guest: bool = True) -> dict:
                                "image, then restart the box")
             else:
                 out["session"] = "running" if g.get("running") else "off"
+                if g.get("running"):
+                    boxdesk.sync(box)          # the agent's seat (P2), if it has none yet
+                    out["desk"] = boxdesk.state(box.id)
         except ConnectionError:
             out["session"] = "unavailable"
             out["note"] = ("the box does not answer on the desktop port: it was started "
@@ -362,6 +365,7 @@ async def display_start(box_id: str, user: dict = Depends(require_user)):
     if not g.get("ok"):
         raise HTTPException(status_code=409, detail=g.get("error") or "the desktop did not start")
     bus.publish(boxes.BUS_CHAN, {"type": "display", "box_id": box.id, "state": "running"})
+    await boxdesk.ensure_quietly(box)          # the agent can drive it from here (P2)
     return await status(box)
 
 
