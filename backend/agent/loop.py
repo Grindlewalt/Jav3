@@ -556,15 +556,29 @@ async def _run_turn(
         carry.clear()
         cuts = 0
         parsed = []
+        bad_json: dict[int, str] = {}    # id(tool call) -> why its arguments were refused
         # per call: (note for its result, error that replaces its dispatch),
         # from mapping what the model called onto the real tool
         mapped: dict[int, tuple[str, str | None]] = {}
         for tc in final["tool_calls"]:
             name = tc["function"]["name"]
+            raw_args = tc["function"]["arguments"] or "{}"
             try:
-                args = json.loads(tc["function"]["arguments"] or "{}")
-            except json.JSONDecodeError:
-                args = {}
+                args = json.loads(raw_args)
+            except json.JSONDecodeError as e:
+                # not JSON at all (an unescaped quote or newline in a string,
+                # a cut-off call): never dispatched as an empty call, which
+                # would tell the model it forgot arguments it did send. It is
+                # told what was wrong and sees the start of what it wrote.
+                shown = raw_args if len(raw_args) <= 200 else raw_args[:200] + "..."
+                bad_json[id(tc)] = (
+                    f"error: the arguments you sent for {name} were not valid JSON "
+                    f"({e.msg}, at character {e.pos}), so nothing ran. They began: "
+                    f"{shown}\nEscape quotes and newlines inside string values "
+                    f"(\\\" and \\n) and call {name} again.")
+                parsed.append((tc, name, {"_invalid_json": raw_args[:2000]}))
+                yield {"type": "tool", "id": tc["id"], "name": name, "args": parsed[-1][2]}
+                continue
             if not isinstance(args, dict):
                 # valid JSON but not an object ([..], null, "x"): an empty call,
                 # so argcheck names the missing arguments and the model retries,
@@ -579,6 +593,8 @@ async def _run_turn(
             yield {"type": "tool", "id": tc["id"], "name": name, "args": args}
 
         async def _run_one(name: str, args: dict, call_id=None, tc=None) -> str:
+            if id(tc) in bad_json:
+                return bad_json[id(tc)]
             if view.is_meta(name):
                 return view.meta_call(args)
             note, err = mapped.get(id(tc), ("", None))
