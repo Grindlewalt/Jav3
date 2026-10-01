@@ -280,7 +280,7 @@ def failure_text(kind: str, url: str, ran: Ran, limit_mb: int = 0, repeat: int =
                 f"wait_ms + {URL_EXTRA_S} s). The kernel killed nothing for memory: the page was "
                 "still working. While it waits chromium draws the page's frames faster than "
                 "real time, so a longer wait_ms means more frames to draw, not more time for "
-                "each one. Try a shorter wait_ms (2000 to 4000), a smaller width and height, "
+                "each one. Try a much shorter wait_ms (1000 or 2000), a smaller width and height, "
                 "or lower the page's own render settings.")
     elif kind == "killed":
         body = (f"chromium was killed (SIGKILL) {secs} into loading {url}, not by this tool's "

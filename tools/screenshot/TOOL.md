@@ -22,7 +22,7 @@ parameters:
       description: app mode. The program and its arguments (argv, no shell), run in the project directory.
     wait_ms:
       type: integer
-      description: How long to let the page/app settle before capturing (default 2000, max 15000). For a heavy WebGL page keep it short, 2000 to 4000, because url mode draws the page's frames faster than real time while it waits and a longer wait is more frames to draw.
+      description: How long to let the page/app settle before capturing (default 2000, max 15000). For a heavy WebGL page keep it short, 1000 to 2000, because url mode draws the page's frames faster than real time while it waits and a longer wait is more frames to draw.
     width:
       type: integer
       description: Viewport/display width (default 1280, max 1600).

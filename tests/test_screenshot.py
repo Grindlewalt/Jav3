@@ -360,7 +360,7 @@ def test_failure_text_names_the_cause_and_what_to_change():
     assert "same failure" not in oom
     to = shot.failure_text("timeout", url, shot.Ran(-9, True, 0, 60.2), 975)
     assert "timed out after 60 s" in to and "wait_ms + 45 s" in to
-    assert "killed nothing for memory" in to and "shorter wait_ms" in to
+    assert "killed nothing for memory" in to and "shorter wait_ms (1000 or 2000)" in to
     kd = shot.failure_text("killed", url, shot.Ran(-9, False, 0, 3.0), 0)
     assert "SIGKILL" in kd and "not by this tool's timeout" in kd
     ex = shot.failure_text("exit", url, shot.Ran(1, False, 0, 2.0), 975)
