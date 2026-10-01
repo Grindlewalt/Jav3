@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import socket
 import sys
 import threading
 import time
@@ -64,7 +65,12 @@ class HttpFake:
 
     def __init__(self, handler, port: int = 0) -> None:
         self.handler = handler
-        self.port = port
+        # bound now, served from start(): the address is known (and a client may be
+        # started, forking before there is a second thread) without the server running
+        self._sock = socket.socket()
+        self._sock.bind(("127.0.0.1", port))
+        self._sock.listen(64)
+        self.port = self._sock.getsockname()[1]
         self.loop: asyncio.AbstractEventLoop | None = None
         self._ready = threading.Event()
         self._thread: threading.Thread | None = None
@@ -86,6 +92,7 @@ class HttpFake:
             loop.call_soon_threadsafe(loop.stop)
             if self._thread:
                 self._thread.join(5)
+        self._sock.close()
 
     def __enter__(self) -> "HttpFake":
         return self.start()
@@ -98,8 +105,7 @@ class HttpFake:
         asyncio.set_event_loop(self.loop)
 
         async def boot():
-            server = await asyncio.start_server(self._conn, "127.0.0.1", self.port)
-            self.port = server.sockets[0].getsockname()[1]
+            await asyncio.start_server(self._conn, sock=self._sock)
             self._ready.set()
 
         self.loop.run_until_complete(boot())

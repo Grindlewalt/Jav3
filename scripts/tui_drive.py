@@ -37,9 +37,11 @@ died; 2 for a bad step.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sys
 import tempfile
@@ -165,6 +167,17 @@ def style_str(st: tuple) -> str:
 
 def screen_text(screen) -> list[str]:
     return [ln.rstrip() for ln in screen.display]
+
+
+def truecolor_cells(screen) -> list[str]:
+    """Distinct 24-bit colours on screen (should be none under TERM=xterm-256color)."""
+    seen = set()
+    for y in range(screen.lines):
+        row = screen.buffer[y]
+        for x in range(screen.columns):
+            fg, bg, _ = cell_style(screen, row[x])
+            seen.update(c for c in (fg, bg) if isinstance(c, str))
+    return sorted(seen)
 
 
 def snapshot_text(screen, title: str = "") -> str:
@@ -586,6 +599,7 @@ def child_env(config_home: str | None, tz: str | None, clock: float | None, cwd:
         env["TZ"] = tz
     if clock is not None:
         env["TUI_DRIVE_CLOCK"] = repr(clock)
+        env["TUI_DRIVE_STEADY"] = "1"       # a pinned clock means a steady screen: no blinking cursor
     return env
 
 
@@ -612,6 +626,10 @@ def child_main(argv: list[str]) -> None:
     spec = importlib.util.spec_from_loader("jav3_driven", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)           # defines everything; its __main__ guard stays off
+    if os.environ.get("TUI_DRIVE_STEADY"):
+        from textual.widgets import Input, TextArea
+        TextArea._toggle_cursor_blink_visible = lambda self: None     # the cursor stays shown
+        Input._toggle_cursor = lambda self: None
     clock = os.environ.get("TUI_DRIVE_CLOCK")
     if clock:
         fixed = float(clock)
@@ -626,6 +644,73 @@ def child_main(argv: list[str]) -> None:
 
         mod.time = FixedClock()
     sys.exit(mod.main(args))
+
+
+class Driven:
+    """What `driven()` yields: the pty session, a step runner, and (with fake=True) the
+    SeededServer that is answering, for `.writes`, `.posts`, `.misses`."""
+
+    def __init__(self, sess: Session, run: "Runner", fake) -> None:
+        self.sess, self.run, self.fake = sess, run, fake
+
+    @property
+    def screen(self):
+        return self.sess.screen
+
+
+@contextlib.contextmanager
+def driven(*, fake: bool = False, server: str | None = None, size=(120, 40),
+           client_args: list[str] | None = None, clock: str | None = None,
+           tz: str | None = None, config: str | None = None, cli: str = str(CLI),
+           python: str = sys.executable, startup: float = 15.0, timeout: float = 10.0):
+    """Start the client in a pty (against the seeded fake, or your saved login), wait for
+    its first frame, yield a Driven, and clean up. The same thing the command line does:
+        with driven(fake=True, size=(80, 24)) as d:
+            d.run.run(split_steps("type:/vms|key:enter|waitfor:Boxes")); d.screen
+    """
+    cols, rows = size
+    # a short, same-length path on every machine: /tmp/tui-abcd1234/config/jav3/themes
+    # shows on /help, and a snapshot of it must not depend on $TMPDIR
+    try:
+        tmp = tempfile.mkdtemp(prefix="tui-", dir="/tmp")
+    except OSError:
+        tmp = tempfile.mkdtemp(prefix="tui-")
+    srv = http = sess = None
+    args = list(client_args or [])
+    clock_default = None
+    try:
+        if fake:
+            sys.path.insert(0, str(REPO / "tests"))
+            import tui_fake_http as tf
+            srv = tf.SeededServer()
+            http = tf.HttpFake(srv.handle)      # bound; served after the client has forked
+            config = str(Path(tmp) / "config")
+            cdir = Path(config) / "jav3"
+            cdir.mkdir(parents=True, mode=0o700)
+            (cdir / "credentials.json").write_text(json.dumps(
+                {"address": http.address, "session": "fake-session", "username": tf.USERNAME}))
+            clock_default, tz = tf.CLOCK, tz or tf.ZONE
+        elif server:
+            args = ["--server", PI if server == "pi" else server] + args
+            print(f"-- {server}: using your saved login", file=sys.stderr)
+        pinned = parse_clock(clock, clock_default) if clock else clock_default
+        cwd = str(Path(tmp) / "work")
+        os.mkdir(cwd)
+        env = child_env(config, tz, pinned, cwd, cols, rows)
+        argv = [python, str(Path(__file__).resolve()), "--_client", cli] + args
+        sess = Session(argv, env, cols, rows, cwd, redact=secrets_in(config))
+        if http:
+            http.start()        # after the fork: no second thread while pexpect forks
+        run = Runner(sess, timeout)
+        sess.settle(quiet=0.4, cap=2.5, first_timeout=startup)
+        yield Driven(sess, run, srv)
+    finally:
+        if sess is not None:
+            sess.pump(0.0)
+            sess.close()
+        if http:
+            http.stop()
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -652,65 +737,29 @@ def main(argv: list[str] | None = None) -> int:
                     help="seconds to wait for the first frame")
     ap.add_argument("--quiet", action="store_true", help="no trailing status line")
     a = ap.parse_args(argv)
-    cols, rows = a.size
-    import shlex
     steps = split_steps(a.steps)
-
-    tmp = tempfile.mkdtemp(prefix="tui-drive-")
-    fake = http = None
-    config = a.config
-    client_args = shlex.split(a.args)
-    clock_default = None
-    try:
-        if a.fake:
-            sys.path.insert(0, str(REPO / "tests"))
-            import tui_fake_http as tf
-            fake = tf.SeededServer()
-            http = tf.HttpFake(fake.handle).start()
-            config = str(Path(tmp) / "config")
-            cdir = Path(config) / "jav3"
-            cdir.mkdir(parents=True, mode=0o700)
-            (cdir / "credentials.json").write_text(json.dumps(
-                {"address": http.address, "session": "fake-session", "username": tf.USERNAME}))
-            clock_default, tz = tf.CLOCK, a.tz or tf.ZONE
-        else:
-            tz = a.tz
-            if a.server:
-                client_args = ["--server", PI if a.server == "pi" else a.server] + client_args
-                print(f"-- {a.server}: using your saved login", file=sys.stderr)
-        clock = parse_clock(a.clock, clock_default) if a.clock else clock_default
-        cwd = str(Path(tmp) / "work")
-        os.mkdir(cwd)
-        env = child_env(config, tz, clock, cwd, cols, rows)
-        argv_child = [a.python, str(Path(__file__).resolve()), "--_client", a.cli] + client_args
-        sess = Session(argv_child, env, cols, rows, cwd, redact=secrets_in(config))
-        run = Runner(sess, a.timeout)
-        code = 0
+    code, died, status, misses = 0, False, None, []
+    with driven(fake=a.fake, server=a.server, size=a.size, client_args=shlex.split(a.args),
+                clock=a.clock, tz=a.tz, config=a.config, cli=a.cli, python=a.python,
+                startup=a.startup, timeout=a.timeout) as d:
         try:
-            sess.settle(quiet=0.5, cap=2.5, first_timeout=a.startup)
-            if not sess.alive:
-                run.emit(run.screen_dump(f"the client exited at startup (status {sess.status})"))
-                return 1
-            run.run(steps)
-            code = 1 if run.failed else 0
+            if not d.sess.alive:
+                d.run.emit(d.run.screen_dump(
+                    f"the client exited at startup (status {d.sess.status})"))
+                code = 1
+            else:
+                d.run.run(steps)
+                code = 1 if d.run.failed else 0
         except StepError as e:
             print(f"tui_drive: {e}", file=sys.stderr)
             code = 2
-        finally:
-            sess.pump(0.0)
-            died = not sess.alive
-            sess.close()
-        if not a.quiet:
-            extra = ""
-            if fake is not None and fake.misses:
-                extra = "; fake 404: " + ", ".join(sorted(set(fake.misses))[:6])
-            print(f"-- done: exit {code}{'; client had exited (status %s)' % sess.status if died else ''}"
-                  f"{extra}")
-        return code
-    finally:
-        if http:
-            http.stop()
-        shutil.rmtree(tmp, ignore_errors=True)
+        d.sess.pump(0.0)
+        died, status = not d.sess.alive, d.sess.status
+        misses = sorted(set(d.fake.misses))[:6] if d.fake is not None else []
+    if not a.quiet:
+        print(f"-- done: exit {code}{'; client had exited (status %s)' % status if died else ''}"
+              + ("; fake 404: " + ", ".join(misses) if misses else ""))
+    return code
 
 
 if __name__ == "__main__":
