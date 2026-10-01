@@ -13,7 +13,8 @@
   python -m backend.cli backup [--if-configured]     # rclone the state to the remote
   python -m backend.cli restore [REMOTE] [--to DIR] [--secrets|--no-secrets] [--force]
   python -m backend.cli gitea-setup [--dry-run] [--user U] [--port N] [--password-stdin]
-                                   [--reset-password] [--yes]  # install/configure Gitea
+                                   [--reset-password] [--yes] [--access]  # install/configure Gitea
+                                   # --access: only give every enabled account read on every repo
   python -m backend.cli docker-setup [--dry-run] [--rebuild] [--yes]  # build + enable Docker boxes
   python -m backend.cli doctor [--json]              # how far the install got; the next fix per stage
   python -m backend.cli import-skill <folder|https-git-url[#subdir]|clawhub:slug> [--name N] [--replace]
