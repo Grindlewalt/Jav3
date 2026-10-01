@@ -292,6 +292,20 @@ async def test_runs_and_a_run_over_http_and_the_group_ack(db, client):
     assert (await client.get("/api/security/runs")).json()["runs"] == []
 
 
+async def test_the_runs_list_can_carry_each_cards_newest_events(db, client):
+    await _conv(db, 50, summary="a chat")
+    await _call(db, 50, "run_code", {"command": "ls"}, call_id="c1")
+    for i in range(3):
+        await _ev(db, kind="write_flag", project="p", conversation_id=50, summary=f"w{i}",
+                  call_id="c1", detail={"path": f"f{i}.py"})
+    plain = (await client.get("/api/security/runs")).json()["runs"][0]
+    assert "events" not in plain
+    full = (await client.get("/api/security/runs?events=2")).json()["runs"][0]
+    assert [e["summary"] for e in full["events"]] == ["w2", "w1"]        # newest first, capped
+    assert full["events"][0]["doing"]["step"]["tool"] == "run_code"
+    assert full["kinds"][0]["n"] == 3
+
+
 async def test_the_existing_endpoints_still_work(db, client):
     await _ev(db, kind="write_flag", project="p", summary="w")
     r = await client.get("/api/security/events?unacknowledged=true&queue=true")

@@ -298,13 +298,15 @@ def _card(g: dict, running) -> dict:
     }
 
 
-async def list_runs(db: aiosqlite.Connection, *, queue: bool = True, sweep: bool = True) -> dict:
+async def list_runs(db: aiosqlite.Connection, *, queue: bool = True, sweep: bool = True,
+                    events: int = 0) -> dict:
     """The Queue's cards. `queue` keeps the groups with something visible waiting
     (need-you or an agent report); `sweep` first resolves the info-only groups
-    whose run has ended."""
+    whose run has ended; `events` > 0 puts each card's newest N events in it
+    (need-you and reports, with `doing`), so one request draws the whole Queue."""
     if sweep:
         await sweep_finished(db)
-    groups, _ = await _groups(db)
+    groups, convs = await _groups(db)
     running = await _running_roots(db)
     cards = []
     for g in groups.values():
@@ -313,7 +315,11 @@ async def list_runs(db: aiosqlite.Connection, *, queue: bool = True, sweep: bool
         if not queue and not (g["need"] or g["report"] or g["record"] or g["filtered"]):
             continue
         run = None if g["group"] != "run" or running is None else g["root"] in running
-        cards.append(_card(g, run))
+        card = _card(g, run)
+        if events > 0:
+            rows = sorted(g["need"] + g["report"], key=lambda e: -e["id"])[:events]
+            card["events"] = [{**ev, "doing": await doing(db, ev, convs)} for ev in rows]
+        cards.append(card)
     cards.sort(key=lambda c: (-TIER_RANK.get(c["tier"], -1), -c["newest_id"]))
     return {"runs": cards,
             "totals": {"runs": len(cards), "need": sum(c["counts"]["need"] for c in cards),

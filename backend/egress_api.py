@@ -390,13 +390,13 @@ async def security_events(unacknowledged: bool = False, limit: int = 100,
 
 
 @security_router.get("/runs")
-async def security_runs(queue: bool = True):
+async def security_runs(queue: bool = True, events: int = 0):
     """The Queue as cards, one per run (backend/secruns.py): counts per kind,
     the worst tier on top, running or finished. Resolves the info-only groups
-    whose run has ended first."""
+    whose run has ended first. `events=N` puts each card's newest N events in it."""
     db = await get_db()
     try:
-        return await secruns.list_runs(db, queue=queue)
+        return await secruns.list_runs(db, queue=queue, events=max(0, min(events, 50)))
     finally:
         await db.close()
 

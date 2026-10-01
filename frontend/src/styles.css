@@ -4505,3 +4505,53 @@ a:has(> .nav-dot) { position: relative; }
   padding: var(--sp-6) var(--sp-2); }
 .desk-idle p { margin: 0; max-width: 46ch; }
 .desk-idle-title { font-weight: 600; }
+
+/* security queue: one card per run */
+.srun-list { display: flex; flex-direction: column; gap: var(--sp-5); }
+.srun { background: var(--panel); border: 1px solid var(--border); border-left-width: 3px;
+  border-radius: 8px; padding: var(--sp-4) var(--sp-5); font-size: 13px; }
+.srun.sev-info { border-left-color: var(--accent); }
+.srun.sev-warn { border-left-color: var(--amber); }
+.srun.sev-crit { border-left-color: var(--red); }
+.srun-head { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; min-width: 0; }
+.srun-title { min-width: 0; overflow-wrap: anywhere; }
+.srun-state.running { color: var(--green); border-color: var(--green); }
+.srun-counts { margin: var(--sp-2) 0 var(--sp-3); color: var(--dim); }
+.srun-link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer;
+  font: inherit; text-decoration: underline; text-align: left; }
+.srun-link:hover { color: var(--text); }
+.srun-filtered { margin: 0 0 var(--sp-3); padding: var(--sp-3) var(--sp-4) var(--sp-3) var(--sp-6);
+  border-left: 2px solid var(--border); font-size: 12px; list-style: none; }
+.srun-filtered li { margin: 2px 0; overflow-wrap: anywhere; }
+.srun-kind { border-top: 1px solid var(--border); padding-top: var(--sp-4); margin-top: var(--sp-4); }
+.srun-ev { margin-bottom: var(--sp-4); }
+.srun-evtop { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.srun-evtitle { overflow-wrap: anywhere; font-weight: 600; }
+.srun-subjects, .srun-subject { color: var(--dim); overflow-wrap: anywhere; }
+.srun-more { margin: 0 0 var(--sp-3); font-size: 12px; }
+.srun-doing { margin: var(--sp-3) 0; padding: var(--sp-3) var(--sp-5);
+  background: var(--bg-soft); border-radius: 6px; border-left: 2px solid var(--border); }
+.srun-untrusted { color: var(--amber); }
+.srun-step { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.srun-says { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.srun-actions { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; }
+.srun-ack { margin-left: auto; }
+.srun-mute { position: relative; display: inline-block; }
+.srun-mute > summary { list-style: none; cursor: pointer; display: inline-block; }
+.srun-mute > summary::-webkit-details-marker { display: none; }
+.srun-mute-menu { position: absolute; z-index: 5; top: 100%; left: 0; margin-top: 2px;
+  display: flex; flex-direction: column; gap: 2px; padding: var(--sp-3);
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: var(--shadow-pop); white-space: nowrap; }
+.srun-foot { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap;
+  border-top: 1px solid var(--border); padding-top: var(--sp-4); margin-top: var(--sp-3); }
+/* "Open chat at step": the step the chat scrolled to */
+.tool-row.step-hit, .tool-fold.step-hit { animation: step-hit 3.5s ease-out; }
+@keyframes step-hit {
+  0%, 60% { box-shadow: 0 0 0 2px var(--accent); }
+  100% { box-shadow: 0 0 0 2px transparent; }
+}
+@media (max-width: 640px) {
+  .srun-ack { margin-left: 0; }
+  .srun-actions > * { flex: 0 0 auto; }
+}

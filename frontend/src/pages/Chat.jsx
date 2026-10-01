@@ -333,6 +333,26 @@ export default function Chat({
   useLayoutEffect(() => { followRun() }, [messages, followRun])
   useDockHeight(dockRef)
 
+  // A security card's "Open chat at step" (/c/<id>?step=<n>, kept by routes.jsx):
+  // once the transcript has rendered, scroll the message list to that step and
+  // flash it. Direct scrollTop, like the follow logic: never the page.
+  useEffect(() => {
+    if (!conversationId || !messages.length) return
+    let want = null
+    try { want = sessionStorage.getItem('jarvis.chat.step') } catch { /* private mode */ }
+    if (!want) return
+    const [cid, step] = want.split(':')
+    if (Number(cid) !== conversationId) return
+    const el = document.getElementById(`step-${step}`)
+    const box = scrollRef.current
+    if (!el || !box) return          // not drawn yet: the next messages change tries again
+    try { sessionStorage.removeItem('jarvis.chat.step') } catch { /* private mode */ }
+    const top = el.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop
+    box.scrollTop = Math.max(0, top - box.clientHeight / 3)
+    el.classList.add('step-hit')
+    setTimeout(() => el.classList.remove('step-hit'), 3600)
+  }, [conversationId, messages])
+
   // the composer grows with the draft, up to the CSS max-height. Past one line
   // the pill relaxes into a rounded box — .multi is that threshold.
   function autoGrow() {

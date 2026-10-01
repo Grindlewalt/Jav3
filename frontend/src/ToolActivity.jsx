@@ -66,6 +66,16 @@ export function humanizeTool(name, args = {}) {
 // into a group, which remounts them; remembering the ids keeps a row the
 // reader had open open, so finishing does not close what they were reading.
 const openRows = new Set()
+
+// "Open chat at step" (a security card): routes.jsx keeps `<chat id>:<step id>`
+// for the chat to scroll to. A group holding that step, and the step's row, open
+// themselves so it is on the page to be found (Chat.jsx scrolls to #step-<id>).
+// Each row carries its tool_calls id as `step`, set by the server.
+export function pendingStep() {
+  try { return (sessionStorage.getItem('jarvis.chat.step') || '').split(':')[1] || null }
+  catch { return null }
+}
+const isPending = (p) => p?.step != null && String(p.step) === pendingStep()
 const rememberOpen = (id, on) => {
   if (id == null) return
   if (on) openRows.add(id)
@@ -113,7 +123,7 @@ function ToolDetail({ part, full, onFull }) {
 }
 
 export const ToolRow = memo(function ToolRow({ part }) {
-  const [open, setOpen] = useState(() => part.id != null && openRows.has(part.id))
+  const [open, setOpen] = useState(() => isPending(part) || (part.id != null && openRows.has(part.id)))
   const [full, setFull] = useState(false)
   const status = rowStatus(part)
   const { glyph, title, arg } = toolLine(part.name, part.args)
@@ -121,7 +131,8 @@ export const ToolRow = memo(function ToolRow({ part }) {
   const badExit = exit && exit !== 'exit 0'
   const toggle = () => setOpen((o) => { rememberOpen(part.id, !o); return !o })
   return (
-    <div className={`tool-row ${status}${badExit ? ' warn' : ''}${open ? ' open' : ''}`}>
+    <div className={`tool-row ${status}${badExit ? ' warn' : ''}${open ? ' open' : ''}`}
+         id={part.step != null ? `step-${part.step}` : undefined}>
       <div className="tool-row-head" role="button" tabIndex={0} aria-expanded={open}
            onClick={toggle}
            onKeyDown={(e) => {
@@ -193,7 +204,7 @@ const FoldRow = memo(function FoldRow({ parts }) {
 // `expanded` lets a transcript-wide "expand all" drive every group at once;
 // each still toggles on its own afterwards.
 export const ActivityGroup = memo(function ActivityGroup({ parts, expanded, ms }) {
-  const [open, setOpen] = useState(() => !!expanded
+  const [open, setOpen] = useState(() => !!expanded || parts.some(isPending)
     || parts.some((p) => p.id != null && openRows.has(p.id)))
   useEffect(() => { if (expanded !== undefined) setOpen(expanded) }, [expanded])
   if (!parts?.length) return null
