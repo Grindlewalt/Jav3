@@ -199,6 +199,12 @@ class Desk:
     # desk is seen only by turns running in that box, and those turns see no
     # other computer (see _pool)
     box_id: str | None = None
+    # the operator holds this box's desktop (live desktop P3, backend/vm/boxdesk.py):
+    # monotonic start, else None. While it is set input verbs are refused here and the
+    # seat is told input is off; the grants row itself is never touched (a host
+    # restart in the middle cannot leave the agent locked out)
+    operator_since: float | None = None
+    used_by_operator_s: int = 0        # told to the model once, on its next result
 
     @property
     def shown(self) -> str:
@@ -359,9 +365,55 @@ async def get_grants(device_id: int) -> dict:
         await db.close()
 
 
-def _wire_grants(g: dict) -> dict:
-    return {"type": "grants", "screen": g["screen"], "input": g["input"],
+def _wire_grants(g: dict, d: "Desk | None" = None) -> dict:
+    # the seat of a desktop the operator is using hears input off, whatever the row says
+    held = d is not None and d.operator_since is not None
+    return {"type": "grants", "screen": g["screen"], "input": g["input"] and not held,
             "shell": g["shell"]}
+
+
+OPERATOR_HOLDS_ERR = ("the operator has taken control of the sandbox desktop; stop and "
+                      "wait. Screenshots still work; input comes back when they hand it back")
+
+
+async def hold_for_operator(d: Desk, since: float) -> None:
+    """The operator took this box's desktop (boxdesk.take, or a seat that
+    registered while they hold it): pause the agent's input. The refusal in
+    act() is the gate; telling the seat is the second lock, so the guest
+    refuses too."""
+    d.operator_since = since
+    try:
+        await d.send(_wire_grants(d.grants, d))
+    except Exception:  # noqa: BLE001 — a dead socket is reaped by its own loop
+        pass
+
+
+async def release_to_agent(d: Desk, seconds: float) -> None:
+    """Hand back: the real grants go to the seat again, the agent's frame is
+    forgotten (the screen changed under it: input needs a new screenshot) and
+    its next result says how long the operator used the desktop."""
+    d.operator_since = None
+    d.frame = None
+    d.used_by_operator_s += max(1, round(seconds))
+    d.grants = await get_grants(d.device_id)
+    try:
+        await d.send(_wire_grants(d.grants, d))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _operator_note(d: Desk, out: str) -> str:
+    """The one-time line on the agent's first result after a hand back. An
+    `error:` result keeps its first line (the loop reads it)."""
+    n, d.used_by_operator_s = d.used_by_operator_s, 0
+    line = (f"the operator used this desktop for {n} s: the screen has changed under "
+            "you, so look at a fresh screenshot before acting")
+    return f"{out}\n{line}" if out.startswith("error:") else f"{line}\n{out}"
+
+
+# set by boxdesk: called when the agent acts on a box desktop (so the window can
+# say "agent driving" without polling)
+activity_hook = None
 
 
 async def set_grants(device_id: int, *, screen: bool | None = None,
@@ -402,7 +454,7 @@ async def set_grants(device_id: int, *, screen: bool | None = None,
     if d is not None:
         d.grants = g
         try:
-            await d.send(_wire_grants(g))
+            await d.send(_wire_grants(g, d))
         except Exception:  # noqa: BLE001 — a dead socket is reaped by its own loop
             pass
     return g
@@ -468,7 +520,7 @@ def _clean_hello(hello: dict) -> dict:
 
 
 async def attach(device_id: int, name: str, ws, hello: dict, host_header: str = "",
-                 box_id: str | None = None) -> Desk:
+                 box_id: str | None = None, operator_since: float | None = None) -> Desk:
     """Register a freshly authenticated socket. A second connection from the
     same token replaces the first (a restarted client), which is told why."""
     old = _desks.get(device_id)
@@ -479,13 +531,14 @@ async def attach(device_id: int, name: str, ws, hello: dict, host_header: str = 
         except Exception:  # noqa: BLE001
             pass
     d = Desk(device_id=device_id, name=name, ws=ws, hello=_clean_hello(hello),
-             host_header=(host_header or "")[:300], box_id=box_id)
+             host_header=(host_header or "")[:300], box_id=box_id,
+             operator_since=operator_since)
     if box_id:
         _box_seen.add(box_id)
     d.locked, d.asleep = _lock_flag(hello), hello.get("asleep") is True
     d.grants = await get_grants(device_id)
     _desks[device_id] = d
-    await d.send(_wire_grants(d.grants))
+    await d.send(_wire_grants(d.grants, d))
     if _session_gap(("start", device_id)):
         await _event("desk_session", f"computer '{name}' connected for computer use "
                      f"({d.hello['backend'] or '?'} on {d.hello['platform'] or '?'})",
@@ -1438,6 +1491,17 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     """Run one desk action for the current turn; the tools' only entry point.
     Returns the tool result string (with the screenshot inline when there is
     one). Every refusal is `error: …` with the reason the model can act on."""
+    out = await _act(verb, params, want)
+    try:
+        d = resolve(want)
+    except DeskError:
+        return out
+    if d.used_by_operator_s and d.operator_since is None:
+        out = _operator_note(d, out)          # the operator used it since the agent last looked
+    return out
+
+
+async def _act(verb: str, params: dict, want: str | None) -> str:
     try:
         d = resolve(want)
     except DeskError as e:
@@ -1446,6 +1510,11 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     cap = CAPABILITY.get(verb)
     if cap is None:
         return f"error: unknown action {verb!r}"
+    if cap == "input" and d.operator_since is not None:
+        # the operator is at the screen (live desktop P3). Audited, but no security
+        # event: waiting is the right answer, not an attack. Screenshots stay allowed.
+        await _audit(d, verb, {}, False, OPERATOR_HOLDS_ERR)
+        return f"error: {OPERATOR_HOLDS_ERR}"
     g = await get_grants(d.device_id)
     granted = g[cap] if cap != "shell" else g["shell"] != "off"
     if not granted:
@@ -1515,6 +1584,11 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
     if runtime.conversation_id.get() is not None:
         d.turns[runtime.conversation_id.get()] = time.monotonic()
     d.last_action_at = time.time()
+    if d.box_id and activity_hook is not None:
+        try:
+            activity_hook(d)
+        except Exception:  # noqa: BLE001 — a label in a window never stops the action
+            pass
     if cap == "shell":
         return await _shell(d, p, g, op)
     # whatever comes back — a screen, shell output, even the client's error
