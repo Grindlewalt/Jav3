@@ -240,7 +240,7 @@ class ModelClient:
         # while nothing has streamed to the caller yet (adapters.retrying).
         raw: dict | None = None
         async for ev in retrying(lambda: self._stream_once(base, key, payload)):
-            if ev["type"] == "token":
+            if ev["type"] in ("token", "retry"):
                 yield ev
             else:
                 raw = ev
@@ -256,6 +256,10 @@ class ModelClient:
                 tcs = recovered
                 content = dsml_prose(content)   # the markup was the tool call
         yield {"type": "message", "content": content, "tool_calls": tcs,
+               # present only on a reply the output cap cut off: the loop must
+               # not take it for a finished answer (or run its last tool call)
+               **({"finish_reason": "length"} if raw.get("finish_reason") == "length"
+                  else {}),
                "usage": raw["usage"]}
 
     async def _stream_once(self, base: str, key: str, payload: dict) -> AsyncIterator[dict]:
@@ -264,6 +268,8 @@ class ModelClient:
         content_parts: list[str] = []
         tool_calls: dict[int, dict] = {}
         usage: dict | None = None
+        finish: str | None = None   # the last finish_reason the stream carried
+        done = False                # [DONE] arrived
         dsml = False   # once the native tool-call markup starts, stop streaming it
         watch_dsml = _is_deepseek_endpoint(base)
         tail = ""      # rolling window for mark detection across chunk splits —
@@ -285,14 +291,29 @@ class ModelClient:
                         continue
                     data = line[5:].strip()
                     if data == "[DONE]":
+                        done = True
                         break
-                    obj = json.loads(data)
+                    try:
+                        obj = json.loads(data)
+                    except ValueError:
+                        raise ModelError("model stream sent a line that is not JSON",
+                                         retryable=True) from None
+                    if not isinstance(obj, dict):
+                        continue
+                    if obj.get("error"):        # an error object in the stream
+                        raise _stream_error(obj["error"])
                     if obj.get("usage"):        # final include_usage chunk
                         usage = obj["usage"]
                     choices = obj.get("choices") or []
                     if not choices:             # usage-only chunk has no choices
                         continue
-                    delta = choices[0].get("delta", {})
+                    if choices[0].get("finish_reason"):
+                        finish = choices[0]["finish_reason"]
+                        if finish == "error":   # OpenRouter's way to say it broke mid-stream
+                            raise ModelError("model API stream error: the provider "
+                                             "ended the reply with finish_reason error",
+                                             retryable=True)
+                    delta = choices[0].get("delta") or {}
                     if delta.get("content"):
                         content_parts.append(delta["content"])
                         if not dsml and watch_dsml:
@@ -315,9 +336,24 @@ class ModelClient:
                         if fn.get("arguments"):
                             slot["function"]["arguments"] += fn["arguments"]
 
+        if not done and finish is None:
+            # the connection closed with neither the end marker nor a finish
+            # reason: what we hold is a prefix (a tool call cut mid-argument
+            # looks like a finished one), so it is asked for again
+            raise ModelError("model stream ended before the reply was complete "
+                             "(no [DONE] and no finish_reason)", retryable=True)
         yield {"type": "raw", "content": "".join(content_parts),
                "tool_calls": [tool_calls[i] for i in sorted(tool_calls)],
-               "usage": usage}
+               "finish_reason": finish, "usage": usage}
+
+
+def _stream_error(err) -> ModelError:
+    """An `error` object that arrived inside a 200 stream. An int code is its
+    HTTP status (5xx is retried, 4xx is not); anything else is not retried."""
+    msg = err.get("message") if isinstance(err, dict) else None
+    code = err.get("code") if isinstance(err, dict) else None
+    status = code if isinstance(code, int) and not isinstance(code, bool) else None
+    return ModelError(f"model API stream error: {msg or err}", status=status)
 
 
 def _shape_for_provider(payload: dict, base: str, name: str) -> None:

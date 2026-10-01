@@ -33,9 +33,13 @@ DEFAULT_MAX_OUTPUT = 32_000  # an uncatalogued model's output cap
 
 
 class ModelError(Exception):
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(self, message: str, status: int | None = None,
+                 retryable: bool | None = None):
         super().__init__(message)
         self.status = status
+        # a failure with no HTTP status that is still worth another attempt (a
+        # stream that ended early); None = judge by the status alone
+        self.retryable = retryable
 
 
 def client() -> httpx.AsyncClient:
@@ -45,9 +49,12 @@ def client() -> httpx.AsyncClient:
 
 async def retrying(once: Callable[[], AsyncIterator[dict]]) -> AsyncIterator[dict]:
     """Run one streaming attempt, retrying transient failures (connect errors,
-    5xx) with backoff — but only while nothing has streamed to the caller: once
-    a token is out a retry would duplicate visible output, so the error
-    propagates. Yields token events, then the attempt's single final event."""
+    dropped streams, 5xx) with backoff. Yields token events, then the attempt's
+    single final event. A model call has no side effect before its final event
+    (tool calls are acted on only once the message is whole), so a stream that
+    dies after some tokens can be asked again; the tokens already out are
+    announced as dropped with a {"type": "retry"} event so a client can clear
+    them instead of showing the answer twice."""
     yielded = False
     for attempt in range(settings.model_retries + 1):
         try:
@@ -59,9 +66,14 @@ async def retrying(once: Callable[[], AsyncIterator[dict]]) -> AsyncIterator[dic
         except (httpx.TransportError, ModelError) as e:
             status = getattr(e, "status", None)
             retryable = isinstance(e, httpx.TransportError) or (
-                status is not None and status >= 500)
-            if yielded or not retryable or attempt == settings.model_retries:
+                status is not None and status >= 500) or bool(
+                getattr(e, "retryable", False))
+            if not retryable or attempt == settings.model_retries:
                 raise
+            if yielded:
+                yielded = False
+                yield {"type": "retry", "attempt": attempt + 1,
+                       "reason": f"{type(e).__name__}: {e}"[:200]}
             await asyncio.sleep(settings.model_retry_backoff_seconds * (2 ** attempt))
 
 
@@ -285,6 +297,8 @@ async def _anthropic_once(route, payload: dict) -> AsyncIterator[dict]:
     if stop == "refusal" and not content and not calls:
         content = "(the model declined this request)"
     yield {"type": "raw", "content": content, "tool_calls": calls,
+           **({"finish_reason": "length"} if stop == "max_tokens" and (content or calls)
+              else {}),
            "usage": _anthropic_usage(start_usage, delta_usage),
            "provider_blocks": {"kind": "anthropic", "model": route.model_id,
                                "content": content_blocks}}
@@ -313,7 +327,7 @@ async def anthropic_complete(route, messages: list[dict], tools: list[dict] | No
     body = payload(True)
     try:
         async for ev in retrying(lambda: _anthropic_once(route, body)):
-            if ev["type"] == "token":
+            if ev["type"] in ("token", "retry"):
                 yield ev
             else:
                 final = ev
@@ -327,7 +341,7 @@ async def anthropic_complete(route, messages: list[dict], tools: list[dict] | No
             raise
         body = payload(False)
         async for ev in retrying(lambda: _anthropic_once(route, body)):
-            if ev["type"] == "token":
+            if ev["type"] in ("token", "retry"):
                 yield ev
             else:
                 final = ev
@@ -464,9 +478,11 @@ async def _gemini_once(route, payload: dict) -> AsyncIterator[dict]:
         elif p.get("text") and not p.get("thought"):
             texts.append(p["text"])
     content = "".join(texts)
+    cut = finish == "MAX_TOKENS" and bool(content or calls)
     if not content and not calls and finish not in (None, "STOP"):
         content = f"(the model stopped: {finish})"
     yield {"type": "raw", "content": content, "tool_calls": calls,
+           **({"finish_reason": "length"} if cut else {}),
            "usage": _gemini_usage(usage),
            "provider_blocks": {"kind": "google", "model": route.model_id,
                                "parts": parts}}
@@ -487,7 +503,7 @@ async def google_complete(route, messages: list[dict], tools: list[dict] | None,
     payload["generationConfig"] = gen
     final = None
     async for ev in retrying(lambda: _gemini_once(route, payload)):
-        if ev["type"] == "token":
+        if ev["type"] in ("token", "retry"):
             yield ev
         else:
             final = ev
