@@ -6,7 +6,7 @@ and no COLORTERM (what macOS Terminal.app gives it); pyte renders the bytes it w
 Steps are joined with "|" (a literal pipe is "\\|"):
 
   scripts/tui_drive.py --fake "type:/vms|key:enter|wait:1|show"
-  scripts/tui_drive.py --fake --size 80x24 "type:hello|key:enter|waitfor:Done|show|bg:"
+  scripts/tui_drive.py --fake --size 80x24 "type:hello|key:enter|waitfor:Not checked|show|bg:"
   scripts/tui_drive.py --server pi "key:left|wait:2|show"        # the Pi, your saved login
   scripts/tui_drive.py "type:/security|key:enter|waitfor:Queue@15|show"   # saved login
 
@@ -29,10 +29,11 @@ Steps:
 
 --fake serves tests/tui_fake_http.py (seeded chats, a running turn, boxes, security rows,
 agents) with a throw-away config dir and the client's time.time() pinned to the fake's
-clock. Without --fake the client uses your own ~/.config/jav3/credentials.json (never
-read or printed here); --server pi is 10.0.0.82:8000, any other value goes to the
-client's own --server. Exit status: 0, or 1 when a waitfor/expect failed or the client
-died; 2 for a bad step.
+clock. Without --fake the client uses your own ~/.config/jav3/credentials.json; the token
+is never printed (output is scrubbed of it) and --server must name the address that login
+was saved for (pi = 10.0.0.82:8000), so it cannot be sent elsewhere; --config DIR picks
+another saved login. --args "-r 4" passes arguments to the client. Exit status: 0, or 1
+when a waitfor/expect failed or the client died; 2 for a bad step or --server.
 """
 from __future__ import annotations
 

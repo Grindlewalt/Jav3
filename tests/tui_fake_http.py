@@ -20,8 +20,8 @@ reply); a message containing "slow" runs a tool that never ends until the chat i
 stopped, "error" ends in an error event, "ask" asks the operator a question and waits
 for the answer. Chat #3 is already running: `jav3 -r 3` attaches to it.
 
-Standalone, to point a client at it by hand:
-    python tests/tui_fake_http.py [port]   (log in with the line it prints)
+Standalone, to try the client against it by hand (prints the command to run):
+    python tests/tui_fake_http.py [port]
 """
 from __future__ import annotations
 
@@ -658,8 +658,13 @@ class SeededServer(FakeServer):
 
 
 if __name__ == "__main__":   # pragma: no cover
+    import tempfile
     srv = SeededServer()
     with HttpFake(srv.handle, int(sys.argv[1]) if len(sys.argv) > 1 else 0) as http:
-        print(f"fake Jav3 server on http://{http.address} (session login; any password)",
-              flush=True)
+        cfg = Path(tempfile.mkdtemp(prefix="tui-fake-", dir="/tmp"))
+        (cfg / "jav3").mkdir(mode=0o700)
+        (cfg / "jav3" / "credentials.json").write_text(json.dumps(
+            {"address": http.address, "session": "fake-session", "username": USERNAME}))
+        print(f"fake Jav3 server on http://{http.address}; try the client against it with\n"
+              f"  XDG_CONFIG_HOME={cfg} python clients/jav3cli/jav3", flush=True)
         threading.Event().wait()
