@@ -11,11 +11,30 @@ re-summarize every turn. Replaces the old silent 40-message cliff.
 The trigger is an EFFECTIVE window — context minus reserved output minus a
 buffer for tool specs / rule injections / estimate error — not the raw window.
 """
+import json
+
 import aiosqlite
 
 from .agent.model import model
 from .config import settings
 from .memory import estimate_tokens
+
+# What a turn that died leaves as its assistant row. chat._persist_failure
+# writes the first form; the second is what the guest loop's crash handler put
+# in a `final` before the host learned to raise it, and older rows still carry
+# it. Everything that needs to know "this turn died" asks is_failed_turn.
+FAILED_TURN_PREFIX = "(turn failed:"
+FAILED_TURN_PREFIXES = (FAILED_TURN_PREFIX, "(guest loop error:")
+
+# The most tool calls of a dead turn that go back into the model's history. A
+# turn that ran 300 calls before the guest dropped must not put 300 results in
+# the next request: the last ones are what "continue" needs.
+FAILED_TURN_TRACE_CALLS = 30
+
+
+def is_failed_turn(content: str | None) -> bool:
+    """True for an assistant row that records a turn which died."""
+    return (content or "").lstrip().startswith(FAILED_TURN_PREFIXES)
 
 # The structure is the point: a free-form summary drifts, this one forces the
 # summarizer to carry forward intent, state and an exact next step. Text-only
@@ -154,7 +173,8 @@ async def load_history(db: aiosqlite.Connection,
 
 async def assemble(db: aiosqlite.Connection, conversation_id: int,
                    system_prompt: str, tool_trace: int = 0,
-                   window: int | None = None) -> list[dict]:
+                   window: int | None = None,
+                   failed_trace: int = 0) -> list[dict]:
     """The model-facing history for a turn: [summary messages?] + verbatim
     tail, compacting first if the effective window demands it. This is what
     chat.py hands to run_turn in place of the old LIMIT-40 query.
@@ -163,6 +183,9 @@ async def assemble(db: aiosqlite.Connection, conversation_id: int,
     with every result truncated to that many characters — see _with_tool_trace.
     `window` is the real token budget for system + history when the caller
     knows it (the voice local tier's 16k slot).
+    `failed_trace` > 0 replays the tool calls of a dead turn that sits directly
+    before the new message (and says so) — see _with_failed_turn. Moot when
+    `tool_trace` already replays every turn.
     """
     summary, rows = await load_history(db, conversation_id)
     if len(rows) > 1 and needs_compaction(system_prompt, rows, summary, window):
@@ -175,6 +198,8 @@ async def assemble(db: aiosqlite.Connection, conversation_id: int,
     rows = [r for r in rows if not _is_empty_interrupt(r["role"], r["content"])]
     if tool_trace:
         history = await _with_tool_trace(db, conversation_id, rows, tool_trace)
+    elif failed_trace:
+        history = await _with_failed_turn(db, conversation_id, rows, failed_trace)
     else:
         history = [{"role": r["role"], "content": r["content"]} for r in rows]
     return (summary_messages(summary) if summary else []) + history
@@ -214,14 +239,111 @@ async def _with_tool_trace(db: aiosqlite.Connection, conversation_id: int,
     out: list[dict] = []
     for r in rows:
         for c in by_msg.get(r["id"], ()):
-            call_id = f"h{c['id']}"
-            out.append({"role": "assistant", "content": None, "tool_calls": [
-                {"id": call_id, "type": "function",
-                 "function": {"name": c["tool"], "arguments": c["args"] or "{}"}}]})
-            out.append({"role": "tool", "tool_call_id": call_id,
-                        "content": (c["result"] or "")[:cap]})
+            out += _call_messages(c, c["args"] or "{}", (c["result"] or "")[:cap])
         out.append({"role": r["role"], "content": r["content"]})
     return out
+
+
+def _call_messages(c, args: str, result: str) -> list[dict]:
+    """One tool_calls row as the pair of messages a model reads it as: the
+    assistant's call and the tool's answer."""
+    call_id = f"h{c['id']}"
+    return [{"role": "assistant", "content": None, "tool_calls": [
+                {"id": call_id, "type": "function",
+                 "function": {"name": c["tool"], "arguments": args}}]},
+            {"role": "tool", "tool_call_id": call_id, "content": result}]
+
+
+# The user-side note ahead of the new message when the turn before it died:
+# like chat.INTERRUPT_NOTE, it makes the new message win over the dead request.
+FAILED_TURN_NOTE = (
+    "[The previous turn died before it finished ({reason}). {steps} "
+    "Anything it left running in the background (a server, a build) may be gone. "
+    "If this message asks you to continue, pick up from the last step after "
+    "checking the current state (files, git status, running processes) instead "
+    "of assuming it; otherwise answer this message on its own and do not resume "
+    "the dead turn.]")
+
+
+def _failure_reason(content: str | None) -> str:
+    """The row's text without its "(turn failed: ...)" wrapper, one line, cut."""
+    text = (content or "").strip()
+    for prefix in FAILED_TURN_PREFIXES:
+        if text.startswith(prefix):
+            text = text[len(prefix):].strip()
+            break
+    if text.endswith(")"):
+        text = text[:-1].rstrip()
+    text = " ".join(text.split())
+    return (text[:300] + "…") if len(text) > 300 else (text or "no reason given")
+
+
+def _shrink(value, cap: int):
+    """`value` with every string longer than `cap` cut (and said to be)."""
+    if isinstance(value, str):
+        return value if len(value) <= cap else f"{value[:cap]}… [+{len(value) - cap} chars]"
+    if isinstance(value, list):
+        return [_shrink(v, cap) for v in value]
+    if isinstance(value, dict):
+        return {k: _shrink(v, cap) for k, v in value.items()}
+    return value
+
+
+def _trim_args(raw: str | None, cap: int) -> str:
+    """A call's arguments with the long strings (a whole file written, a big
+    patch) cut, still valid JSON: a provider may parse the history's
+    arguments, so the cut is made on the values, never on the text."""
+    raw = raw or "{}"
+    if len(raw) <= cap:
+        return raw
+    try:
+        return json.dumps(_shrink(json.loads(raw), cap), ensure_ascii=False)
+    except ValueError:
+        return json.dumps({"arguments": f"{raw[:cap]}… [+{len(raw) - cap} chars]"})
+
+
+async def _with_failed_turn(db: aiosqlite.Connection, conversation_id: int,
+                            rows: list[dict], cap: int) -> list[dict]:
+    """History where a turn that DIED, directly before the new message, keeps
+    its tool work: its calls ahead of its "(turn failed: ...)" row, as real
+    assistant(tool_calls) + tool messages, and a user-side note ahead of the new
+    message saying what happened and what to do with it.
+
+    The history is prose only (a finished turn's tool calls stay out of it, as
+    they cost context), so a dead turn read back as one failure line and the
+    model, told "continue", had to rediscover every step. Only the most recent
+    dead turn is replayed, and only when nothing came between it and the new
+    message. Results and long arguments are cut to `cap` characters and only
+    the last FAILED_TURN_TRACE_CALLS calls ride along; the note says how many
+    were left out. A call that was still running when the turn died was never
+    saved, so the note says that too.
+    """
+    plain = [{"role": r["role"], "content": r["content"]} for r in rows]
+    if (len(rows) < 2 or rows[-1]["role"] != "user" or rows[-2]["role"] != "assistant"
+            or not is_failed_turn(rows[-2]["content"])):
+        return plain
+    async with db.execute(
+        "SELECT id, tool, args, result FROM tool_calls "
+        "WHERE conversation_id = ? AND message_id = ? ORDER BY id",
+            (conversation_id, rows[-2]["id"])) as cur:
+        calls = await cur.fetchall()
+    shown = calls[-FAILED_TURN_TRACE_CALLS:]
+    left_out = len(calls) - len(shown)
+    trace: list[dict] = []
+    for c in shown:
+        result = c["result"] or ""
+        if len(result) > cap:
+            result = f"{result[:cap]}… [+{len(result) - cap} chars]"
+        trace += _call_messages(c, _trim_args(c["args"], cap), result)
+    if not shown:
+        steps = "It had saved no tool calls."
+    else:
+        steps = (f"Its last {len(shown)} tool call{'s' * (len(shown) != 1)} "
+                 f"{'are' if len(shown) != 1 else 'is'} in the history above, results shortened"
+                 + (f"; {left_out} earlier ones are not shown" if left_out else "")
+                 + ". A call still running when it died was not saved.")
+    note = FAILED_TURN_NOTE.format(reason=_failure_reason(rows[-2]["content"]), steps=steps)
+    return [*plain[:-2], *trace, plain[-2], {"role": "user", "content": note}, plain[-1]]
 
 
 def _is_empty_interrupt(role: str, content: str | None) -> bool:

@@ -997,9 +997,13 @@ async def _run_chat_turn(conversation_id: int, ephemeral: bool,
         # which silently drops the front of the prompt, tool specs included.
         # The tool specs are measured, not guessed: they are the biggest and
         # most variable part of that budget, and they are right here.
+        # A turn that DIED right before this message gets its tool calls back
+        # (failed_trace) so "continue" resumes instead of rediscovering; the
+        # guest takes this same history, so it needs nothing of its own.
         history = await compaction.assemble(
             db, conversation_id, system_prompt,
             tool_trace=settings.voice_local_tool_trace_chars if tools_only else 0,
+            failed_trace=0 if voice else settings.failed_turn_trace_chars,
             window=(settings.voice_local_context_window
                     - settings.voice_local_max_tokens
                     - estimate_tokens(json.dumps(tools))
@@ -1335,7 +1339,7 @@ async def _persist_failure(db, conversation_id: int, msg: str, model_name,
         cur = await db.execute(
             "INSERT INTO messages (conversation_id, role, content, model) "
             "VALUES (?, 'assistant', ?, ?)",
-            (conversation_id, f"(turn failed: {msg[:500]})", model_name))
+            (conversation_id, f"{compaction.FAILED_TURN_PREFIX} {msg[:500]})", model_name))
         await _link_tool_calls(db, conversation_id, tools_before, cur.lastrowid)
         await db.commit()
         if rec is not None:
@@ -1927,6 +1931,48 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
         # start_turn registers the turn in _active_turns before this returns
         if claimed is not None:
             _posting.discard(claimed)
+
+
+# What the one-click resume sends. A plain request, so the transcript reads
+# naturally; compaction.FAILED_TURN_NOTE tells the model what happened.
+RESUME_MESSAGE = "Continue from where the previous turn stopped."
+
+
+@router.post("/chat/{conversation_id}/resume")
+async def resume_chat(conversation_id: int, actor: dict = Depends(require_actor)):
+    """Pick up a chat whose last turn died (guest crash, lost connection,
+    provider error): sends RESUME_MESSAGE as the next message and streams the
+    turn like POST /api/chat. The model's history carries the dead turn's tool
+    calls (compaction._with_failed_turn), so it continues from the last step.
+
+    409 turn_in_progress while a turn runs; 409 with a plain sentence when the
+    conversation's last message is not a failed turn (nothing to resume, or the
+    operator has already moved on); 404 for an unknown chat."""
+    if conversation_id in _posting or conversation_id in _running_loops():
+        raise HTTPException(status_code=409, detail="turn_in_progress")
+    _posting.add(conversation_id)
+    try:
+        db = await get_db()
+        try:
+            async with db.execute("SELECT 1 FROM conversations WHERE id = ?",
+                                  (conversation_id,)) as cur:
+                if not await cur.fetchone():
+                    raise HTTPException(status_code=404, detail="no such conversation")
+            async with db.execute(
+                "SELECT role, content FROM messages WHERE conversation_id = ? "
+                "ORDER BY id DESC LIMIT 1", (conversation_id,)) as cur:
+                last = await cur.fetchone()
+        finally:
+            await db.close()
+        if (last is None or last["role"] != "assistant"
+                or not compaction.is_failed_turn(last["content"])):
+            raise HTTPException(
+                status_code=409,
+                detail="the last turn did not fail, so there is nothing to resume")
+        return await _post_chat(
+            ChatRequest(message=RESUME_MESSAGE, conversation_id=conversation_id), actor)
+    finally:
+        _posting.discard(conversation_id)
 
 
 async def _post_chat(body: ChatRequest, actor: dict):
