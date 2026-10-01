@@ -4505,3 +4505,20 @@ a:has(> .nav-dot) { position: relative; }
   padding: var(--sp-6) var(--sp-2); }
 .desk-idle p { margin: 0; max-width: 46ch; }
 .desk-idle-title { font-weight: 600; }
+
+/* live desktop take-over (P3): the click-to-take layer, the control bars */
+.desk-stage { position: relative; flex: 1 1 auto; min-height: 140px; min-width: 0;
+  display: flex; flex-direction: column; }
+.desk-stage > .desk-screen { flex: 1 1 auto; }
+.desk-takeover { position: absolute; inset: 0; z-index: 2; cursor: pointer;
+  border-radius: var(--radius-md); }
+.desk-takeover:hover, .desk-takeover:focus-visible { outline: 2px solid var(--accent);
+  outline-offset: -2px; background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.desk-bar { display: flex; align-items: center; gap: var(--sp-4); flex-shrink: 0;
+  padding: var(--sp-2) var(--sp-5); border-radius: var(--radius-md); font-size: var(--fs-sm);
+  background: var(--panel-2); border: 1px solid var(--border); }
+.desk-bar.agent { border-color: var(--amber); }
+.desk-bar.you { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
+.desk-bar.you button { background: var(--accent-ink); color: var(--text); border-color: var(--accent-ink); }
+.desk-status.agent { color: var(--amber); }
+.desk-status.you { color: var(--accent); font-weight: 600; }

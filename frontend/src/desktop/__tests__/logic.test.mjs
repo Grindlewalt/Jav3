@@ -1,8 +1,9 @@
 // node frontend/src/desktop/__tests__/logic.test.mjs
 import assert from 'node:assert/strict'
 import {
-  SANDBOX_WARNING, WATCH_LABEL, boxOptionLabel, candidateBoxes, displayWsUrl, eventTouches, needLine,
-  panelMode, pickBox, startBlocked, startLabel, viewersText,
+  AGENT_ACTIVE_MS, SANDBOX_WARNING, agentActive, boxOptionLabel, candidateBoxes, canTake, displayWsUrl,
+  eventTouches, heldSeconds, mmss, needLine, newViewerId, panelMode, pickBox, startBlocked, startLabel,
+  statusLabel, stopTurns, takeLine, takesOver, viewOf, viewersText,
 } from '../logic.js'
 
 const rows = [
@@ -77,9 +78,70 @@ assert.equal(eventTouches({ type: 'stream_open' }, 'p-game'), false)
 assert.equal(eventTouches(null, 'p-game'), false)
 
 // the words the page must say
-assert.equal(WATCH_LABEL, 'watching · view only')
 assert.match(SANDBOX_WARNING, /sandbox, not your computer/)
 assert.match(SANDBOX_WARNING, /don’t sign in/)
+assert.match(SANDBOX_WARNING, /type anything private/)
 assert.match(SANDBOX_WARNING, /agent can read/)
+
+// the viewer id the server's regexp takes (8-64 of [A-Za-z0-9_-]), different each time
+for (const r of [Math.random, () => 0, () => 0.999999]) {
+  assert.match(newViewerId(r), /^[A-Za-z0-9_-]{8,64}$/)
+}
+assert.notEqual(newViewerId(), newViewerId())
+assert.equal(displayWsUrl({ protocol: 'http:', host: 'h:8000' }, 'p-game', 'v-abc12345'),
+  'ws://h:8000/api/vm/boxes/p-game/display/ws?viewer=v-abc12345')
+
+assert.equal(mmss(41), '00:41')
+assert.equal(mmss(125), '02:05')
+assert.equal(mmss(3725), '1:02:05')
+assert.equal(mmss(-3), '00:00')
+assert.equal(mmss(undefined), '00:00')
+
+// "agent driving" while its last action is recent, counted on from when the status arrived
+assert.equal(agentActive(null, 1000), false)
+assert.equal(agentActive({ active_age_s: null, turns: [] }, 1000), false)
+assert.equal(agentActive({ active_age_s: 0, at: 1000 }, 1000 + AGENT_ACTIVE_MS - 1), true)
+assert.equal(agentActive({ active_age_s: 0, at: 1000 }, 1000 + AGENT_ACTIVE_MS), false)
+assert.equal(agentActive({ active_age_s: 25, at: 1000 }, 1000 + 6000), false)       // already 25 s old
+
+// who holds it, as this window sees it
+const me = 'v-me'
+const mine = { holder: 'operator', viewer: me, by: 'grant', held_s: 41, at: 5000 }
+const theirs = { ...mine, viewer: 'v-other' }
+const agentHas = { holder: 'agent', viewer: null, by: null, held_s: 0, at: 5000 }
+assert.equal(viewOf(mine, me, true), 'you')            // control beats an agent that just acted
+assert.equal(viewOf(theirs, me, false), 'other')
+assert.equal(viewOf(agentHas, me, true), 'agent')
+assert.equal(viewOf(agentHas, me, false), 'watching')
+assert.equal(viewOf(null, me, false), 'watching')
+assert.equal(heldSeconds(mine, 5000 + 2500), 43)       // 41 s when it arrived, 2 s ago
+assert.equal(heldSeconds(agentHas, 9000), 0)
+
+assert.equal(statusLabel('you', 41), 'YOU have control: agent paused 00:41')
+assert.equal(statusLabel('agent', 0), '● agent driving')
+assert.equal(statusLabel('watching', 0), 'watching')
+assert.equal(statusLabel('other', 0), 'another window has control')
+assert.equal(takeLine('agent'), 'Agent is driving · click the screen to take over')
+assert.match(takeLine('watching'), /click the screen to take over/i)
+assert.match(takeLine('other'), /Another window/)
+
+// a click takes control only from a connected screen that nobody holds
+assert.equal(canTake('agent', 'watching'), true)
+assert.equal(canTake('watching', 'watching'), true)
+assert.equal(canTake('watching', 'connecting'), false)
+assert.equal(canTake('you', 'watching'), false)
+assert.equal(canTake('other', 'watching'), false)
+assert.equal(takesOver('a'), true)
+assert.equal(takesOver('Enter'), true)
+assert.equal(takesOver('Tab'), false)
+assert.equal(takesOver('Shift'), false)
+
+// [Stop] has something to stop only while the agent is driving
+const driving = { active_age_s: 1, turns: [12, 14], at: 0 }
+assert.deepEqual(stopTurns('agent', true, driving), [12, 14])
+assert.deepEqual(stopTurns('watching', false, driving), [])
+assert.deepEqual(stopTurns('agent', true, { turns: [] }), [])
+assert.deepEqual(stopTurns('you', true, driving), [])
+assert.deepEqual(stopTurns('agent', true, null), [])
 
 console.log('desktop logic ok')
