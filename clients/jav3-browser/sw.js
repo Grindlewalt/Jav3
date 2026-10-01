@@ -10,18 +10,23 @@ import {
 import {
   readPage, pageSig, domQuiet, clickEl, clickAt, typeActive, viewportInfo, typeEl, selectEl, hoverEl, keyPress, scrollToEl, scrollPage,
 } from './lib/page.js';
+import { clickElementTrusted, clickPointTrusted } from './lib/trusted.js';
 
 const ASK_TIMEOUT_MS = 60000;
 const LOAD_TIMEOUT_MS = 20000;
 const PING_MS = 20000;
 const SETTLE_MS = 1500;        // after an input: wait up to this long for the DOM to go quiet
 const QUIET_MS = 300;
+const CDP_TIMEOUT_MS = 4000;   // one debugger command; a hidden tab can leave a mouse event unanswered
+const ADOPT_WAIT_MS = 2000;    // after a click: wait this long for a popup to finish being adopted
 const ICON = 'icon.png';
 
 const S = {
   ws: null, pinger: null, retry: null, backoff: 1000,
   denyHosts: [], current: null, asks: new Map(),
   adopted: [],         // { id, url, at } popups adopted, so an action can report them
+  adopting: new Set(), // adoptions still running (joinSession is several awaits)
+  debugging: null,     // the tab chrome.debugger is attached to for a trusted click
 };
 
 // The last read's frame map for a tab, kept in session storage (not just in
@@ -50,7 +55,7 @@ async function loadFocusFrame(tabId) {
 }
 
 const cfg = () => chrome.storage.local.get({
-  address: '', token: '', name: '', paused: false, notify: true, sites: {},
+  address: '', token: '', name: '', paused: false, notify: true, trusted: true, sites: {},
 });
 const sess = () => chrome.storage.session.get({ tabs: [], windowId: null, groupId: null });
 const setStatus = (status, error = '') => chrome.storage.session.set({ status, error });
@@ -125,7 +130,7 @@ async function handleReq(m) {
     reply(m.id, true, out);
   } catch (e) {
     reply(m.id, false, { err: String(e.message || e).slice(0, 500),
-      code: e.cancelled ? 'cancelled' : (typeof e.code === 'string' ? e.code : 'failed') });
+      code: e.cancelled ? 'cancelled' : (typeof e.code === 'string' ? e.code : 'failed'), ...(e.extra || {}) });
   } finally {
     S.current = null;
     setTimeout(() => { if (!S.current) chrome.notifications.clear('jav3-act'); }, 4000);
@@ -133,7 +138,7 @@ async function handleReq(m) {
 }
 
 function cancelCurrent(why, byOperator) {
-  if (S.current) S.current.cancel(why);
+  if (S.current) { S.current.dead = true; S.current.cancel(why); }
   if (byOperator) {
     chrome.storage.local.set({ paused: true });
     send({ type: 'state', paused: true });
@@ -355,6 +360,99 @@ async function resolveElement(tabId, elementId) {
   return { frameId: f.frameId, n, host: f.host, url: f.url };
 }
 
+// --- trusted clicks (lib/trusted.js) --------------------------------------------------------
+// chrome.debugger is attached only for the click; the one command it may send
+// is a mouse event, and only to a tab Jav3 opened.
+
+const withTimeout = (p, ms, what) => Promise.race([
+  p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} timed out after ${ms / 1000} s`)), ms)),
+]);
+
+function trustedDeps(tabId, c) {
+  const cur = S.current;
+  const hasApi = !!(chrome.debugger && typeof chrome.debugger.attach === 'function');
+  return {
+    unavailable: () => (!hasApi ? 'no_permission' : c.trusted === false ? 'disabled' : null),
+    attach: async id => {
+      if (!(await sess()).tabs.includes(id)) throw new Error(`tab ${id} is not one Jav3 opened`);
+      try {
+        await withTimeout(chrome.debugger.attach({ tabId: id }, '1.3'), CDP_TIMEOUT_MS, 'attaching the debugger');
+      } catch (e) {
+        if (!/already attached/i.test(String((e && e.message) || e))) throw e;
+        // left over from an earlier worker: release it, once, and attach again
+        try { await chrome.debugger.detach({ tabId: id }); } catch { /* not ours */ }
+        await withTimeout(chrome.debugger.attach({ tabId: id }, '1.3'), CDP_TIMEOUT_MS, 'attaching the debugger');
+      }
+      S.debugging = id;
+    },
+    detach: async id => { S.debugging = null; await chrome.debugger.detach({ tabId: id }); },
+    send: (id, params) => withTimeout(
+      chrome.debugger.sendCommand({ tabId: id }, 'Input.dispatchMouseEvent', params), CDP_TIMEOUT_MS, 'the mouse event'),
+    inject: (frameId, fn, args) => inject(tabId, fn, args, frameId),
+    consent: url => allowed(url, c),
+    isDenied: url => isDeniedUrl(url, S.denyHosts),
+    sleep: ms => new Promise(r => setTimeout(r, ms)),
+    now: () => Date.now(),
+    cancelled: () => !!(cur && cur.dead),
+  };
+}
+
+// What a click reports about how it was delivered: the server words it.
+function viaOf(t) {
+  if (t.fallback) {
+    return { via: 'synthetic', via_why: t.fallback, ...(t.detail ? { via_detail: String(t.detail).slice(0, 160) } : {}),
+             ...(t.debugMs != null ? { debug_ms: t.debugMs } : {}) };
+  }
+  return t.ok ? { via: 'trusted', ...(t.debugMs != null ? { debug_ms: t.debugMs } : {}) } : null;
+}
+
+// A page-function result -> the error the worker replies with; `via` rides along
+// so the server can say why a click was only a script event.
+function withVia(err, via) {
+  if (via) err.extra = { ...(err.extra || {}), ...via };
+  return err;
+}
+
+// Release a debugger attachment an earlier worker left behind (the bar would
+// otherwise stay up): only ours can be detached from here.
+async function releaseDebugger() {
+  if (!chrome.debugger || !chrome.debugger.getTargets) return;
+  try {
+    const s = await sess();
+    for (const t of await chrome.debugger.getTargets()) {
+      if (t.attached && t.tabId != null && s.tabs.includes(t.tabId)) {
+        try { await chrome.debugger.detach({ tabId: t.tabId }); } catch { /* attached by someone else */ }
+      }
+    }
+  } catch { /* best effort */ }
+}
+
+// The operator pressed Cancel on Chrome's "started debugging this browser" bar:
+// the same as Cancel on the notification, the action stops and Jav3 pauses.
+if (chrome.debugger && chrome.debugger.onDetach) {
+  chrome.debugger.onDetach.addListener((source, reason) => {
+    if (reason === 'canceled_by_user' && S.debugging === source.tabId) {
+      S.debugging = null;
+      cancelCurrent('the operator closed the debugging bar', true);
+    }
+  });
+}
+
+// Popups a click spawned: wait for their adoption to finish (joinSession is
+// several awaits), then list them with their URL as it is NOW (a popup is
+// created blank and navigates a moment later).
+async function openedNow(since, excludeTab) {
+  await Promise.race([Promise.allSettled([...S.adopting]), new Promise(r => setTimeout(r, ADOPT_WAIT_MS))]);
+  const out = [];
+  for (const a of S.adopted.filter(x => x.at >= since && x.id !== excludeTab)) {
+    try {
+      const t = await chrome.tabs.get(a.id);
+      out.push({ tab: a.id, url: t.url || t.pendingUrl || a.url || '' });
+    } catch { out.push({ tab: a.id, url: a.url || '', closed: true }); }   // it closed itself again
+  }
+  return out;
+}
+
 async function run(verb, p, c) {
   if (verb === 'list_tabs') {
     notifyAct(verb, '', c);
@@ -493,10 +591,21 @@ async function run(verb, p, c) {
     // <iframe>), like key
     const since = Date.now();
     const prev = await focusedWindow();
-    let r;
+    let r, via = null;
     if (verb === 'click') {
-      r = await inject(p.tab, clickAt, [p.x, p.y, p.expect || null], 0);
-      if (r && r.ok) await saveFocusFrame(p.tab, 0);
+      // real mouse input where it can be sent (it also reaches into iframes: the
+      // point is top-viewport pixels, Chrome routes it); a script click otherwise
+      const deps = trustedDeps(p.tab, c);
+      let t = { fallback: deps.unavailable() };
+      if (!t.fallback) {
+        if (!tab.active) await chrome.tabs.update(p.tab, { active: true });   // a hidden tab takes no input
+        t = await clickPointTrusted(deps, { tabId: p.tab, x: p.x, y: p.y, expect: p.expect || null,
+                                            frames: await tabFrames(p.tab), topHost: host });
+      }
+      via = viaOf(t);
+      if (t.fallback) r = await inject(p.tab, clickAt, [p.x, p.y, p.expect || null], 0);
+      else r = t;
+      if (r && r.ok) await saveFocusFrame(p.tab, r.frameId > 0 ? r.frameId : 0);
     } else {
       r = await inject(p.tab, typeActive, [p.text, p.submit], 0);
       if (r && r.inFrame) {
@@ -507,12 +616,13 @@ async function run(verb, p, c) {
         r = await inject(p.tab, typeActive, [p.text, p.submit], fid);
       }
     }
-    if (!r || !r.ok || r.inFrame) throw pageErr(r, verb);
+    if (!r || !r.ok || r.inFrame) throw withVia(pageErr(r, verb), via);
     await new Promise(res => setTimeout(res, 300));
     await waitLoad(p.tab);
     await giveFocusBack(prev, tab.windowId);
-    return { data: { ...(await info(p.tab)), opened: openedSince(since, p.tab), text: r.text || '',
-                     sig: await settleSig(p.tab, SETTLE_MS) } };
+    return { data: { ...(await info(p.tab)),
+                     opened: verb === 'click' ? await openedNow(since, p.tab) : openedSince(since, p.tab),
+                     text: r.text || '', ...(via || {}), sig: await settleSig(p.tab, SETTLE_MS) } };
   }
   // element-bound verbs: click, type, select, hover, scroll_to_element. Resolve
   // the id to its frame from the last read of this tab.
@@ -524,25 +634,34 @@ async function run(verb, p, c) {
   }
   const since = Date.now();
   const prev = await focusedWindow();
-  let r;
-  if (verb === 'click') r = await inject(p.tab, clickEl, [el.n], el.frameId);
-  else if (verb === 'type') r = await inject(p.tab, typeEl, [el.n, p.text, p.submit], el.frameId);
+  let r, via = null;
+  if (verb === 'click') {
+    const deps = trustedDeps(p.tab, c);
+    let t = { fallback: deps.unavailable() };
+    if (!t.fallback) {
+      if (!tab.active) await chrome.tabs.update(p.tab, { active: true });   // a hidden tab takes no input
+      t = await clickElementTrusted(deps, { tabId: p.tab, frameId: el.frameId, n: el.n, frames: await tabFrames(p.tab) });
+    }
+    via = viaOf(t);
+    r = t.fallback ? await inject(p.tab, clickEl, [el.n], el.frameId) : t;
+  } else if (verb === 'type') r = await inject(p.tab, typeEl, [el.n, p.text, p.submit], el.frameId);
   else if (verb === 'select') r = await inject(p.tab, selectEl, [el.n, p.value ?? null, p.label ?? null], el.frameId);
   else if (verb === 'hover') r = await inject(p.tab, hoverEl, [el.n], el.frameId);
   else r = await inject(p.tab, scrollToEl, [el.n], el.frameId);
   if (r && r.code === 'covered') {
-    const cid = `f${parseElementId(p.element).frame}:${r.cover}`;
-    throw new VerbError(`element ${p.element} is covered by another element (${JSON.stringify(String(r.coverName || 'element'))}) — dismiss it first or click the covering element ${cid}`, 'covered');
+    const what = JSON.stringify(String(r.coverName || 'element'));
+    const then = r.cover != null ? `click the covering element f${parseElementId(p.element).frame}:${r.cover}` : 'try again';
+    throw withVia(new VerbError(`element ${p.element} is covered by another element (${what}) — dismiss it first or ${then}`, 'covered'), via);
   }
-  if (!r || !r.ok) throw pageErr(r, verb);
+  if (!r || !r.ok) throw withVia(pageErr(r, verb), via);
   if (verb === 'click' || verb === 'type' || verb === 'select') await saveFocusFrame(p.tab, el.frameId);
   if (verb !== 'scroll_to_element' && verb !== 'hover') { await new Promise(res => setTimeout(res, 300)); await waitLoad(p.tab); }
   await giveFocusBack(prev, tab.windowId);   // a click may have opened a popup that grabbed focus
   const out = await info(p.tab);
   const text = verb === 'scroll_to_element' ? (r.inView ? 'in view' : 'scrolled') : (r.text || '');
   const settle = verb === 'scroll_to_element' ? 0 : verb === 'hover' ? 800 : SETTLE_MS;
-  return { data: { ...out, opened: openedSince(since, p.tab), ...(text ? { text } : {}),
-                   sig: await settleSig(p.tab, settle) } };
+  return { data: { ...out, opened: verb === 'click' ? await openedNow(since, p.tab) : openedSince(since, p.tab),
+                   ...(text ? { text } : {}), ...(via || {}), sig: await settleSig(p.tab, settle) } };
 }
 
 // Popups a Jav3 tab spawned during an action, so it can report their tab ids.
@@ -601,20 +720,26 @@ chrome.notifications.onClosed.addListener((id, byUser) => {
 // account chooser): adopt it into Jav3's window and session so it is reachable
 // and grouped. Tabs the operator opened (no opener, or an opener Jav3 does not
 // own) are never touched.
-chrome.tabs.onCreated.addListener(async tab => {
+chrome.tabs.onCreated.addListener(tab => {
+  const job = adoptPopup(tab);
+  S.adopting.add(job);
+  job.finally(() => S.adopting.delete(job));
+});
+
+async function adoptPopup(tab) {
   try {
     if (tab.id == null) return;
     const s = await sess();
     if (!shouldAdopt(tab.openerTabId, s.tabs, tab.id)) return;
     const prev = await focusedWindow();
-    await joinSession(tab);
     S.adopted.push({ id: tab.id, url: tab.url || tab.pendingUrl || '', at: Date.now() });
     if (S.adopted.length > 50) S.adopted.splice(0, S.adopted.length - 50);
+    await joinSession(tab);
     const win = await jav3Window();
     await giveFocusBack(prev, win);   // hand focus back to the operator's window
     send({ type: 'event', kind: 'popup_adopted', site: hostOf(tab.url || tab.pendingUrl || '') || '' });
   } catch { /* best effort; a failed adopt just leaves the tab where it opened */ }
-});
+}
 
 chrome.tabs.onRemoved.addListener(async id => {
   const s = await sess();
@@ -689,4 +814,5 @@ chrome.alarms.onAlarm.addListener(a => { if (a.name === 'jav3-keepalive') connec
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 connect();
+releaseDebugger();
 
