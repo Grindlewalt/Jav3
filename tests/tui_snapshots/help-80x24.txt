@@ -5,7 +5,7 @@
 
       Keys
 
-      enter                 send (while a turn runs: the agent gets it  ▆▆
+      enter                 send (while a turn runs: the agent gets it  ▇▇
                             at its next step)
       shift+tab             permissions: yolo (the default: agents run
                             in the VM without asking) → auto → ask;
