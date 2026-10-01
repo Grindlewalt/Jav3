@@ -257,7 +257,7 @@ def _call_messages(c, args: str, result: str) -> list[dict]:
 # The user-side note ahead of the new message when the turn before it died:
 # like chat.INTERRUPT_NOTE, it makes the new message win over the dead request.
 FAILED_TURN_NOTE = (
-    "[The previous turn died before it finished ({reason}). {steps} "
+    "[The previous turn died before it finished: {reason}. {steps} "
     "Anything it left running in the background (a server, a build) may be gone. "
     "If this message asks you to continue, pick up from the last step after "
     "checking the current state (files, git status, running processes) instead "
@@ -274,7 +274,7 @@ def _failure_reason(content: str | None) -> str:
             break
     if text.endswith(")"):
         text = text[:-1].rstrip()
-    text = " ".join(text.split())
+    text = " ".join(text.split()).rstrip(".")
     return (text[:300] + "…") if len(text) > 300 else (text or "no reason given")
 
 
