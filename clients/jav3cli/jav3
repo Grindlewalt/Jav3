@@ -1852,8 +1852,9 @@ class PageSpec:
 PAGE_SPECS = (
     PageSpec("work", "the chat itself: where esc on a page ends up", kind="chat",
              aliases=("chat",)),
-    PageSpec("agents", "every agent and chat that is running, across projects (← on an "
-             "empty prompt); /persona starts one", "[finished]", aliases=("agents-view",),
+    PageSpec("agents", "every agent and chat that is running, across projects (the ← "
+             "drawer is its short form); /persona starts one", "[finished]",
+             aliases=("agents-view",),
              leader="g", options=AGENTS_VIEW_BLURB),
     PageSpec("security", "the Security area: " + ", ".join(SECURITY_TABS) + " (full access)",
              "[" + "|".join(SECURITY_TABS) + "]", aliases=("review",), leader="v",
@@ -4774,7 +4775,7 @@ def build_tui(base: str, token: str, **kw):
                 Page.of(self).click_row(self)
 
     class AgentsPage(Page):
-        """/agents (← from an empty prompt). The active view: what is running and what
+        """/agents (the ← drawer is its short form). The active view: what is running and what
         needs the operator, then a Finished row; the finished view: everything else,
         grouped by project or by time (tab). ↑↓ move between entries, the
         highlighted one unfolds its agents, → steps into them and ← back out,
@@ -9517,7 +9518,7 @@ def build_tui(base: str, token: str, **kw):
             home_hints.update(
                 f"{who}{where}\n\n"
                 "[$text]/help[/]       [$text-muted]commands and keys[/]\n"
-                "[$text]←[/]           [$text-muted]agents: what is running, on an empty "
+                "[$text]← →[/]         [$text-muted]agents · sessions, on an empty "
                 "prompt[/]\n"
                 "[$text]ctrl+j[/]      [$text-muted]new line (enter sends)[/]\n"
                 "[$text]shift+tab[/]   [$text-muted]permissions: yolo → auto → ask · "
@@ -11335,8 +11336,9 @@ def build_tui(base: str, token: str, **kw):
                                    "next step)"),
                          ("shift+tab", "permissions: yolo (the default: agents run in the VM "
                                        "without asking) → auto → ask; /permissions picks"),
-                         ("← (empty prompt)", "agents page: everything working, "
-                                              "across projects"),
+                         ("← → (empty prompt)", "drawers: ← agents, → sessions (running and "
+                                                "needs-you first); ↑↓ enter · p new panel · "
+                                                "esc"),
                          ("/ (on a page)", "type a /page command on the prompt line: "
                                            "/vms images, /security calls; esc goes back, "
                                            "/work or ctrl+c to the chat"),

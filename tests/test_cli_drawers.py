@@ -7,8 +7,6 @@ streaming in it, are not touched. The drawers read the app's AgentsFeed while op
 reload at once on the shared stream's run_end. The full /agents page and the /sessions
 picker stay (tests/test_cli_agents_live.py, test_cli_pages.py).
 JAV3_CLIENT=<path> runs this file against another copy of the client."""
-import json
-
 import httpx
 import pytest
 
