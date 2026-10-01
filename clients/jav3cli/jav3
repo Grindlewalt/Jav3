@@ -5379,10 +5379,13 @@ def build_tui(base: str, token: str, **kw):
             sev = r.get("severity") or "info"
             col = _SEV_COL.get(sev, "$text-muted")
             fold = "▾" if e.get("open") else "▸"
-            state = " [$success]running[/]" if r.get("running") is True else ""
+            run = r.get("running") is True
+            # a narrow terminal keeps the counts and shortens the title: the counts are
+            # what the row is for
+            state = (" [$success]▶[/]" if compact else " [$success]running[/]") if run else ""
             counts = SecurityPage._run_counts(r.get("counts"))
             return (f"[{col}]●[/] [$text-muted]{ts}[/] [{col} b]{sev[:4].upper():<4}[/] {fold} "
-                    f"[b]{_esc(_short(r.get('title') or '?', 64))}[/]{state}  "
+                    f"[b]{_esc(_short(r.get('title') or '?', 22 if compact else 64))}[/]{state}  "
                     f"[$text-muted]{_esc(counts)}[/]")
 
         @staticmethod
@@ -6273,10 +6276,10 @@ def build_tui(base: str, token: str, **kw):
             return line
 
         def on_resize(self, event) -> None:
-            """Calls rows have a compact form under 100 columns: draw them again
-            when a resize crosses that width."""
+            """Calls rows and the Queue's run rows have a compact form under 100 columns:
+            draw them again when a resize crosses that width."""
             narrow = self.size.width < 100
-            if narrow != getattr(self, "_narrow", narrow) and self.tab == "calls" \
+            if narrow != getattr(self, "_narrow", narrow) and self.tab in ("calls", "queue") \
                     and type(self) is SecurityPage:
                 self.run_worker(self.rebuild(), group="rebuild", exclusive=True)
             self._narrow = narrow

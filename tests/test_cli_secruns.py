@@ -338,6 +338,14 @@ async def test_o_opens_the_runs_chat(cfg):
         assert await _until(pilot, lambda: ("GET", "/api/conversations/500/messages")
                             in srv.calls)
         assert await _until(pilot, lambda: app.cid == 500)
+        assert await _until(pilot, lambda: any("build it" in str(w.render())
+                                               for w in app.query("UserMsg")))
+        # the run is live, so the chat re-attached to its stream: end it, or the app
+        # shuts down under a worker that is still reading
+        assert await _until(pilot, lambda: srv.streams.get(500))
+        for f in srv.streams[500]:
+            f.close()
+        await pilot.pause(0.5)
 
 
 async def test_a_server_without_runs_keeps_the_flat_alert_list(cfg):

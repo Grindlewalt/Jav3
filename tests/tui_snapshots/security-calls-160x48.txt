@@ -1,7 +1,7 @@
 # security-calls  160x48 TERM=xterm-256color
 ## text
 
-   Queue 8  Network  Logs  Secrets 2  Persistent  Profiles  Rules  Calls
+   Queue 7  Network  Logs  Secrets 2  Persistent  Profiles  Rules  Calls
 
   key held by the host gateway · no model key is set, so nothing is sent · the guest never sees it
   last 24h: 0 calls · $0.00 · 0 refused
