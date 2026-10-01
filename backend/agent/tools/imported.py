@@ -96,21 +96,15 @@ def alert(kind: str, key: str, summary: str, detail: dict | None = None,
     try:
         con = sqlite3.connect(settings.db_path, timeout=5)
         try:
-            cur = con.execute(
-                "INSERT INTO security_events(kind, severity, summary, detail) "
-                "VALUES (?,?,?,?)",
-                (kind, severity, summary, json.dumps(detail) if detail else None))
-            con.commit()
-            rowid = cur.lastrowid
+            # the INSERT and the stamped publish (tier, ping) live in security.py,
+            # so the operator's levels, per-kind modes and do-not-disturb apply here too
+            from ... import security
+            security.raise_sync(con, kind=kind, summary=summary, severity=severity,
+                                detail=detail)
         finally:
             con.close()
     except sqlite3.Error:
         return          # no DB yet (CLI before init, a bare test) — logged above
-    from ... import bus, security
-    bus.publish(security.SECURITY_CHAN, {
-        "type": "security_event", "id": rowid, "kind": kind,
-        "severity": severity, "project": None, "summary": summary,
-        "detail": detail})
 
 
 # ---------------------------------------------------------------------------

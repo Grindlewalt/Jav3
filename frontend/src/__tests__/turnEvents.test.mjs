@@ -5,6 +5,7 @@ import {
   activityMark, applyTurnEvent, atBottom, clipText, errorLine, exitNote, failTurn, finishTurn,
   fmtCost, fmtElapsed, fmtMs, foldParts, keyArg, makeTurnFolder, newTurn, patchStreaming,
   readerLeft, streamingIndex, toolLine, turnStats,
+  activityOf, interleaveNarration, seedParts, stepCount,
 } from '../turnEvents.js'
 
 const turn = () => newTurn('hi', 1000)[1]
@@ -238,4 +239,108 @@ test('the reader leaves only by scrolling up themselves', () => {
   assert.equal(readerLeft({ top: 900, last: 950, bottom: true, sinceInput: 10 }), false)
   // touched it but did not move up
   assert.equal(readerLeft({ top: 900, last: 900, bottom: false, sinceInput: 10 }), false)
+})
+
+// ---- narration: the text between the calls survives the turn ------------------
+
+const say = (text) => ({ type: 'token', text })
+
+// text, call, text, two calls, then the reply streaming
+const narrated = () => {
+  let m = turn()
+  for (const ev of [say('Let me look. '), say('Reading it.'), tool('a'), result('a'),
+    say('Now the edit.'), tool('b'), tool('c'), result('b'), result('c'),
+    say('All done.')]) m = applyTurnEvent(m, ev, 1000)
+  return m
+}
+
+test('finishing keeps the text between the rows, in order, and not the reply', () => {
+  const done = finishTurn(narrated(), 'All done.', 2000)
+  assert.deepEqual(done.activity.map((p) => p.kind), ['text', 'tool', 'text', 'tool', 'tool'])
+  assert.equal(done.activity[0].text, 'Let me look. Reading it.')
+  assert.equal(done.activity[2].text, 'Now the edit.')
+  assert.equal(done.content, 'All done.')
+  // narration is not a call: never marked interrupted, never counted as a step
+  assert.equal(done.activity[0].interrupted, undefined)
+  assert.equal(stepCount(done.activity), 3)
+})
+
+test('a turn with no calls keeps no activity, whatever it streamed', () => {
+  const m = applyTurnEvent(turn(), say('just an answer'), 1000)
+  assert.deepEqual(finishTurn(m, 'just an answer', 2000).activity, [])
+})
+
+test('blank streamed text between calls is not kept', () => {
+  let m = applyTurnEvent(turn(), say('  \n'), 1000)
+  m = applyTurnEvent(m, tool('a'), 1000)
+  m = applyTurnEvent(m, result('a'), 1000)
+  assert.deepEqual(finishTurn(m, 'ok', 2000).activity.map((p) => p.kind), ['tool'])
+})
+
+test('a failed turn keeps the narration and the tail', () => {
+  const out = failTurn([{ role: 'user', content: 'go' }, narrated()], 'boom', 2000)
+  assert.deepEqual(out[1].activity.map((p) => p.kind), ['text', 'tool', 'text', 'tool', 'tool'])
+  assert.equal(out[1].content, 'All done.')
+})
+
+const acts = [{ name: 'read_file', ok: true }, { name: 'edit_file', ok: false }]
+
+test('the server narration merges into the tool rows by position', () => {
+  const parts = interleaveNarration(acts, [
+    { before: 1, text: 'second' }, { before: 0, text: 'first' }, { before: 2, text: 'last' }])
+  assert.deepEqual(parts.map((p) => (p.kind === 'text' ? p.text : p.name)),
+    ['first', 'read_file', 'second', 'edit_file', 'last'])
+  assert.equal(parts[1].kind, 'tool')
+  assert.equal(parts[1].ok, true)
+})
+
+test('two texts at one position keep the order they were written in', () => {
+  const parts = interleaveNarration(acts, [
+    { before: 1, text: 'a' }, { before: 1, text: 'b' }])
+  assert.deepEqual(parts.filter((p) => p.kind === 'text').map((p) => p.text), ['a', 'b'])
+})
+
+test('a loaded message without narration draws exactly as before', () => {
+  const m = { role: 'assistant', content: 'x', activity: acts }
+  assert.equal(activityOf(m), acts)                 // same array: memoised rows keep identity
+  assert.deepEqual(activityOf({ role: 'assistant', content: 'x' }), [])
+  assert.deepEqual(activityOf({ activity: [], narration: [{ before: 0, text: 't' }] }), [])
+})
+
+test('a loaded message with narration gets it between its rows', () => {
+  const m = { role: 'assistant', content: 'x', activity: acts, narration: [{ before: 1, text: 'hm' }] }
+  assert.deepEqual(activityOf(m).map((p) => p.kind), ['tool', 'text', 'tool'])
+  // a live-finished message holds its text parts in `activity` already
+  const live = { activity: [{ kind: 'text', text: 't' }, { kind: 'tool', name: 'a' }] }
+  assert.equal(activityOf(live), live.activity)
+})
+
+test('a re-attached turn is seeded with what it did and said', () => {
+  const seed = seedParts({ pending_activity: [{ name: 'read_file', done: true, ok: true }],
+    pending_narration: [{ before: 0, text: 'reading' }, { before: 1, text: 'thinking' }] })
+  assert.deepEqual(seed.map((p) => p.kind), ['text', 'tool', 'text'])
+  assert.deepEqual(seedParts({}), [])
+})
+
+test('folding the live view takes the narration between old calls with them', () => {
+  let m = turn()
+  for (let i = 0; i < 9; i += 1) {
+    m = applyTurnEvent(m, say(`step ${i}`), 1000)
+    m = applyTurnEvent(m, tool(`t${i}`), 1000)
+    m = applyTurnEvent(m, result(`t${i}`), 1000)
+  }
+  const shown = foldParts(m.parts)
+  assert.equal(shown[0].kind, 'fold')
+  assert.ok(shown[0].parts.some((p) => p.kind === 'text'))
+})
+
+test('a retried model stream drops the partial text it had streamed', () => {
+  let m = applyTurnEvent(turn(), tool('a'), 2000)
+  m = applyTurnEvent(m, result('a'), 2100)
+  m = applyTurnEvent(m, { type: 'token', text: 'half a thou' }, 2200)
+  m = applyTurnEvent(m, { type: 'retry' }, 2300)
+  m = applyTurnEvent(m, { type: 'token', text: 'whole thought' }, 2400)
+  const texts = m.parts.filter((p) => p.kind === 'text').map((p) => p.text)
+  assert.deepEqual(texts, ['whole thought'])
+  assert.equal(m.parts.filter((p) => p.kind === 'tool').length, 1)
 })

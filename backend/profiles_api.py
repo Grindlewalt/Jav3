@@ -94,7 +94,7 @@ async def create_profile(body: ProfileBody, user: dict = Depends(require_user)):
     db = await get_db()
     try:
         try:
-            p = await profiles.create(db, _body(body), actor=_actor(user))
+            p = await profiles.create(db, _body(body), actor=_actor(user), by_operator=True)
         except profiles.ProfileError as e:
             _fail(e)
         return await _row_with_projects(db, p["id"])
@@ -107,7 +107,8 @@ async def edit_profile(pid: int, body: ProfileBody, user: dict = Depends(require
     db = await get_db()
     try:
         try:
-            await profiles.update(db, pid, _body(body), actor=_actor(user))
+            await profiles.update(db, pid, _body(body), actor=_actor(user),
+                                  by_operator=True)
         except profiles.ProfileError as e:
             _fail(e)
         return await _row_with_projects(db, pid)
@@ -120,7 +121,7 @@ async def delete_profile(pid: int, user: dict = Depends(require_user)):
     db = await get_db()
     try:
         try:
-            return await profiles.delete(db, pid, actor=_actor(user))
+            return await profiles.delete(db, pid, actor=_actor(user), by_operator=True)
         except profiles.ProfileError as e:
             _fail(e)
     finally:
@@ -132,7 +133,7 @@ async def make_default(pid: int, user: dict = Depends(require_user)):
     db = await get_db()
     try:
         try:
-            await profiles.set_default(db, pid, actor=_actor(user))
+            await profiles.set_default(db, pid, actor=_actor(user), by_operator=True)
         except profiles.ProfileError as e:
             _fail(e)
         return await _row_with_projects(db, pid)
@@ -149,7 +150,8 @@ async def assign_profile(slug: str, body: AssignBody, user: dict = Depends(requi
     db = await get_db()
     try:
         try:
-            return await profiles.assign(db, slug, body.profile_id, actor=_actor(user))
+            return await profiles.assign(db, slug, body.profile_id, actor=_actor(user),
+                                         by_operator=True)
         except profiles.ProfileError as e:
             _fail(e)
     finally:

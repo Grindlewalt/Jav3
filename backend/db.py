@@ -780,11 +780,17 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE agent_messages ADD COLUMN "
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
+        await _migrate_secsettings(db)
+        await _migrate_secrules(db)
+        await _migrate_secruns(db)
+        await _migrate_peer_trust(db)
+        await _migrate_narration(db)
         await _migrate_turnstats(db)
         await _migrate_calls(db)
         await _migrate_logging(db)
         await _migrate_secnotify(db)
         await _migrate_boxlog(db)
+        await _detach_orphan_usage(db)
         await db.commit()
     finally:
         await db.close()
@@ -797,6 +803,37 @@ async def _add_columns(db: aiosqlite.Connection, table: str,
     for col, decl in cols:
         if col not in have:
             await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
+
+
+async def _migrate_narration(db: aiosqlite.Connection) -> None:
+    """The text a model writes between its tool calls, kept after the turn
+    (backend/narration.py). One row per stretch of text that sat between two
+    calls: `after_call_id` is the tool_calls row it follows (0 = it opened the
+    turn), `message_id` the assistant reply that closed the turn (NULL while
+    the turn runs, or for a run that never stored one). No foreign keys, so a
+    conversation's delete just clears its rows by conversation_id. Idempotent
+    and additive: a database from before this has no rows and reads as before."""
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS turn_narration ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " conversation_id INTEGER NOT NULL,"
+        " message_id INTEGER,"
+        " after_call_id INTEGER NOT NULL DEFAULT 0,"
+        " text TEXT NOT NULL,"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')))")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_turn_narration_conv "
+                     "ON turn_narration(conversation_id, id)")
+
+
+async def _migrate_peer_trust(db: aiosqlite.Connection) -> None:
+    """agent_messages.trusted_peer: 1 = sent by a clean item of the same plan run
+    (or its head), so delivering it does not taint the receiver (agentmsg.send).
+    Rows from before, and every other kind of peer, are 0: they taint."""
+    async with db.execute("PRAGMA table_info(agent_messages)") as cur:
+        cols = [r["name"] for r in await cur.fetchall()]
+    if "trusted_peer" not in cols:
+        await db.execute("ALTER TABLE agent_messages ADD COLUMN "
+                         "trusted_peer INTEGER NOT NULL DEFAULT 0")
 
 
 async def _migrate_turnstats(db: aiosqlite.Connection) -> None:
@@ -860,6 +897,20 @@ async def _migrate_logging(db: aiosqlite.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_model_calls_ctx "
         "ON model_calls(created_at) WHERE context IS NOT NULL")
 
+
+
+async def _detach_orphan_usage(db: aiosqlite.Connection) -> None:
+    """Usage rows of chats deleted before delete detached them: conversation
+    ids are reused, so a new chat showed an old one's calls and cost."""
+    for table in ("model_calls", "turn_stats"):
+        async with db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table,)) as cur:
+            if not await cur.fetchone():
+                continue
+        await db.execute(
+            f"UPDATE {table} SET conversation_id = NULL WHERE conversation_id IS NOT NULL "
+            "AND conversation_id NOT IN (SELECT id FROM conversations)")
 
 async def _migrate_boxes(db: aiosqlite.Connection) -> None:
     """Columns the boxes design adds to existing tables (DESIGN-BOXES.md, the
@@ -944,6 +995,59 @@ async def _migrate_secnotify(db: aiosqlite.Connection) -> None:
     await db.execute(
         "CREATE INDEX IF NOT EXISTS idx_security_events_cause "
         "ON security_events(kind, cause, acknowledged)")
+
+
+async def _migrate_secsettings(db: aiosqlite.Connection) -> None:
+    """Who caused a security event, and why a row was filed already
+    acknowledged (backend/security.py). `actor` is 'operator' only when an
+    operator-facing route said so explicitly; `quiet` is 'operator' (their own
+    action, "record only") or 'kind' (that kind is set to Record only).
+    Old rows read as NULL/NULL: not operator, not quieted. Idempotent."""
+    await _add_columns(db, "security_events", (
+        ("actor", "TEXT"),
+        ("quiet", "TEXT"),
+    ))
+
+
+async def _migrate_secrules(db: aiosqlite.Connection) -> None:
+    """Why a rule judged a security event normal work (backend/security.py):
+    `rule` is the short reason ("file never committed", "imported elsewhere in
+    the project"), set only on rows filed already acknowledged with
+    quiet='rule'. NULL on every other row. Idempotent."""
+    await _add_columns(db, "security_events", (
+        ("rule", "TEXT"),
+    ))
+    # the files each conversation created (backend/writes.py): removing one of
+    # those is the run clearing its own scratch work. Notes older than a month go.
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS write_created ("
+        " project_slug TEXT NOT NULL,"
+        " conversation_id INTEGER NOT NULL,"
+        " path TEXT NOT NULL,"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+        " PRIMARY KEY (project_slug, conversation_id, path))")
+    await db.execute("DELETE FROM write_created WHERE created_at < datetime('now', '-30 days')")
+
+
+async def _migrate_secruns(db: aiosqlite.Connection) -> None:
+    """Which run an event belongs to (backend/secruns.py). `conversation_id` is
+    the conversation the event happened in, `run_root` the top of that
+    conversation's tree (a chat, or a plan/funnel job head: one card per run in
+    the Queue), `call_id` the model's id for the tool call it happened in,
+    `box_id` / `boot_id` the box (and its boot) for a process event no turn is
+    bound to. All attribution only: nothing here decides who the actor was.
+    NULL on every row from before; those group by their detail or the box.
+    tool_calls gains `call_id` so "open the chat at that step" can find the row.
+    Idempotent and additive."""
+    await _add_columns(db, "security_events", (
+        ("conversation_id", "INTEGER"), ("run_root", "INTEGER"), ("call_id", "TEXT"),
+        ("box_id", "TEXT"), ("boot_id", "TEXT"),
+    ))
+    await _add_columns(db, "tool_calls", (("call_id", "TEXT"),))
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_security_events_run "
+                     "ON security_events(run_root)")
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_tool_calls_callid "
+                     "ON tool_calls(call_id)")
 
 
 async def _migrate_boxlog(db: aiosqlite.Connection) -> None:

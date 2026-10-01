@@ -96,7 +96,8 @@ async def test_keys_pick_toggle_type_and_confirm():
 
 
 async def test_typing_replaces_single_pick_and_esc_skips():
-    got = await _run(["1", "M", "y", "S", "Q", "L", "enter", "escape"])
+    # esc on the second question warns that the first answer goes too (TUIB-13); again skips
+    got = await _run(["1", "M", "y", "S", "Q", "L", "enter", "escape", "escape"])
     assert got == [{"id": "ask_1", "skipped": True}]
 
 

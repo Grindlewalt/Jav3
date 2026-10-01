@@ -330,7 +330,7 @@ const TAB_NAMES = [
   ['/security/secrets', 'Security: Secrets'], ['/security', 'Security'],
   ['/vms/images', 'VMs: Images'], ['/vms/catalogue', 'VMs: Catalogue'], ['/vms', 'VMs'],
   ['/agents', 'Agents'], ['/tools', 'Tools'], ['/settings', 'Settings'], ['/memory', 'Memory'],
-  ['/schedules', 'Schedules'], ['/shell', 'Shell'], ['/voice', 'Voice'],
+  ['/schedules', 'Schedules'], ['/git', 'Git'], ['/shell', 'Shell'], ['/voice', 'Voice'],
   ['/artifacts', 'Artifacts'], ['/projects', 'Work'],
 ]
 

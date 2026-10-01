@@ -23,6 +23,21 @@ def load_client(name: str = "jav3cli_dialogs"):
     return mod
 
 
+def pin_zone(monkeypatch, name: str = "UTC"):
+    """Use as `yield from pin_zone(monkeypatch)` in an autouse fixture: the client shows
+    the server's UTC times in the machine's zone, so a test that pins '14:03' pins a zone."""
+    import time
+    was = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", name)
+    time.tzset()
+    yield
+    if was is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = was
+    time.tzset()
+
+
 class Feed(httpx.AsyncByteStream):
     """One open SSE response: put() events in, close() ends the stream, drop()
     breaks it the way a restarting server does."""
@@ -74,6 +89,7 @@ class FakeServer:
         self.streams: dict[int, list[Feed]] = {}   # cid -> feeds handed to GET .../stream
         self.running: list[int] = []
         self.calls: list[tuple[str, str]] = []
+        self.down = False           # every request fails to connect, like a restarting server
 
     @property
     def feed(self) -> Feed:
@@ -82,9 +98,32 @@ class FakeServer:
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
 
+    def drop(self) -> None:
+        """The server goes away mid-turn: the open stream breaks and nothing answers."""
+        self.down = True
+        self.feed.drop()
+
+    def back(self, cid: int, user: str, reply: str | None = None, activity=(),
+             pending=(), running: bool = False) -> None:
+        """The server answers again, holding what it saved of chat `cid` meanwhile:
+        the user's message and, if the turn finished while the client was away, its
+        reply with every call it made (`activity`); or, if it still runs, the calls so
+        far (`pending`). A new GET .../stream then hands out a feed the test drives."""
+        self.down = False
+        msgs = [{"id": 1, "role": "user", "content": user, "created_at": "t0"}]
+        if reply is not None:
+            msgs.append({"id": 2, "role": "assistant", "content": reply, "created_at": "t1",
+                         "model": "deepseek/deepseek-flash", "activity": list(activity)})
+        self.conv_messages[cid] = {"messages": msgs, "running": running,
+                                   "pending_activity": list(pending), "agent_slug": None}
+        if running:
+            self.running = [cid]
+
     def handle(self, request: httpx.Request) -> httpx.Response:
         path, method = request.url.path, request.method
         self.calls.append((method, path))
+        if self.down:
+            raise httpx.ConnectError("All connection attempts failed")
         if path == "/api/devices/whoami":
             return httpx.Response(200, json={"username": "device:test"})
         if path == "/api/auth/me":
@@ -154,6 +193,11 @@ class FakeServer:
                 return httpx.Response(200, json={"mode": self.perm_puts[-1]["mode"]})
             return httpx.Response(200, json={"mode": "yolo"})
         return httpx.Response(404, json={"detail": f"nope: {path}"})
+
+
+def call(name: str, args: dict, result: str = "ok", ok: bool = True) -> dict:
+    """One finished tool call the way GET /api/conversations/<id>/messages lists it."""
+    return {"name": name, "args": args, "result": result, "ok": ok, "done": True}
 
 
 async def wait_for(pred, tries: int = 80, step: float = 0.05):

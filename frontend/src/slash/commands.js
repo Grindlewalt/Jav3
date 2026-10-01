@@ -38,6 +38,7 @@ export const WINDOW_TYPES = [
   ['git', 'Git — review, approve, push'],
   ['grants', 'Secrets — key grants for this project'],
   ['terminal', 'Terminal — shell in the guest VM'],
+  ['desktop', 'Desktop — watch the box’s screen'],
   ['taskboard', 'Task board — goal / plan / runs'],
   ['todo', 'To-dos'],
   ['plan', 'Plan — dump, checklist, agents'],
@@ -48,6 +49,13 @@ const SECURITY_TABS = [
   ['network', 'egress and host approvals'],
   ['logs', 'the security log'],
   ['secrets', 'secrets and key grants'],
+]
+
+const SETTINGS_TABS = [
+  ['models', 'API providers and models'],
+  ['alerts', 'notifications and do not disturb'],
+  ['access', 'devices, computer use, browser use, permission rules'],
+  ['system', 'backup, music server, log out'],
 ]
 
 const VMS_TABS = [
@@ -199,12 +207,8 @@ export const COMMANDS = [
   {
     name: 'provider', aliases: ['providers'], busyOk: true,
     help: 'add a provider’s API key / base URL (Settings)',
-    run: (_, env) => {
-      env.navigate('/settings')
-      // the Settings page's provider card carries id="providers"
-      setTimeout(() => document.getElementById('providers')
-        ?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 120)
-    },
+    // the provider card carries id="providers"; the Settings page scrolls to it
+    run: (_, env) => { env.navigate('/settings#providers') },
   },
   {
     name: 'agent', usage: '[slug]',
@@ -424,14 +428,50 @@ export const COMMANDS = [
     },
   },
   {
-    name: 'settings', busyOk: true,
-    help: 'the Settings page',
-    run: (_, env) => { env.navigate('/settings') },
+    name: 'settings', usage: '[models|alerts|access|system]', busyOk: true,
+    help: 'the Settings page, or one of its tabs',
+    args: () => SETTINGS_TABS.map(([value, meta]) => ({ value, label: value, meta })),
+    run: (arg, env) => {
+      const tab = (arg || 'models').toLowerCase()
+      need(SETTINGS_TABS.some(([t]) => t === tab), `no Settings tab “${arg}”`)
+      env.navigate(tab === 'models' ? '/settings' : `/settings/${tab}`)
+    },
   },
   {
     name: 'memory', busyOk: true,
     help: 'the Memory page',
     run: (_, env) => { env.navigate('/memory') },
+  },
+  // the terminal client's pages (jav3.2) by the same names
+  {
+    name: 'work', aliases: ['chat'], busyOk: true,
+    help: 'the Work page: chats and windows',
+    run: (_, env) => { env.navigate('/') },
+  },
+  {
+    name: 'logs', busyOk: true,
+    help: 'the security logs (Security → Logs)',
+    run: (_, env) => { env.navigate('/security/logs') },
+  },
+  {
+    name: 'schedules', busyOk: true,
+    help: 'the Schedules page',
+    run: (_, env) => { env.navigate('/schedules') },
+  },
+  {
+    name: 'artifacts', busyOk: true,
+    help: 'the Artifacts page',
+    run: (_, env) => { env.navigate('/artifacts') },
+  },
+  {
+    name: 'git', usage: '[project]', busyOk: true,
+    help: 'the Git page: agent pull requests, branches, history, who can open the repo',
+    args: (env) => projectOptions(env.host),
+    run: (arg, env) => {
+      if (!arg) { env.navigate('/git'); return }
+      need(env.host.projects.some((p) => p.slug === arg), `no project “${arg}”`)
+      env.navigate(`/git/${arg}`)
+    },
   },
   {
     name: 'window', aliases: ['open'], usage: '<card>', busyOk: true,
@@ -444,6 +484,19 @@ export const COMMANDS = [
       const h = env.host
       const slug = env.work.project || currentConvo(h)?.project_slug || h.pendingProject || h.active
       env.work.openWindow(t[0], slug ? { slug } : {})
+    },
+  },
+  {
+    name: 'desktop', busyOk: true,
+    help: 'watch the project’s box on a live screen (a Work window; web only)',
+    run: (_, env) => {
+      const h = env.host
+      const slug = env.work.project || currentConvo(h)?.project_slug || h.pendingProject || h.active
+      need(slug, 'which project? open a project chat in Work, then /desktop')
+      const id = env.work.openWindow('desktop', { slug })
+      need(id, 'the desktop opens as a window on the Work page, beside a project chat')
+      return 'the Desktop window watches the project’s box; Start desktop in it boots the '
+        + 'screen (and the box if it is off)'
     },
   },
   {

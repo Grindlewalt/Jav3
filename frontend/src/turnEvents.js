@@ -57,6 +57,10 @@ export function applyTurnEvent(m, ev, now = Date.now()) {
       parts.push({ kind: 'tool', id: ev.id, name: ev.name, args: {}, done: true,
                    ok: ev.ok, result: ev.result })
     }
+  } else if (ev.type === 'retry') {
+    // the model stream dropped mid-round and is being re-asked: the text that
+    // streamed since the last row is void (it would otherwise show twice)
+    if (parts[parts.length - 1]?.kind === 'text') parts.pop()
   } else if (ev.type === 'job') {
     // a tool launched a multi-agent job — mount its live tree inline (once: a
     // re-announced job must not draw a second tree)
@@ -68,17 +72,61 @@ export function applyTurnEvent(m, ev, now = Date.now()) {
 
 // A tool that never reported back (the turn was stopped or died) is not a
 // success: it keeps its row, marked interrupted.
-const settle = (p) => (p.kind === 'job' || p.done ? p
+const settle = (p) => (p.kind === 'text' || p.kind === 'job' || p.done ? p
   : { ...p, done: true, ok: false, interrupted: true })
 
-// A finished message keeps only its tool rows (for the collapsed group), and
-// how long the turn took.
+// A finished message keeps its tool rows and the text the agent wrote between
+// them (for the collapsed group, in the order they streamed), and how long the
+// turn took. Text after the last row is the reply itself: `content` holds it.
 export function finishTurn(m, content, now = Date.now()) {
+  const parts = m.parts || []
+  let lastRow = -1
+  parts.forEach((p, i) => { if (p.kind !== 'text') lastRow = i })
   return {
     role: 'assistant', content,
-    activity: (m.parts || []).filter((p) => p.kind === 'tool' || p.kind === 'job').map(settle),
+    activity: parts.filter((p, i) => (p.kind === 'text'
+      ? i < lastRow && p.text.trim() : p.kind === 'tool' || p.kind === 'job')).map(settle),
     ...(m.t0 != null ? { ms: Math.max(0, now - m.t0) } : {}),
   }
+}
+
+// ---- a finished turn's group ---------------------------------------------------
+
+// The server keeps a turn's tool calls in `activity` (tool-only, which older
+// clients read) and the text between them beside it: narration = [{ before,
+// text }], `before` being how many of the calls come first (0 opens the turn).
+// Merge them into the one ordered list the group draws: text parts and tool
+// rows, as a live turn had them.
+export function interleaveNarration(activity = [], narration = []) {
+  const out = []
+  const said = [...narration].sort((a, b) => a.before - b.before)   // stable
+  let k = 0
+  activity.forEach((a, i) => {
+    while (k < said.length && said[k].before <= i) out.push({ kind: 'text', text: said[k++].text })
+    out.push({ kind: 'tool', ...a })
+  })
+  while (k < said.length) out.push({ kind: 'text', text: said[k++].text })
+  return out
+}
+
+// What a finished message's group shows. A live-finished message already holds
+// text parts in `activity`; a loaded one merges the server's narration in. With
+// none (a chat from before it was kept) `activity` is returned as it is, so a
+// memoised row keeps its identity.
+export function activityOf(m) {
+  if (!m?.activity?.length) return []
+  return m.narration?.length ? interleaveNarration(m.activity, m.narration) : m.activity
+}
+
+// The parts to seed a re-attached, still-running turn with: what the messages
+// payload says it already did and said.
+export function seedParts(r) {
+  return interleaveNarration(r?.pending_activity || [], r?.pending_narration || [])
+}
+
+// Steps in a group: its tool calls and jobs, not the text between them
+export function stepCount(parts = []) {
+  return parts.filter((p) => p.kind !== 'text').length
 }
 
 // The turn died. Keep what it did (the tool rows, the text it had streamed)
@@ -86,7 +134,7 @@ export function finishTurn(m, content, now = Date.now()) {
 // every row of a long run with it.
 export function failTurn(messages, message, now = Date.now()) {
   const i = streamingIndex(messages)
-  const err = { role: 'error', content: message }
+  const err = { role: 'error', content: message, failed: true }   // failed: resume.js
   if (i === -1) return [...messages, err]
   const m = messages[i]
   const parts = m.parts || []
@@ -313,8 +361,8 @@ export function foldParts(parts = [], { keep = 6, min = 3 } = {}) {
     after[i] = seen
     if (parts[i].kind === 'tool') seen += 1
   }
-  // narration between the calls folds with them (it is gone from the finished
-  // message anyway); a text run with no call behind it is the reply, and stays
+  // narration between the calls folds with them (the finished message keeps it
+  // inside its group); a text run with no call behind it is the reply, and stays
   const foldable = (p, i) => after[i] >= keep
     && (p.kind === 'text' || (p.kind === 'tool' && p.done && p.ok !== false))
   const out = []

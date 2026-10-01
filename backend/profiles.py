@@ -341,7 +341,9 @@ async def migrate(db: aiosqlite.Connection) -> dict | None:
         return None
     bus.publish(SECURITY_CHAN, {"type": "security_event", "id": event_id,
                                 "kind": "profiles_migrated", "severity": "info",
-                                "project": None, "summary": summary, "detail": detail})
+                                "project": None, "summary": summary, "detail": detail,
+                                "tier": "record", "ping": False, "count": 1,
+                                "repeat": False, "acknowledged": False})
     return detail
 
 
@@ -496,11 +498,13 @@ async def default(db: aiosqlite.Connection) -> dict:
         bus.publish(SECURITY_CHAN, {"type": "security_event", "id": cur.lastrowid,
                                     "kind": "profile_changed", "severity": "info",
                                     "project": None, "summary": summary,
-                                    "detail": detail})
+                                    "detail": detail, "tier": "record", "ping": False,
+                                    "count": 1, "repeat": False, "acknowledged": False})
     return p
 
 
-async def legacy_profile(db: aiosqlite.Connection, name: str) -> dict:
+async def legacy_profile(db: aiosqlite.Connection, name: str, *,
+                         by_operator: bool = False) -> dict:
     """The profile an old mode maps to (egress.set_policy, the pre-profiles
     call): the default for allowlist+inherit, else the profile of that name,
     created in its legacy shape on first need."""
@@ -512,7 +516,7 @@ async def legacy_profile(db: aiosqlite.Connection, name: str) -> dict:
         return p
     shape = _legacy_rows(sorted(set(settings.egress_seed_hosts)))[name]
     try:
-        return await create(db, shape, actor="legacy policy call")
+        return await create(db, shape, actor="legacy policy call", by_operator=by_operator)
     except ProfileError:
         return await by_name(db, name)      # created by a racing call
 
@@ -631,24 +635,35 @@ def validate(body: dict, *, current: dict | None = None) -> dict:
 
 
 async def _raise_changed(db, summary: str, detail: dict, project: str | None = None,
-                         severity: str = "warn") -> None:
+                         severity: str = "warn", by_operator: bool = False) -> None:
     from . import security
     await security.raise_event(db, kind="profile_changed", severity=severity,
-                               project=project, summary=summary, detail=detail)
+                               project=project, summary=summary, detail=detail,
+                               actor=security.OPERATOR if by_operator else None)
 
 
-def _severity(changes: dict) -> str:
+# the label for a change nobody named: not "operator", which is a claim
+UNMARKED = "the server"
+
+
+def _severity(changes: dict, by_operator: bool = False, actor: str = "") -> str:
     """Widening the default or turning the network on is the one-click
-    high-impact change the threat model names: make it critical."""
+    high-impact change the threat model names. Made by the operator (an
+    operator-facing route says so with `by_operator`) it is a warning, and
+    their Security settings may file it quietly: pinging them about their own
+    click was noise (operator decision 2026-09-29). Setup choosing it in the
+    wizard is the operator's choice too, so a warning. Anything else making it
+    stays critical: an agent widening its own permissions is what that tier is
+    for. The label `actor` is only text: it is never what decides this."""
     dv = changes.get("default_verdict", {})
     no = changes.get("network_off", {})
     if dv.get("to") == "allow" or no.get("to") is False:
-        return "critical"
+        return "warn" if by_operator or actor == "setup" else "critical"
     return "warn"
 
 
-async def create(db: aiosqlite.Connection, body: dict, *, actor: str = "operator",
-                 make_default: bool = False) -> dict:
+async def create(db: aiosqlite.Connection, body: dict, *, actor: str = UNMARKED,
+                 make_default: bool = False, by_operator: bool = False) -> dict:
     """A new profile; the default only when asked to (`make_default`: setup).
     On an install with no profile yet, the safe default is created first, so
     a profile made for one project never silently becomes everyone's."""
@@ -674,7 +689,8 @@ async def create(db: aiosqlite.Connection, body: dict, *, actor: str = "operator
     await _raise_changed(db, f"profile {new['name']!r} {what} by {actor}",
                          {"profile": {"id": pid, "name": new["name"]}, "action": "create",
                           "is_default": new["is_default"], "changes": diff({}, new)},
-                         severity=_severity(diff({}, new)))
+                         severity=_severity(diff({}, new), by_operator, actor),
+                         by_operator=by_operator)
     return new
 
 
@@ -685,7 +701,7 @@ async def _following_default(db) -> list[str]:
 
 
 async def set_default(db: aiosqlite.Connection, profile_id: int, *,
-                      actor: str = "operator") -> dict:
+                      actor: str = UNMARKED, by_operator: bool = False) -> dict:
     """Mark `profile_id` as the default (the one new and unassigned projects
     use). Projects with no profile of their own move with it: the event names
     them and diffs the two profiles."""
@@ -711,7 +727,8 @@ async def set_default(db: aiosqlite.Connection, profile_id: int, *,
         {"profile": {"id": profile_id, "name": new["name"]}, "action": "make_default",
          "from": {"id": old["id"], "name": old["name"]} if old else None,
          "projects": following, "changes": changes},
-        severity=_severity(changes) if following else "warn")
+        severity=_severity(changes, by_operator, actor) if following else "warn",
+        by_operator=by_operator)
     return new
 
 
@@ -728,7 +745,7 @@ async def configure_default(db: aiosqlite.Connection, *, actor: str = "setup",
 
 
 async def update(db: aiosqlite.Connection, profile_id: int, body: dict, *,
-                 actor: str = "operator") -> dict:
+                 actor: str = UNMARKED, by_operator: bool = False) -> dict:
     cur_p = await get(db, profile_id)
     if cur_p is None:
         raise ProfileError("no such profile", status=404)
@@ -754,12 +771,13 @@ async def update(db: aiosqlite.Connection, profile_id: int, body: dict, *,
                              + ", ".join(sorted(changes)),
                          {"profile": {"id": profile_id, "name": p["name"]},
                           "action": "update", "changes": changes},
-                         severity=_severity(changes))
+                         severity=_severity(changes, by_operator, actor), by_operator=by_operator)
     return await get(db, profile_id)
 
 
 async def set_hosts(db: aiosqlite.Connection, profile_id: int, *, allow=None,
-                    deny=None, actor: str = "operator") -> dict:
+                    deny=None, actor: str = UNMARKED,
+                    by_operator: bool = False) -> dict:
     """Replace a profile's allow and/or deny list (the Network page's revoke
     and "promote to profile"). Same event as any other profile edit."""
     cur_p = await get(db, profile_id)
@@ -771,11 +789,11 @@ async def set_hosts(db: aiosqlite.Connection, profile_id: int, *, allow=None,
         body["allow_hosts"] = allow
     if deny is not None:
         body["deny_hosts"] = deny
-    return await update(db, profile_id, body, actor=actor)
+    return await update(db, profile_id, body, actor=actor, by_operator=by_operator)
 
 
 async def delete(db: aiosqlite.Connection, profile_id: int, *,
-                 actor: str = "operator") -> dict:
+                 actor: str = UNMARKED, by_operator: bool = False) -> dict:
     p = await get(db, profile_id)
     if p is None:
         raise ProfileError("no such profile", status=404)
@@ -792,12 +810,14 @@ async def delete(db: aiosqlite.Connection, profile_id: int, *,
     await db.commit()
     await _raise_changed(db, f"profile {p['name']!r} deleted by {actor}",
                          {"profile": {"id": profile_id, "name": p["name"]},
-                          "action": "delete", "changes": diff(p, {})})
+                          "action": "delete", "changes": diff(p, {})},
+                         by_operator=by_operator)
     return {"ok": True, "id": profile_id}
 
 
 async def assign(db: aiosqlite.Connection, slug: str, profile_id: int, *,
-                 actor: str = "operator", require_project: bool = True) -> dict:
+                 actor: str = UNMARKED, require_project: bool = True,
+                 by_operator: bool = False) -> dict:
     """Point a project at a profile. `require_project=False` (the legacy
     set_policy path only) lets a slug with no projects row be governed through
     its egress_policy row's legacy mode instead: only the default or a profile
@@ -838,6 +858,7 @@ async def assign(db: aiosqlite.Connection, slug: str, profile_id: int, *,
             {"project": slug, "action": "assign",
              "from": {"id": old["id"], "name": old["name"]},
              "to": {"id": new["id"], "name": new["name"]}, "changes": changes},
-            project=slug, severity=_severity(changes))
+            project=slug, severity=_severity(changes, by_operator, actor),
+            by_operator=by_operator)
     return {"ok": True, "project": slug,
             "profile": {"id": new["id"], "name": new["name"]}}

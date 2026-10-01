@@ -336,6 +336,42 @@ def to_pixels(rx: float, ry: float, convention: str, width: int, height: int) ->
   devicePixelRatio) so the picture and the ids line up.
 - NOT in this pass (write down as follow-ups in the TOOL.md or a comment, do
   not build): `chrome.debugger` trusted input, file upload, dialogs.
+  Trusted clicks followed in extension 0.6.0, see D2 below.
+
+### D2. Trusted clicks (extension 0.6.0, `lib/trusted.js`)
+
+- `click` (by id and by x, y) is delivered as CDP `Input.dispatchMouseEvent`
+  (mouseMoved, mousePressed, mouseReleased, left, clickCount 1) through
+  `chrome.debugger`, attached for the click only and detached in a `finally`.
+  Attaching shows Chrome's debugging bar and resizes the viewport under it, so
+  the geometry is measured after the attach, repeated until two reads agree
+  (`measureEl`), and the `expect` moved-page check runs then too.
+- An element in an iframe: its point in the frame's viewport plus each
+  enclosing `<iframe>` content box (`window.frameElement` when the parent is
+  same-origin, else the parent's `<iframe>` with the child's url; ambiguous or
+  unplaced frames fall back). A point by coordinates is already in top viewport
+  pixels: Chrome routes it, the worker only descends (`probeAt`) to say what was
+  hit and to ask consent for each cross-site frame (before the bar goes up).
+  A frame of the Jav3 server is refused.
+- Refused before any mouse event: stale id, covered element (or a banner laid
+  over its iframe), page moved. Fallbacks to the script click (`realClick`),
+  never after the press: no debugger permission, Options switch off, attach
+  failed, a mouse command failed before the press, frame unplaced, element
+  outside the visible page, the point pushed off the window by the bar, no
+  mouse event arrived at the page. A command failing after the press is an
+  error ("may have happened"). Only `Input.dispatchMouseEvent` is ever sent,
+  only to tabs in Jav3's session; Cancel on the bar = Cancel on the
+  notification.
+- Reply fields on `click`: `via` (`trusted` | `synthetic`), `via_why`
+  (`no_permission` | `disabled` | `attach_failed` | `input_failed` | `no_event`
+  | `frame_unplaced` | `offscreen` | `outside_after_attach`), `via_detail`,
+  `debug_ms` (attach to detach), `opened` (popups adopted during the click, with
+  their URL read after the click, `closed: true` when one closed itself). The
+  server words them (`input: ...` line, `backend/browser.py` `_via_line`).
+- Versions: a click still needs 0.5.0. Below `TRUSTED_CLICK_VERSION` (0.6.0) a
+  click that did not change the page gets a `note:` line saying to reload the
+  extension, and a coordinate click into an iframe is refused with the same.
+- Still synthetic: typing, hover, keys. Still deferred: file upload, dialogs.
 
 ## E. Loop and config (contract commit)
 
@@ -408,6 +444,6 @@ K1. **Flash vs Qwen3.8-27B.** Harness ready (`scripts/nav_compare.py`,
     fixture probe ≥ 0.953 and p95 ≤ 2.5 s; then 20 tasks × 3 runs, switch only
     at +15 pts success, 3:1 wins, ≤ 2× $/success. Next candidates: Holo4-27B,
     MiMo-V2.6-Flash. Large: its own day.
-K2. Deferred browser: `chrome.debugger` trusted input (sites that check
-    isTrusted), file upload, dialogs, coordinate clicks inside iframes.
+K2. Deferred browser: file upload, dialogs; trusted typing / hover / keys
+    (trusted clicks and coordinate clicks inside iframes shipped in 0.6.0, D2).
 K3. Deferred desk: Windows UIA, wlroots element coordinates, uinput backend.

@@ -1,5 +1,6 @@
 """The terminal client around a turn (clients/jav3cli/jav3): a server that goes away
-reads as one clear line and the message returns to the prompt (TUI-10), a stopped
+reads as one clear line (TUI-10; a message the server never took returns to the
+prompt, one it took is followed: test_cli_reattach.py), a stopped
 turn never lends its stream or its stop to the next message (TUI-11), and an
 agent's chat has a way back to its parent (TUI-16)."""
 import httpx
@@ -32,7 +33,7 @@ def log(app) -> list[tuple[str, str]]:
 
 # --- TUI-10: the server goes away ----------------------------------------------------------------
 
-async def test_a_restart_mid_turn_reads_as_one_line_and_the_message_comes_back():
+async def test_a_restart_mid_turn_reads_as_one_line_and_the_message_stays_in_the_chat():
     srv = FakeServer()
     app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
     async with app.run_test(size=(100, 30)) as pilot:
@@ -45,10 +46,13 @@ async def test_a_restart_mid_turn_reads_as_one_line_and_the_message_comes_back()
         app.editor.text = "and one about docks"              # typed while it ran
         srv.feed.drop()                                      # [Errno 104] Connection reset by peer
         assert await wait_for(lambda: not app.busy)
-        lines = [n for n in notes(app) if "server went away" in n]
-        assert len(lines) == 1 and "restarting" in lines[0] and "back in the prompt" in lines[0]
+        # the server took the message (its `start` came), so it is not put back: the client
+        # reconnected, found no reply saved, and says so once (test_cli_reattach.py has the
+        # cases where the turn is picked up again)
+        lines = [n for n in notes(app) if "no saved reply" in n]
+        assert len(lines) == 1 and "Your message is in the chat" in lines[0]
         assert not any("Errno" in n for n in notes(app))
-        assert app.editor.text == "Write a 1200-word essay about lighthouses.\nand one about docks"
+        assert app.editor.text == "and one about docks"
 
 
 async def test_an_unreachable_server_says_so_and_nothing_is_lost():
@@ -73,7 +77,7 @@ async def test_an_unreachable_server_says_so_and_nothing_is_lost():
         assert srv.posts[-1]["message"] == "hello there"
 
 
-async def test_a_stream_that_just_closes_with_no_final_reads_the_same_way():
+async def test_a_stream_that_just_closes_with_no_final_is_a_lost_stream_too():
     srv = FakeServer()
     app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
     async with app.run_test(size=(100, 30)) as pilot:
@@ -82,9 +86,9 @@ async def test_a_stream_that_just_closes_with_no_final_reads_the_same_way():
         assert await wait_for(lambda: srv.feeds)
         srv.feed.put({"type": "start", "conversation_id": 4}, {"type": "token", "text": "Hm"})
         srv.feed.close()                                     # a clean close, no final
-        assert await wait_for(lambda: any("server went away" in n for n in notes(app)))
+        assert await wait_for(lambda: any("no saved reply" in n for n in notes(app)))
         assert await wait_for(lambda: not app.busy)
-        assert app.editor.text == "write it"
+        assert app.editor.text == ""
 
 
 async def test_a_refused_send_keeps_the_text_in_the_prompt():

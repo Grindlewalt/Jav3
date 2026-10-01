@@ -16,6 +16,7 @@ from . import (agents_api, agents_run, artifacts_api, auth, backup, browser_api,
                reviewer_api, runs_api, schedules, setup_api, sidebar_api, skills_api,
                vm_api, voice_api, workspace, secrets)
 from . import procview_api   # WP4
+from . import orchestrator   # settle_lost_heads at boot
 from . import storage_watch   # captured-context storage check
 from .agent.tools.registry import compile_registry
 from .auth import require_user
@@ -50,11 +51,20 @@ def _warn_missing_guest_devices() -> None:
     import logging
     import os
     missing = [d for d in ("/dev/kvm", "/dev/vhost-vsock") if not os.path.exists(d)]
-    if missing:
+    if not missing:
+        return
+    if settings.docker_enabled and settings.vm_boxes_enabled:
+        # Docker boxes need neither: only a project that runs in the shared KVM
+        # guest fails here
         logging.getLogger("jav3").warning(
-            "no %s: the web UI works, but agent turns will fail until KVM and "
-            "vhost_vsock are available (bash scripts/install.sh --check says why)",
-            " or ".join(missing))
+            "no %s: KVM guests are unavailable, so agent turns run in Docker boxes "
+            "only; a project that runs in the shared box will fail until it is given "
+            "its own box on the docker runtime (Runs in)", " or ".join(missing))
+        return
+    logging.getLogger("jav3").warning(
+        "no %s: the web UI works, but agent turns will fail until KVM and "
+        "vhost_vsock are available (bash scripts/install.sh --check says why)",
+        " or ".join(missing))
 
 
 async def _announce_setup_link() -> None:
@@ -79,10 +89,12 @@ async def lifespan(app: FastAPI):
     require_single_process()
     ensure_dirs()
     await init_db()
+    await chat.sweep_ephemeral()     # incognito rows a crash left behind (ROBUST-19)
     await profiles_api.profiles.migrate_at_startup()  # WP2: one-time profiles migration
     ensure_memory_seeds()
     await providers.migrate_legacy_override()   # the old nav switch slot -> default
     await schedules.ensure_default_schedules()
+    await orchestrator.settle_lost_heads()      # heads a restart cut off
     compile_registry()
     _warn_missing_guest_devices()
     await _announce_setup_link()
@@ -202,6 +214,8 @@ from . import placement_api  # noqa: E402  # per-project "Runs in"
 app.include_router(placement_api.router)
 from . import services_api  # noqa: E402  # WP3
 app.include_router(services_api.router)  # WP3
+from .vm import display_api  # noqa: E402  # the live desktop of a box (P1: watch only)
+app.include_router(display_api.router)
 
 
 @app.get("/api/health")

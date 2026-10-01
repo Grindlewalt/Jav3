@@ -4,6 +4,7 @@ import { api } from '../api.js'
 import { useAsk } from '../ask.jsx'
 import { isPhone, useIsPhone } from '../breakpoints.js'
 import { notify, notifyError } from '../notify.js'
+import { onProjectsChanged } from '../projectsChanged.js'
 import { useChatStream } from '../useChatStream.js'
 import { listTitle } from '../ChatGroups.jsx'
 import { AskPanel, useOperatorAsks } from '../AskUser.jsx'
@@ -80,7 +81,7 @@ export default function Shell() {
   // ask_user / permission asks from the turn in flight, answered above the
   // composer with the Work chat's card. Fed from both paths: a send's stream
   // and a reopened chat's tail (which replays the asks still waiting).
-  const asks = useOperatorAsks(cid)
+  const asks = useOperatorAsks(cid, busy)
   const onAskEvent = asks.onEvent
 
   const refreshSide = useCallback(
@@ -92,7 +93,8 @@ export default function Shell() {
     const t = setInterval(() => {
       if (document.visibilityState === 'visible') refreshSide()
     }, SIDEBAR_POLL_MS)
-    return () => clearInterval(t)
+    const off = onProjectsChanged(refreshSide)
+    return () => { clearInterval(t); off() }
   }, [refreshSide])
 
   useEffect(() => {
@@ -190,8 +192,9 @@ export default function Shell() {
   }
 
   async function deleteChat(c) {
-    if (!await ask.confirm(`Delete “${listTitle(c)}”?`,
-                           { confirmLabel: 'Delete', danger: true })) return
+    if (!await ask.confirm(`Permanently delete “${listTitle(c)}”?`,
+                           { body: 'Its messages and tool history are removed. This cannot be undone.',
+                             confirmLabel: 'Delete forever', danger: true })) return
     try {
       await api(`/api/conversations/${c.id}`, { method: 'DELETE' })
     } catch (err) { notifyError(err); return }

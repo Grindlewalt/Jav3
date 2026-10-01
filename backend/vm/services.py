@@ -471,13 +471,20 @@ async def list_services(project: str | None = None, *,
 
 
 async def _event(kind: str, summary: str, *, severity: str = "warn",
-                 project: str | None = None, detail: dict | None = None) -> None:
+                 project: str | None = None, detail: dict | None = None,
+                 by_operator: bool = False, conversation_id: int | None = None) -> None:
+    """`by_operator` is the operator-facing route saying the change is the
+    operator's own click: recorded quietly ("by you"), never an alert. Marked
+    explicitly by the caller, not inferred: an agent's turn inherits the
+    operator's request context."""
     from .. import security
     from ..db import get_db
     db = await get_db()
     try:
         await security.raise_event(db, kind=kind, severity=severity,
-                                   project=project, summary=summary, detail=detail)
+                                   project=project, summary=summary, detail=detail,
+                                   actor=security.OPERATOR if by_operator else None,
+                                   conversation_id=conversation_id)
     finally:
         await db.close()
 
@@ -553,7 +560,8 @@ async def file_request(slug: str, args: dict, *, conversation_id: int | None = N
                  detail={"service_id": sid, "name": canon["name"],
                          "artifact_sha256": sha, "files": len(manifest),
                          "ports": canon["ports"], "egress_hosts": canon["egress_hosts"],
-                         "placement": placement, "supersedes_id": supersedes})
+                         "placement": placement, "supersedes_id": supersedes},
+                 conversation_id=conversation_id)
     _changed(row)
     return row
 
@@ -595,7 +603,7 @@ def check_exposure(row: dict, expose_ports: list) -> list[dict]:
 
 
 async def approve(sid: int, *, placement: str, expose_ports: list,
-                  by: str = "operator") -> dict:
+                  by: str = "operator", by_operator: bool = False) -> dict:
     """pending -> approved. `placement` is required and explicit (decision
     0.1); `expose_ports` is the operator's exposure choice (may be empty).
     Compare-and-set on status so a double click cannot approve twice."""
@@ -645,7 +653,8 @@ async def approve(sid: int, *, placement: str, expose_ports: list,
                          "expose_ports": exposure,
                          "artifact_sha256": row["artifact_sha256"],
                          "egress_hosts": row["egress_hosts"],
-                         "superseded": old["id"] if old else None})
+                         "superseded": old["id"] if old else None},
+                 by_operator=by_operator)
     _changed(row)
     if old is not None:
         _changed({**old, "status": "superseded", "desired_state": "stopped"})
@@ -654,7 +663,8 @@ async def approve(sid: int, *, placement: str, expose_ports: list,
     return row
 
 
-async def reject(sid: int, reason: str = "", by: str = "operator") -> dict:
+async def reject(sid: int, reason: str = "", by: str = "operator",
+                 by_operator: bool = False) -> dict:
     from ..db import get_db
     db = await get_db()
     try:
@@ -672,7 +682,8 @@ async def reject(sid: int, reason: str = "", by: str = "operator") -> dict:
         raise ServiceError(f"service #{sid} is {row['status']}, not pending", 409)
     await _event("service_rejected", severity="info", project=row["project_slug"],
                  summary=f"{by} rejected service '{row['name']}' (#{sid})",
-                 detail={"service_id": sid, "by": by, "reason": row["decision_note"]})
+                 detail={"service_id": sid, "by": by, "reason": row["decision_note"]},
+                 by_operator=by_operator)
     _changed(row)
     return row
 
@@ -700,7 +711,8 @@ async def set_desired(sid: int, state: str, by: str = "operator") -> dict:
     return row
 
 
-async def revoke(sid: int, *, delete_data: bool = False, by: str = "operator") -> dict:
+async def revoke(sid: int, *, delete_data: bool = False, by: str = "operator",
+                 by_operator: bool = False) -> dict:
     """Delete the definition and DESTROY its box: killing QEMU is the
     authoritative stop, whatever svcd says. The box comes back (fresh root)
     for the services that remain in it. `delete_data` removes this service's
@@ -746,7 +758,8 @@ async def revoke(sid: int, *, delete_data: bool = False, by: str = "operator") -
                  summary=f"{by} revoked service '{row['name']}' (#{sid})"
                          + (f"; box {bid} destroyed" if bid else ""),
                  detail={"service_id": sid, "by": by, "box_id": bid,
-                         "delete_data": bool(delete_data), "data_deleted": deleted})
+                         "delete_data": bool(delete_data), "data_deleted": deleted},
+                 by_operator=by_operator)
     out = await get(sid)
     _changed(out)
     return {**out, "data_deleted": deleted}
@@ -1092,7 +1105,8 @@ def _write_import_state(slug: str, st: dict) -> None:
     p.write_text(json.dumps(st))
 
 
-async def import_persist(slug: str, *, by: str = "operator") -> dict:
+async def import_persist(slug: str, *, by: str = "operator",
+                         by_operator: bool = False) -> dict:
     """Operator decision 0.3, one click: freeze the project's old /persist
     (approval off, so it never attaches again), schedule its delete
     `persist_retire_days` from now, and copy its contents into the project's
@@ -1130,7 +1144,7 @@ async def import_persist(slug: str, *, by: str = "operator") -> dict:
     await _event("persist_imported", project=slug,
                  summary=f"{by} imported /persist of '{slug}' into its service box "
                          f"/srv; the old disk is deleted after {when['persist_delete_after']}",
-                 detail={"by": by, **when})
+                 detail={"by": by, **when}, by_operator=by_operator)
     _spawn(_run_import(slug))
     return {"slug": slug, "state": "pending", **when}
 

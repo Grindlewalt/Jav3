@@ -42,7 +42,8 @@ async def put_placement(slug: str, body: PlacementBody,
     db = await get_db()
     try:
         out = await placement.put(db, slug, body.model_dump(),
-                                  actor=str(user.get("username") or "operator"))
+                                  actor=str(user.get("username") or "operator"),
+                                  by_operator=True)
         return {**await placement.overview(db, slug), "warnings": out["warnings"]}
     except placement.PlacementError as e:
         raise HTTPException(status_code=e.status, detail=str(e))

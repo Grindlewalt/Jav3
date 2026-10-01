@@ -278,7 +278,23 @@ class Settings(BaseSettings):
     plan_max_concurrent: int = 3
     plan_attempts_max: int = 2
     plan_stall_seconds: int = 300
+    # While a tool call is outstanding the item is working, not silent (a
+    # research run, spawn_agent children, run_code emit nothing until they
+    # return): the stall clock waits this long for the call instead. Past it the
+    # call counts as hung.
+    plan_stall_call_seconds: int = 1800
     plan_tick_seconds: float = 5.0
+    # Every plan item owns a block of plan_port_block ports on the shared box
+    # (one network namespace for all items and projects), handed out round-robin
+    # from plan_port_base so a server an item leaves running does not collide with
+    # the next item's. Keep the range below the kernel's ephemeral ports (32768+).
+    plan_port_base: int = 20000
+    plan_port_block: int = 10
+    plan_port_blocks: int = 500
+    # While items run, the runner pulls their guest writes home this often (and
+    # after every settle), so the host sees the files and a guest crash loses
+    # at most this much (orchestrator.flush_workspace).
+    plan_flush_seconds: float = 60.0
     # An orchestrator conversation (POST /api/chat mode=orchestrate) spends
     # most of its rounds waiting in plan_status, one round per wait — the chat
     # cap would end a long plan's supervision halfway. The wait itself is
@@ -549,6 +565,13 @@ class Settings(BaseSettings):
     # re-feed the payload — a couple of lines is the whole signal, and the
     # window is 16k. 0 disables the replay.
     voice_local_tool_trace_chars: int = 200
+    # When the turn right before a new message died (guest crash, lost
+    # connection, provider error), the model gets that turn's tool calls back
+    # in its history so "continue" can pick up from the last step instead of
+    # rediscovering everything. Each replayed result, and each long string in
+    # a call's arguments, is cut to this many characters; the last 30 calls
+    # are kept (compaction.FAILED_TURN_TRACE_CALLS). 0 turns the replay off.
+    failed_turn_trace_chars: int = 600
     # Sampling for the local tier only (never sent to DeepSeek). A 4B with a
     # prose-heavy history loops on its own last phrasing; a small presence
     # penalty is the cheap half of the fix. The token cap is a runaway guard —

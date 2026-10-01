@@ -1,8 +1,9 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from '../api.js'
 import Md from '../Md.jsx'
 import { ActivityGroup, MessageBody, ModelTag } from '../ToolActivity.jsx'
+import { activityOf } from '../turnEvents.js'
 import { listTitle } from '../ChatGroups.jsx'
 import { ago } from '../format.js'
 import ApprovalRow from './ApprovalRow.jsx'
@@ -33,10 +34,11 @@ function Prompt({ text }) {
 }
 
 function Reply({ m, expandAll }) {
+  const activity = useMemo(() => activityOf(m), [m.activity, m.narration])
   if (m.parts) return <div className="sh-reply"><MessageBody m={m} /></div>
   return (
     <div className="sh-reply">
-      {m.activity?.length > 0 && <ActivityGroup parts={m.activity} expanded={expandAll} />}
+      {activity.length > 0 && <ActivityGroup parts={activity} expanded={expandAll} />}
       <Md text={m.content} />
       <ModelTag model={m.model} />
     </div>

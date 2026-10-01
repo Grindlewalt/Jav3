@@ -2,9 +2,11 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api } from '../api.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
+import { useIsPhone } from '../breakpoints.js'
 import Page from '../components/Page.jsx'
 import EmptyState from '../components/EmptyState.jsx'
 import Md from '../Md.jsx'
+import { serverTime, utcTime } from '../schedTime.js'
 
 // Heartbeats: "run X every day at 8am" / "every 6 hours". A schedule runs
 // either a defined agent or a plain Jav3 prompt, headless, in an optional
@@ -22,11 +24,15 @@ export default function Schedules() {
   const [form, setForm] = useState(BLANK)
   const [busy, setBusy] = useState(null)
   const [editing, setEditing] = useState(null)   // schedule id being edited
+  const phone = useIsPhone()
+  const [formOpen, setFormOpen] = useState(false)   // phone: the New schedule form is folded away
+  const [tz, setTz] = useState(null)            // the server's zone: next/last are its wall clock
   const ask = useAsk()
 
   const refresh = () => api('/api/schedules').then((r) => {
     setSchedules(r.schedules)
     setDeleted(r.deleted || [])
+    setTz(r.server_tz || null)
   })
   useEffect(() => {
     refresh()
@@ -38,7 +44,7 @@ export default function Schedules() {
 
   async function save(e) {
     e.preventDefault()
-    if (!form.name.trim() || !form.task.trim()) return
+    if (!form.name.trim() || !form.task.trim()) { notify('a schedule needs a name and a task'); return }
     if (form.kind === 'agent' && !form.agent_slug) { notify('pick an agent'); return }
     const body = JSON.stringify({
       ...form,
@@ -66,31 +72,34 @@ export default function Schedules() {
 
   function cancelEdit() {
     setEditing(null)
+    setFormOpen(false)
     setForm(BLANK)
   }
 
-  async function toggle(s) {
-    await api(`/api/schedules/${s.id}?enabled=${!s.enabled}`, { method: 'PATCH' })
+  // a failed pause / delete / restore used to be an unhandled rejection: say why
+  async function act(fn) {
+    try { await fn() } catch (err) { notifyError(err) }
     refresh()
   }
+  const toggle = (s) => act(() =>
+    api(`/api/schedules/${s.id}?enabled=${!s.enabled}`, { method: 'PATCH' }))
   async function del(s) {
     if (!await ask.confirm(`Move "${s.name}" to recently deleted?`,
                            { confirmLabel: 'Move to bin' })) return
-    await api(`/api/schedules/${s.id}`, { method: 'DELETE' })
-    refresh()
+    act(() => api(`/api/schedules/${s.id}`, { method: 'DELETE' }))
   }
-  async function restore(s) {
-    await api(`/api/schedules/${s.id}/restore`, { method: 'POST' })
-    refresh()
-  }
+  const restore = (s) => act(() => api(`/api/schedules/${s.id}/restore`, { method: 'POST' }))
   async function purge(s) {
     if (!await ask.confirm(`Permanently delete "${s.name}"?`,
                            { body: 'This cannot be undone.',
                              confirmLabel: 'Delete forever', danger: true })) return
-    await api(`/api/schedules/${s.id}/purge`, { method: 'DELETE' })
-    refresh()
+    act(() => api(`/api/schedules/${s.id}/purge`, { method: 'DELETE' }))
   }
   async function runNow(s) {
+    // it starts a real model turn now, which costs money
+    if (!await ask.confirm(`Run "${s.name}" now?`,
+                           { body: 'This starts a model turn immediately.',
+                             confirmLabel: 'Run now' })) return
     setBusy(s.id)
     try { await api(`/api/schedules/${s.id}/run-now`, { method: 'POST' }) }
     catch (err) { notifyError(err) }
@@ -105,8 +114,17 @@ export default function Schedules() {
   return (
     <Page variant="split" title="Schedules" className="sched-page">
       <aside>
-        <div className="side-title">{editing ? `Edit schedule #${editing}` : 'New schedule'}</div>
-        <form className="sched-form" onSubmit={save}>
+        {/* on a phone the form filled the first screen and pushed the schedules
+            below the fold: it opens from a button instead (WEBA-24) */}
+        {phone && !editing ? (
+          <button type="button" className="ghost sched-new" aria-expanded={formOpen}
+                  onClick={() => setFormOpen((o) => !o)}>
+            {formOpen ? 'Hide the form' : '+ New schedule'}</button>
+        ) : (
+          <div className="side-title">{editing ? `Edit schedule #${editing}` : 'New schedule'}</div>
+        )}
+        <form className={`sched-form${phone && !formOpen && !editing ? ' collapsed' : ''}`}
+              onSubmit={save}>
           <input placeholder="schedule name" aria-label="schedule name" value={form.name}
                  onChange={(e) => set({ name: e.target.value })} />
           <label className="mini">what runs
@@ -141,6 +159,8 @@ export default function Schedules() {
             ? <input type="time" value={form.daily_at} onChange={(e) => set({ daily_at: e.target.value })} />
             : <input type="number" min="15" value={form.interval_minutes}
                      onChange={(e) => set({ interval_minutes: e.target.value })} />}
+          {form.cadence_kind === 'daily' && (
+            <span className="dim small">the server's clock{tz?.name ? ` (${tz.name})` : ''}, not necessarily yours</span>)}
           <button type="submit">{editing ? 'save changes' : '+ create'}</button>
           {editing && <button type="button" className="ghost" onClick={cancelEdit}>cancel</button>}
         </form>
@@ -156,6 +176,7 @@ export default function Schedules() {
                   <span className="tag">{s.kind === 'agent' ? s.agent_slug : 'jav3'}</span>
                   {s.project_slug && <span className="tag">{s.project_slug}</span>}
                   {!!s.pending_approval && <span className="tag pending">awaiting approval</span>}
+                  {!s.enabled && !s.pending_approval && <span className="tag">paused</span>}
                 </span>
                 <button className="ghost" disabled={busy === s.id}
                         onClick={() => runNow(s)}>{busy === s.id ? '…' : 'run now'}</button>
@@ -165,8 +186,10 @@ export default function Schedules() {
                 <button className="ghost danger" onClick={() => del(s)}>delete</button>
               </div>
               <div className="dim small">{s.task}</div>
-              <div className="dim small">{cadence(s)} · next {s.next_run?.replace('T', ' ')}
-                {s.last_run && ` · last ${s.last_run.replace('T', ' ')}`}</div>
+              <div className="dim small">{cadence(s)}
+                {/* a paused schedule keeps its old next_run: it will not fire */}
+                {s.enabled ? ` · next ${serverTime(s.next_run, tz)}` : ' · not scheduled'}
+                {s.last_run && ` · last ${serverTime(s.last_run, tz)}`}</div>
               {s.last_result && <SchedResult text={s.last_result} />}
             </li>
           ))}
@@ -190,7 +213,7 @@ export default function Schedules() {
                     <button className="ghost danger" onClick={() => purge(s)}>delete forever</button>
                   </div>
                   <div className="dim small">{s.task}</div>
-                  <div className="dim small">{cadence(s)} · deleted {s.deleted_at?.slice(0, 16)}</div>
+                  <div className="dim small">{cadence(s)} · deleted {utcTime(s.deleted_at)}</div>
                 </li>
               ))}
             </ul>

@@ -162,6 +162,45 @@ async def test_unattributed_shared_traffic_queues_under_general(env):
     assert p["project_slug"] == egress.GENERAL and p["box_id"] == "shared"
 
 
+async def test_shared_box_with_two_projects_live_is_ambiguous_not_the_newest(env):
+    # WEBA-07 / BUILD-06: two projects' turns drive the one shared guest, so a
+    # connection cannot be told apart. It is NOT billed to whichever turn started
+    # last: it is unattributed (the Default profile, nothing auto-approved) and
+    # the event says why.
+    db, _a, _b = env
+    egress.set_context("snake", "op-s", 1)
+    egress.set_context("build", "op-b", 2)
+    w = FakeWriter(("10.201.0.2", 40400))
+    await ep.handle_conn(reader_for(CONNECT % b"amb"), w, box=None)
+    [r] = await rows(db, "denied-amb.example")
+    assert r["project_slug"] is None and r["op_id"] is None and r["box_id"] == "shared"
+    assert "more than one project" in r["reason"] and r["verdict"] == "deny"
+    [p] = await egress.list_pending(db)
+    assert p["project_slug"] == egress.GENERAL and p["host"] == "denied-amb.example"
+    # one of them ends: the survivor is attributable again
+    egress.clear_context("op-s")
+    await ep.handle_conn(reader_for(CONNECT % b"solo"), FakeWriter(("10.201.0.2", 40401)), box=None)
+    [r] = await rows(db, "denied-solo.example")
+    assert r["project_slug"] == "build" and r["op_id"] == "op-b"
+
+
+async def test_shared_box_parent_and_child_of_one_project_stay_attributed(env):
+    db, _a, _b = env
+    egress.set_context("snake", "op-p", 1)
+    egress.set_context("snake", "op-c", 2)
+    att = ep.attribute(None, ("10.201.0.2", 9))
+    assert att["project"] == "snake" and att["op_id"] == "op-c" and not att.get("ambiguous")
+
+
+async def test_a_turn_on_a_project_box_does_not_make_the_shared_box_ambiguous(env):
+    db, a, _b = env
+    boxes.bind_op("op-a", a, "alpha")
+    egress.set_context("alpha", "op-a", 1)           # runs in alpha's own box
+    egress.set_context("gamma", "op-g", 3)           # the only shared-box turn
+    att = ep.attribute(None, ("10.201.0.2", 9))
+    assert att["project"] == "gamma" and not att.get("ambiguous")
+
+
 async def test_service_box_is_deny_by_default_and_never_queues(env):
     db, _a, _b = env
     cur = await db.execute(

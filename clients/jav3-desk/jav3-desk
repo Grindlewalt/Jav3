@@ -2080,11 +2080,39 @@ class X11Backend(Backend):
                 return Path(f).read_bytes()
         raise DeskError("install ImageMagick (import), maim or scrot for screenshots")
 
+    def pil_thumbnail(self, mon: Monitor, rect: tuple | None = None) -> bytes | None:
+        """A raw PGM through Pillow (ImageGrab on the X display, else the
+        maim capture decoded), for hosts without ImageMagick; None when
+        Pillow or the capture is not there."""
+        try:
+            import io
+
+            from PIL import Image, ImageGrab
+        except ImportError:
+            return None
+        x, y, w, h = (mon.x, mon.y, mon.w, mon.h) if rect is None else (
+            mon.x + rect[0], mon.y + rect[1], rect[2], rect[3])
+        try:
+            try:
+                im = ImageGrab.grab(bbox=(x, y, x + w, y + h),
+                                    xdisplay=os.environ.get("DISPLAY"))
+            except Exception:  # noqa: BLE001 — no X support in this Pillow build
+                if not self.bin.get("maim"):
+                    return None
+                im = Image.open(io.BytesIO(run_argv(
+                    [self.bin["maim"], "-f", "png", "-g", f"{w}x{h}+{x}+{y}"])))
+            k = THUMB_EDGE / max(w, h)
+            im = im.convert("L").resize((max(1, round(w * k)), max(1, round(h * k))))
+            return b"P5\n%d %d\n255\n" % im.size + im.tobytes()
+        except Exception:  # noqa: BLE001 — the settle check falls back to the full shot
+            return None
+
     def thumbnail(self, mon: Monitor, rect: tuple | None = None) -> bytes:
         """A raw PGM from ImageMagick (decodable, so a caret blink is not a
-        change); without it, the full screenshot compared byte-for-byte."""
+        change), else from Pillow; without either, the full screenshot
+        compared byte-for-byte."""
         if not self.bin.get("import"):
-            return super().thumbnail(mon, rect)
+            return self.pil_thumbnail(mon, rect) or super().thumbnail(mon, rect)
         x, y, w, h = (mon.x, mon.y, mon.w, mon.h) if rect is None else (
             mon.x + rect[0], mon.y + rect[1], rect[2], rect[3])
         k = THUMB_EDGE / max(w, h)
@@ -3208,30 +3236,37 @@ class Session:
                                   ping_interval=None, user_agent_header=USER_AGENT,
                                   **{key: hdr})
         async with conn as ws:
-            await ws.send(json.dumps(self.hello()))
-            pinger = asyncio.create_task(self._ping(ws))
-            watcher = asyncio.create_task(self._watch_state(ws))
-            try:
-                async for raw in ws:
-                    try:
-                        m = json.loads(raw)
-                    except ValueError:
-                        continue
-                    t = m.get("type") if isinstance(m, dict) else None
-                    if t == "grants":
-                        self.grants = {k: m.get(k) for k in ("screen", "input", "shell")}
-                    elif t == "req":
-                        task = asyncio.create_task(self.handle(ws, m))
-                        self.inflight.add(task)
-                        task.add_done_callback(self.inflight.discard)
-                    elif t == "kill":
-                        for task in list(self.inflight):
-                            task.cancel()
-                        self.grants = {"screen": False, "input": False, "shell": "off"}
-                        return "killed: " + str(m.get("reason") or "")
-            finally:
-                pinger.cancel()
-                watcher.cancel()
+            return await self.pump(ws)
+
+    async def pump(self, ws) -> str:
+        """The session over an open transport: hello, then the server's frames
+        until it hangs up or kills. `ws` needs only `send(str)`, `close()` and
+        async iteration over text frames, so the box desktop (guest/backend/
+        deskbox.py) runs this same loop over a line-framed pipe."""
+        await ws.send(json.dumps(self.hello()))
+        pinger = asyncio.create_task(self._ping(ws))
+        watcher = asyncio.create_task(self._watch_state(ws))
+        try:
+            async for raw in ws:
+                try:
+                    m = json.loads(raw)
+                except ValueError:
+                    continue
+                t = m.get("type") if isinstance(m, dict) else None
+                if t == "grants":
+                    self.grants = {k: m.get(k) for k in ("screen", "input", "shell")}
+                elif t == "req":
+                    task = asyncio.create_task(self.handle(ws, m))
+                    self.inflight.add(task)
+                    task.add_done_callback(self.inflight.discard)
+                elif t == "kill":
+                    for task in list(self.inflight):
+                        task.cancel()
+                    self.grants = {"screen": False, "input": False, "shell": "off"}
+                    return "killed: " + str(m.get("reason") or "")
+        finally:
+            pinger.cancel()
+            watcher.cancel()
         return "closed"
 
     async def _watch_state(self, ws) -> None:

@@ -1,7 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { api, chatStream, tailStream } from './api.js'
 import { MessageBody } from './ToolActivity.jsx'
-import { activityMark, makeTurnFolder, newTurn } from './turnEvents.js'
+import ResumeBar from './ResumeBar.jsx'
+import { RESUME_TEXT, resumable, resumeUrl } from './resume.js'
+import { activityMark, makeTurnFolder, newTurn, seedParts } from './turnEvents.js'
 import { useFollow } from './useFollow.js'
 import TurnStatus from './TurnStatus.jsx'
 import { useAsk } from './ask.jsx'
@@ -130,7 +132,7 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
     // a turn is still executing server-side — re-attach and watch it finish,
     // seeding the placeholder with the tool calls it already made
     setBusy(true)
-    const seed = (r.pending_activity || []).map((a) => ({ kind: 'tool', ...a }))
+    const seed = seedParts(r)
     setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true,
                                 parts: seed, t0: Date.now() }])
     const ctl = new AbortController()
@@ -174,12 +176,14 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
     try { await api(`/api/chat/${cid}/stop`, { method: 'POST' }) } catch { /* already done */ }
   }
 
-  async function send() {
-    const text = input.trim()
+  // `resumeTurn`: send the resume endpoint's fixed message instead of the draft;
+  // it refuses (409) unless the chat's last turn really died
+  async function send(resumeTurn = false) {
+    const text = resumeTurn ? RESUME_TEXT : input.trim()
     if (!text || busy) return
     setBusy(true)
     // clear the bar NOW — the message visibly left; it comes back on failure
-    setInput('')
+    if (!resumeTurn) setInput('')
     const wasNew = cid === null
     const mine = gen.current
     let started = false   // a `start` arrived: the turn began
@@ -210,6 +214,7 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
           if (ev.type === 'final' || ev.type === 'error') settled = true
           handleTurnEvent(ev, mine)
         },
+        resumeTurn ? resumeUrl(cid) : undefined,
       )
     } catch (err) {
       if (mine !== gen.current) return   // the thread was left; the turn runs regardless
@@ -219,7 +224,7 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
       } else {
         // refused before anything streamed: drop the optimistic pair, keep the draft
         setMessages((m) => m.slice(0, -2))
-        setInput(text)
+        if (!resumeTurn) setInput(text)
         setMessages((m) => [...m, { role: 'error',
           content: err.status === 409 && err.detail === 'turn_in_progress'
             ? 'a turn is still running in this chat — wait for it to finish'
@@ -297,6 +302,9 @@ export default function ChatBox({ projectSlug, initialId, onOpened }) {
               : <pre>{m.content || (m.streaming ? '…' : '')}</pre>}
           </div>
         ))}
+        {cid && !busy && resumable(messages) && (
+          <ResumeBar compact onResume={() => send(true)} />
+        )}
       </div>
       {!follow.pinned && (follow.away > 0 || busy) && messages.length > 0 && (
         <button type="button" className="follow-pill" onClick={follow.jump}>

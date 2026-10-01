@@ -42,6 +42,7 @@ EVENTS = ("started", "stopped", "restarted", "idle_stopped", "wiped", "nuked",
           "destroyed", "crashed", "error")
 BUS_CHAN = boxes.BUS_CHAN
 KEEP_ROWS = 5000                 # the table keeps the newest this many events
+KEEP_PER_BOX = 500               # ...and one box cannot push the others' out of them
 REASON_CHARS = 300
 
 # the action in progress in this task: {"boxes": {ids}, "actor", "reason"}
@@ -160,6 +161,10 @@ async def record(box, event: str, *, reason: str | None = None,
             if cur.lastrowid and cur.lastrowid > KEEP_ROWS:
                 await db.execute("DELETE FROM box_events WHERE id <= ?",
                                  (cur.lastrowid - KEEP_ROWS,))
+            await db.execute(       # NULL (fewer rows than the cap) deletes nothing
+                "DELETE FROM box_events WHERE box_id = ? AND id <= (SELECT id FROM "
+                "box_events WHERE box_id = ? ORDER BY id DESC LIMIT 1 OFFSET ?)",
+                (ev["box_id"], ev["box_id"], KEEP_PER_BOX))
             await db.commit()
         finally:
             await db.close()
@@ -205,13 +210,18 @@ async def watch(box) -> None:
         msg, key, ev = f"the guest exited on its own (QEMU exit code {rc})", ("rc", id(proc)), "crashed"
     elif getattr(ctl, "state", None) == "failed" and getattr(ctl, "error", None):
         msg, key, ev = str(ctl.error), ("err", ctl.error), "error"
-    elif getattr(ctl, "state", None) == "running" and hasattr(ctl, "_alive"):
-        try:
-            alive = await ctl._alive()
-        except Exception:  # noqa: BLE001
-            alive = True
-        if not alive:
-            msg, key, ev = "the container is no longer running", ("dead", ctl.booted_at), "crashed"
+    elif getattr(ctl, "state", None) == "running" and hasattr(ctl, "crashed"):
+        # a container that died under a box that says running: the controller
+        # moves the box to failed (its row stops claiming a live box)
+        tok = _scope.set({"boxes": {box.id}, "actor": "app", "reason": None})
+        try:                     # quiet: the cleanup's box_down is not a 'stopped'
+            msg = await ctl.crashed()
+        finally:
+            _scope.reset(tok)
+        if msg:
+            _noted[box.id] = ("err", msg)     # the failed state is not a second event
+            await record(box, "crashed", reason=msg, actor="app")
+        return
     if msg is None or _noted.get(box.id) == key:
         return
     _noted[box.id] = key

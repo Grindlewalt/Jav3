@@ -74,11 +74,12 @@ async def test_the_dialog_says_who_asks_and_numbers_its_options():
         assert "Write c.txt #601" in head and "2 more waiting" in head
         assert head.count("z.txt") == 1                 # the path, once
         text = scr._foot_text()
-        assert "1-2 pick" in text and "esc skips" in text
+        assert "1-3 pick" in text and "esc declines" in text
         assert "1. ( ) Yes" in rows.splitlines()[0] and "2. ( ) Yes, always" in rows
+        assert "3. ( ) No" in rows.splitlines()[2]
         # the free-text line appears only when it is in use
         assert not scr.query_one("#ask-text").display
-        await pilot.press("down", "down")
+        await pilot.press("down", "down", "down")
         await pilot.pause(0.1)
         assert scr.query_one("#ask-text").display
         await pilot.press("escape")
@@ -123,7 +124,7 @@ async def test_options_and_key_line_stay_on_screen_whatever_the_command(size):
             r = scr.query_one(wid).region
             assert dialog.contains_region(r), (wid, r, dialog)
         assert dialog.bottom <= size[1] and dialog.y >= 0
-        assert "esc skips" in scr._foot_text()
+        assert "esc declines" in scr._foot_text()
         # the command scrolls inside its own box
         top_box = scr.query_one("#ask-top")
         assert top_box.max_scroll_y > 0

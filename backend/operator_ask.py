@@ -30,6 +30,10 @@ import uuid
 from . import bus, runtime
 
 ASK_TIMEOUT_S = 60 * 60          # an unanswered ask gives up after an hour
+# An orchestrator whose plan run is live waits this long, then goes back to
+# supervising with the question left open (PLANS-04: an hour parked in ask_user
+# meant an hour with items blocked, stalled or finished and nobody watching).
+ORCH_ASK_WAIT_S = 120
 MAX_QUESTIONS = 6
 MAX_OPTIONS = 5
 MIN_OPTIONS = 2
@@ -51,6 +55,9 @@ class _Ask:
     event: dict
     fut: asyncio.Future
     created: float
+    detached: bool = False           # nobody waits on fut: the answer is sent as a message
+    chan: str = ""                   # the turn's channel (to close every view later)
+    closed: bool = False             # ask_done already sent
 
 
 _pending: dict[str, _Ask] = {}
@@ -169,11 +176,51 @@ def _chans(turn_chan: str, cids: list[int]) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+async def _supervising_a_run(cid: int) -> bool:
+    """Is `cid` an orchestrator conversation whose plan run is live right now?"""
+    from .db import get_db
+    try:
+        db = await get_db()
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        async with db.execute(
+                "SELECT c.mode AS mode, p.slug AS slug FROM conversations c "
+                "LEFT JOIN projects p ON p.id = c.project_id WHERE c.id = ?",
+                (cid,)) as cur:
+            row = await cur.fetchone()
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        await db.close()
+    if row is None or row["mode"] != "orchestrate" or not row["slug"]:
+        return False
+    from . import plan
+    return plan.is_running(row["slug"])
+
+
+def _settled(a: _Ask) -> None:
+    """Tell every view that showed an ask that it is over (answered here or
+    elsewhere, timed out, cancelled, or detached and then answered), so a second
+    copy closes. Idempotent."""
+    if a.closed:
+        return
+    a.closed = True
+    _pending.pop(a.id, None)
+    done = {"type": "ask_done", "id": a.id, "conversation_id": a.conversation_id}
+    for c in _chans(a.chan, sorted(a.shown_in)):
+        bus.publish(c, done)
+
+
 async def ask(questions: list[dict], *, extra: dict | None = None,
               timeout: float | None = None) -> dict:
     """Publish one ask on the running turn and wait for the operator.
-    -> {"answers": [...]} | {"skipped": True} | {"error": text}. Raises
-    AskCancelled when the operator stops the turn meanwhile."""
+    -> {"answers": [...]} | {"skipped": True} | {"error": text} | {"detached": id}.
+    Raises AskCancelled when the operator stops the turn meanwhile.
+
+    {"detached": id} is for an orchestrator supervising a live plan run: after
+    ORCH_ASK_WAIT_S the ask stays open for the operator but the turn is handed
+    back, and the operator's answer later reaches it as a message (answer())."""
     cid = runtime.conversation_id.get()
     chan = runtime.event_chan.get()
     if cid is None or not chan:
@@ -183,22 +230,26 @@ async def ask(questions: list[dict], *, extra: dict | None = None,
     event = {"type": "ask_user", "id": ask_id, "conversation_id": cid,
              "agent": await _label(cid), "questions": questions, **(extra or {})}
     fut = asyncio.get_running_loop().create_future()
-    _pending[ask_id] = _Ask(ask_id, cid, frozenset([cid, *ancestors]), event, fut,
-                            time.time())
+    a = _pending[ask_id] = _Ask(ask_id, cid, frozenset([cid, *ancestors]), event, fut,
+                                time.time(), chan=chan)
+    wait = timeout or ASK_TIMEOUT_S
+    # a permission ask (extra.kind) gates one tool call and needs its answer
+    detachable = not (extra or {}).get("kind") and await _supervising_a_run(cid)
+    if detachable:
+        wait = min(wait, ORCH_ASK_WAIT_S)
     try:
         for c in _chans(chan, [cid, *ancestors]):
             bus.publish(c, event)
-        return await asyncio.wait_for(fut, timeout or ASK_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        return {"error": f"the operator did not answer within "
-                         f"{int((timeout or ASK_TIMEOUT_S) // 60)} minutes"}
+        await asyncio.wait({fut}, timeout=wait)     # (wait_for would cancel fut)
+        if fut.done():
+            return fut.result()
+        if detachable and await _supervising_a_run(cid):
+            a.detached = True
+            return {"detached": ask_id}
+        return {"error": f"the operator did not answer within {int(wait // 60)} minutes"}
     finally:
-        _pending.pop(ask_id, None)
-        # tell every view that showed it that it is settled (answered here,
-        # elsewhere, timed out or cancelled), so a second copy closes
-        done = {"type": "ask_done", "id": ask_id, "conversation_id": cid}
-        for c in _chans(chan, [cid, *ancestors]):
-            bus.publish(c, done)
+        if not a.detached:
+            _settled(a)
 
 
 def answer(cid: int, ask_id: str, answers, skipped: bool) -> str:
@@ -208,20 +259,50 @@ def answer(cid: int, ask_id: str, answers, skipped: bool) -> str:
     if a is None or a.fut.done() or cid not in a.shown_in:
         return "missing"
     if skipped:
-        a.fut.set_result({"skipped": True})
-        return "ok"
-    got = clean_answers(a.event["questions"], answers)
-    if got is None:
-        return "invalid"
-    a.fut.set_result({"answers": got})
+        got = {"skipped": True}
+    else:
+        clean = clean_answers(a.event["questions"], answers)
+        if clean is None:
+            return "invalid"
+        got = {"answers": clean}
+    a.fut.set_result(got)
+    if a.detached:
+        _deliver_detached(a, got)
     return "ok"
+
+
+def _deliver_detached(a: _Ask, got: dict) -> None:
+    """The turn that asked went back to work (ask() returned {"detached"}): the
+    operator's answer reaches it as a message, read after its current tool call
+    like any other operator message. If its turn has ended the ask was dropped
+    with it, so this only ever runs for a live one."""
+    _settled(a)
+    text = ("Your earlier question to the operator (asked while the plan run was "
+            "live) has now been answered.\n"
+            + render_result(a.event["questions"], got))
+
+    async def _send() -> None:
+        from . import agentmsg
+        await agentmsg.queue_operator_message(a.conversation_id, text)
+    asyncio.get_running_loop().create_task(_send())
+
+
+def _cancel(a: _Ask) -> None:
+    if a.detached:
+        a.fut.cancel()          # nothing waits on it: just close it everywhere
+        _settled(a)
+    else:
+        # released at once, not when the asking coroutine next runs: a stop that
+        # returns must leave nothing pending (and the agents view nothing waiting)
+        a.fut.set_exception(AskCancelled())
+        _settled(a)
 
 
 def cancel_conversation(cid: int) -> int:
     n = 0
     for a in list(_pending.values()):
         if a.conversation_id == cid and not a.fut.done():
-            a.fut.set_exception(AskCancelled())
+            _cancel(a)
             n += 1
     return n
 
@@ -235,7 +316,7 @@ def cancel_tree(cids) -> int:
     n = 0
     for a in list(_pending.values()):
         if not a.fut.done() and (a.conversation_id in ids or ids & a.shown_in):
-            a.fut.set_exception(AskCancelled())
+            _cancel(a)
             n += 1
     return n
 
@@ -244,7 +325,7 @@ def cancel_all() -> int:
     n = 0
     for a in list(_pending.values()):
         if not a.fut.done():
-            a.fut.set_exception(AskCancelled())
+            _cancel(a)
             n += 1
     return n
 
@@ -269,6 +350,13 @@ def render_result(questions: list[dict], got: dict) -> str:
     """ask_user's tool result, as the model reads it."""
     if got.get("error"):
         return f"error: {got['error']}"
+    if got.get("detached"):
+        return ("The question is posted to the operator and stays open, but your plan "
+                "run is live and nobody is watching it while you wait, so it does not "
+                "block you. Go back to plan_status now; do not ask again. If the "
+                "operator answers while you are still working it reaches you as a "
+                "message. Until then decide on your best judgement, say which "
+                "assumption you made, and put anything still open in your final report.")
     if got.get("skipped"):
         return ("The operator SKIPPED these questions without answering. Do not ask "
                 "the same thing again right away: proceed on your best judgement "

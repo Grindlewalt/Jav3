@@ -5,6 +5,7 @@ when_to_use: To find sources on a topic before reading them, or to answer someth
 enabled: true
 section: web
 core: true
+action: search
 read_only: true
 parameters:
   type: object

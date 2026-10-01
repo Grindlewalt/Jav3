@@ -404,7 +404,8 @@ def notify_pending(name: str, proposal: bool = False) -> None:
         pass
 
 
-async def audit(kind: str, severity: str, summary: str, detail: dict | None = None) -> None:
+async def audit(kind: str, severity: str, summary: str, detail: dict | None = None,
+                *, by_operator: bool = False) -> None:
     """One security event for something an agent (or the operator) did to memory.
     Best-effort: the action stands even if the alert cannot be written. Skipped
     in an incognito turn, where the notes dir is a throwaway. Names the run that
@@ -419,7 +420,8 @@ async def audit(kind: str, severity: str, summary: str, detail: dict | None = No
         try:
             await security.raise_event(
                 db, kind=kind, severity=severity, summary=summary,
-                detail={**(detail or {}), "conversation_id": runtime.conversation_id.get()})
+                detail={**(detail or {}), "conversation_id": runtime.conversation_id.get()},
+                actor=security.OPERATOR if by_operator else None)
         finally:
             await db.close()
     except Exception:  # noqa: BLE001 — never fail the memory action over its alert
@@ -584,7 +586,8 @@ STATIC_BEHAVIOR = """# Behavior — how you work
 - GUI map: Work (chat, with the project's panels beside it) · Agents
   (definitions, runs, skills) · Security (approvals, alerts, network, logs,
   secrets) · VMs · Tools · Settings, and behind the ⋯ menu Memory (where the
-  operator approves the notes you save) · Schedules · Shell.
+  operator approves the notes you save) · Schedules · Git (the project's repo
+  on the host's Gitea: your pull requests, who can open it) · Shell.
 - You can DRIVE the operator's open GUI: workspace_panel arranges the active
   project's board (add/remove/open_file/tile/list), open_website opens a browser
   tab, play_music / play_movie start a floating player. Prefer showing over
@@ -690,7 +693,7 @@ call simply had a bad argument, fix the call instead.
   and lists its parameters, with the closest name to what you typed. Identity
   is never an argument (from / sender / conversation_id are always refused).
 - todo_update works without a loaded project: the list then lasts for this
-  turn only (the result says so). With a project it is the project's todo.md.
+  turn only (the result says so). With a project it lives in the project's .todo.md (a todo.md you write stays yours).
 - After a screenshot, the image arrives as its own message after the tool
   result; system notes are attached to the tool result, not the image.
 - send_message addressing: a plan-item sibling is `item:<id>` (e.g.
@@ -1222,6 +1225,8 @@ def _active_project_blocks(slug: str) -> list[str]:
     base = settings.projects_dir / slug
     skipped: list[str] = []
     for rel in context_selection(slug):
+        if rel == "project.md":        # already above; the always-loaded list counts it once
+            continue
         path = base / rel
         if not path.is_file():
             continue
@@ -1240,4 +1245,10 @@ def _active_project_blocks(slug: str) -> list[str]:
             "# Selected project files NOT inlined (over the context budget)\n"
             "Read any of these on demand with read_file:\n"
             + "\n".join(f"- {s}" for s in skipped))
+    # a tainted turn's write to one of these files is held for the operator
+    # (alwaysloaded.py): say so, or the agent reads the old text and writes again
+    from . import alwaysloaded
+    held = alwaysloaded.prompt_note(slug)
+    if held:
+        blocks.append(held)
     return blocks

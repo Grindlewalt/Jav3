@@ -85,7 +85,7 @@ async def test_reply_ready_when_the_window_is_elsewhere():
         assert app.unread == 1
 
 
-async def test_watching_means_this_chat_on_the_main_screen():
+async def test_watching_means_this_chat_on_the_chat_page():
     srv, app = make_app()
     async with app.run_test(size=(100, 30)) as pilot:
         await open_chat(pilot, app, srv)
@@ -93,10 +93,9 @@ async def test_watching_means_this_chat_on_the_main_screen():
         assert app._watching(4)
         assert not app._watching(99)               # a reply in another chat
         await finish(srv, app)
-        from textual.screen import Screen
-        await app.push_screen(Screen())            # like the agents screen
+        await app.open_page("agents")              # a page over the chat
         assert not app._watching(4)
-        await app.pop_screen()
+        await app.host.home()
         assert app._watching(4)
 
 
@@ -194,7 +193,7 @@ async def test_hidden_rows_wait_for_a_filter_and_a_line_says_how_many():
         prompts = [ol.get_option_at_index(i).prompt for i in range(ol.option_count)]
         assert "LMStudio" not in "".join(str(p) for p in prompts)      # no empty heading
         assert "3 more hidden" in str(prompts[-1])
-        await pilot.press("t", "l", "l", "a")
+        await pilot.press("l", "l", "a")
         await pilot.pause(0.2)
         ids = [ol.get_option_at_index(i).id for i in range(ol.option_count)]
         assert ids[:2] == ["lm/a", "lm/b"]
@@ -245,6 +244,7 @@ def test_network_verdicts_are_whole_words():
     assert jav3.verdict_label("auto_allow") == "A·ALLOW"
     assert jav3.verdict_label("auto_deny") == "A·DENY"
     assert jav3.verdict_label(None) == "?"
+    assert jav3.verdict_label("reviewed") == "REVIEWED"          # TUIB-18: not REVIEWE
 
 
 def test_current_agent_row_uses_solid_colours_for_256_colour_terminals():

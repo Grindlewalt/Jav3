@@ -27,7 +27,7 @@ from .agent.model import complete_text
 from .config import settings
 from .db import get_db, launcher, open_conversation
 from .memory import standing_rules_tail
-from .writes import apply_write
+from .writes import apply_write, apply_write_gated
 
 MAX_QUERIES = 8
 RESULTS_PER_QUERY = 6
@@ -48,9 +48,11 @@ def _dom(u: str) -> str:
 
 async def _write_doc(project: str, doc_path: str, doc: str) -> str:
     """Write the FINAL research document straight to the project (the staging
-    queue is gone; writes are live and advisory-scanned in apply_write)."""
-    await apply_write(project, doc_path, doc.encode())
-    return "canonical"
+    queue is gone; writes are live and advisory-scanned in apply_write). The
+    document is built from web pages, so it counts as a tainted write: over a
+    file the operator listed as always loaded it waits for approval instead."""
+    _, held = await apply_write_gated(project, doc_path, doc.encode(), tainted=True)
+    return "held for approval" if held else "canonical"
 
 
 async def _node(project, parent, job_id, kind, title) -> int:
@@ -276,6 +278,23 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
                              "usage": b.summary()})
         return {"topic": topic, "job_id": job_id, "root_id": head,
                 "doc_path": doc_path, "doc_status": doc_status}
+    except asyncio.CancelledError:
+        # a stop: the head still ends with a rollup, or the chat reload shows
+        # the job running for good (ROBUST-22)
+        if head is not None:
+            try:
+                db = await get_db()
+                try:
+                    await db.execute("UPDATE conversations SET rollup = ? WHERE id = ? "
+                                     "AND rollup IS NULL", ("stopped", head))
+                    await db.commit()
+                finally:
+                    await db.close()
+            except Exception:  # noqa: BLE001 — best-effort at teardown
+                pass
+        bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": head,
+                             "doc_path": None, "rollup": "stopped", "usage": b.summary()})
+        raise
     except Exception as e:
         # without a terminal event every SSE tail on this job hangs forever and
         # the Runs list shows it "running" until restart — fail LOUDLY

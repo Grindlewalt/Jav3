@@ -43,7 +43,9 @@ _NEVER_ACK_KINDS = {"egress_anomaly", "host_cut", "secret_leak",
                     "persist_imported", "persist_disk_deleted",
                     # per-project placement: a changed box, and above all two
                     # projects sharing one (vm/placement.py)
-                    "placement_changed", "box_joined"}
+                    "placement_changed", "box_joined",
+                    # a guest that tripped a gateway cap (a flood, a giant line)
+                    "gateway_cap"}
 # service_* / svc_* (service boxes), package_* (catalogue), image_* (variant
 # builds), docker_* (weak isolation, refused hardening, socket refusal)
 _NEVER_ACK_PREFIXES = ("service_", "package_", "svc_", "image_", "docker_")

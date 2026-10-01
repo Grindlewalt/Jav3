@@ -27,10 +27,23 @@ from fastapi.responses import StreamingResponse
 from . import bus
 
 KEEPALIVE_S = 25
+KEEPALIVE_FRAME = ": keepalive\n\n"
 
 
 def sse(d: dict) -> str:
     return f"data: {json.dumps(d)}\n\n"
+
+
+async def next_or_none(q: asyncio.Queue) -> dict | None:
+    """The next event on a bus queue, or None once it has been quiet for
+    KEEPALIVE_S: the per-turn tails write KEEPALIVE_FRAME for that, so a proxy
+    with an idle read limit does not cut a turn that is only thinking or
+    waiting on a tool (a chat stream is silent between a `tool` and its
+    `tool_result`)."""
+    try:
+        return await asyncio.wait_for(q.get(), timeout=KEEPALIVE_S)
+    except asyncio.TimeoutError:
+        return None
 
 
 @dataclass

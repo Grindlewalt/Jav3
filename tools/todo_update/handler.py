@@ -1,5 +1,6 @@
 from backend import writes
-from backend.agent.tools.todostore import parse_todo_text, render_todos
+from backend.agent.tools.todostore import (LEGACY_FILE, TODO_FILE, parse_todo_text,
+                                           render_todos)
 from backend.agent.tools.toolctx import require_project
 
 # no project loaded: a plan for THIS turn only, instead of an error that cost a
@@ -63,7 +64,23 @@ def _pick(todos, index, text):
     return index, None
 
 
-async def run(action: str, text: str | None = None, index: int | None = None) -> str:
+def _counts(todos) -> str:
+    n = len(todos)
+    done = sum(1 for t in todos if t["done"])
+    return f"{n} item{'' if n == 1 else 's'}, {done} done"
+
+
+def _changed(verb: str, todos, positions) -> str:
+    """What one call changed (the changed lines and a count), not the whole list:
+    echoing it on every call made a plan cost n calls and n**2 lines (BUILD-15).
+    `list` still shows everything."""
+    lines = "\n".join(f"{i}. [{'x' if todos[i]['done'] else ' '}] {todos[i]['text']}"
+                      for i in positions)
+    return f"{verb} (list has {_counts(todos)}):\n{lines}"
+
+
+async def run(action: str, text: str | None = None, index: int | None = None,
+              items: list | None = None) -> str:
     try:
         slug = await require_project()
     except LookupError:
@@ -73,40 +90,47 @@ async def run(action: str, text: str | None = None, index: int | None = None) ->
         todos = _scratch.setdefault(key, [])
         while len(_scratch) > _SCRATCH_KEEP:
             _scratch.pop(next(iter(_scratch)))
-        out = _apply(todos, action, text, index)
+        out = _apply(todos, action, text, index, items)
         return out if out.startswith("error") else (
             out + "\n(no project is loaded, so this list lasts for this turn only)")
     # read through writes.resolve so an in-guest turn sees its own pending
-    # edits; write through apply_write so todo.md crosses the one chokepoint
-    # (secret refusal + advisory scan on the host, .staging buffer in the guest)
-    src = writes.resolve(slug, "todo.md")
+    # edits; write through apply_write so the list crosses the one chokepoint
+    # (secret refusal + advisory scan on the host, .staging buffer in the guest).
+    # The list is the agent's own hidden file; a project's todo.md only seeds
+    # it and is never written (BUILD-07)
+    src = writes.resolve(slug, TODO_FILE) or writes.resolve(slug, LEGACY_FILE)
     todos = parse_todo_text(src.read_text()) if src else []
-    out = _apply(todos, action, text, index)
+    out = _apply(todos, action, text, index, items)
     if out.startswith("error") or action == "list":
         return out
     try:
-        await writes.apply_write(slug, "todo.md", render_todos(todos).encode())
+        await writes.apply_write(slug, TODO_FILE, render_todos(todos).encode())
     except writes.SecretLeakError as e:
         return f"error: todo update refused — {e}"
     return out
 
 
-def _apply(todos: list, action: str, text, index) -> str:
-    """Change `todos` in place; the rendered list, or an error string."""
+def _apply(todos: list, action: str, text, index, items=None) -> str:
+    """Change `todos` in place; what changed, the whole list for `list`, or an
+    error string."""
     if action == "list":
-        pass
-    elif action == "add":
-        if not text:
-            return "error: add needs text"
-        todos.append({"done": False, "text": text.strip()})
-    elif action in ("check", "uncheck", "delete"):
+        return _render(todos)
+    if action == "add":
+        new = [str(t).strip() for t in ([text] if text else []) + list(items or [])]
+        new = [t for t in new if t]
+        if not new:
+            return "error: add needs `text` (one item) or `items` (several)"
+        start = len(todos)
+        todos.extend({"done": False, "text": t} for t in new)
+        return _changed(f"added {len(new)}", todos, range(start, len(todos)))
+    if action in ("check", "uncheck", "delete"):
         at, err = _pick(todos, index, text)
         if err:
             return err
         if action == "delete":
-            todos.pop(at)
-        else:
-            todos[at]["done"] = action == "check"
-    else:
-        return f"error: unknown action '{action}' (use list, add, check, uncheck or delete)"
-    return _render(todos)
+            gone = todos.pop(at)
+            return (f"deleted {at}. {gone['text']} (list has {_counts(todos)}; "
+                    "later items moved up one)")
+        todos[at]["done"] = action == "check"
+        return _changed(action + "ed", todos, [at])
+    return f"error: unknown action '{action}' (use list, add, check, uncheck or delete)"

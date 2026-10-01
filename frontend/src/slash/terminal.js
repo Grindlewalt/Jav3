@@ -20,6 +20,11 @@ export const TERMINAL_ONLY = {
     + 'turn first)',
   permissions: 'the permission mode (yolo / auto / ask) is the picker in the chat’s '
     + 'toolbar, at the top of the chat',
+  persona: 'agent presets live on the Agents page — /agents takes you there',
+  dnd: 'do not disturb is in Settings → Alerts; while it is on, the top bar says so',
+  update: 'the terminal client updates itself: /update there, or jav3 update in a shell; '
+    + 'this page is always the server’s newest',
+  'new-panel': 'panels are the terminal client’s /new-panel — the Work page has its own windows',
 }
 
 // the terminal client's aliases for the above
@@ -42,5 +47,11 @@ export function terminalCommandNames(source) {
   const names = new Set()
   for (const m of body.matchAll(/^ {16}"([a-z][a-z0-9-]*)": Command\(/gm)) names.add(m[1])
   for (const m of body.matchAll(/\("([a-z][a-z0-9-]*)", "([a-z][a-z0-9-]*)"\)/g)) names.add(m[1])
+  // pages (jav3.2) are commands too, registered from PAGE_SPECS rather than the table
+  const pages = source.slice(source.indexOf('PAGE_SPECS = ('), source.indexOf('PAGES = {'))
+  for (const m of pages.matchAll(/PageSpec\("([a-z][a-z0-9-]*)"([^)]*?aliases=\(([^)]*)\))?/g)) {
+    names.add(m[1])
+    for (const a of (m[3] || '').matchAll(/"([a-z][a-z0-9-]*)"/g)) names.add(a[1])
+  }
   return [...names]
 }

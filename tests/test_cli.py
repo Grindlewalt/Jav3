@@ -600,15 +600,20 @@ async def test_tui_password_login_stores_a_session_and_sends_the_cookie(cfg, mon
         await pilot.pause(0.3)
         assert app.logged_in is False
         app.dispatch("/login")
-        await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
-        assert app.screen.query_one("#choices").highlighted == 0      # password first
+        await _until(pilot, lambda: type(app.top).__name__ == "Picker")
+        assert app.top.query_one("#choices").highlighted == 0      # password first
         await pilot.press("enter")
-        await _until(pilot, lambda: type(app.screen).__name__ == "Ask")
+        await _until(pilot, lambda: type(app.top).__name__ == "Ask")
         await pilot.press(*"h:1", "enter")                         # address
-        await pilot.pause(0.1)
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm")
+        assert "plain http" in app.top.question                 # said before the password
+        await pilot.press("y")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Ask"
+                            and app.top.question == "Username")
         await pilot.press(*"operator", "enter")                    # username
-        await pilot.pause(0.1)
-        assert app.screen.query_one("#answer").password is True     # hidden
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Ask"
+                            and app.top.question == "Password")
+        assert app.top.query_one("#answer").password is True     # hidden
         await pilot.press("p", "w", "enter")
         assert await _until(pilot, lambda: app.logged_in is True)
         assert app.token == "session:sess" and app.full_access
@@ -689,8 +694,8 @@ async def test_picker_opens_on_the_list_and_typing_highlights_the_closest(cfg):
         async def go():
             out.append(await app.pick("T", rows, "d"))
         app.run_worker(go())
-        await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
-        scr = app.screen
+        await _until(pilot, lambda: type(app.top).__name__ == "Picker")
+        scr = app.top
         ol = scr.query_one("#choices")
 
         def cur():
@@ -712,13 +717,11 @@ async def test_picker_opens_on_the_list_and_typing_highlights_the_closest(cfg):
 
         out.clear()
         app.run_worker(go())
-        await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
-        scr = app.screen
-        await pilot.press("t")                                 # t: type mode, no letter
+        await _until(pilot, lambda: type(app.top).__name__ == "Picker")
+        scr = app.top
+        await pilot.press("o", "t")                            # any letter, t too, is text
         await pilot.pause(0.1)
-        assert scr.typing and scr.query_one("#filter").value == ""
-        await pilot.press("o", "t")
-        await pilot.pause(0.1)
+        assert scr.typing and scr.query_one("#filter").value == "ot"
         ol = scr.query_one("#choices")
         assert ol.get_option_at_index(ol.highlighted).id == "d"
         await pilot.press("backspace", "backspace", "backspace")  # the 3rd leaves typing
@@ -737,8 +740,8 @@ async def test_model_picker_lists_keyed_providers_and_toggles(cfg):
         await pilot.pause(0.3)
         assert app.full_access
         app.dispatch("/model")
-        await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
-        scr = app.screen
+        await _until(pilot, lambda: type(app.top).__name__ == "Picker")
+        scr = app.top
         # grouped by provider (heading rows); openai has no key so is not listed
         assert [r[0] for r in scr.rows] == ["default", None, "deepseek/deepseek-flash",
                                             "deepseek/deepseek-pro", None, "ollama/llama3"]
@@ -749,12 +752,12 @@ async def test_model_picker_lists_keyed_providers_and_toggles(cfg):
         await pilot.press("space")                             # switch it on
         assert await _until(pilot, lambda: ("PUT", "/api/providers/deepseek/models/"
                                             "deepseek-pro", {"enabled": True}) in seen)
-        await _until(pilot, lambda: app.screen.rows[3][2] == "")
+        await _until(pilot, lambda: app.top.rows[3][2] == "")
         await pilot.press("d")                                 # make it the default
         assert await _until(pilot, lambda: ("PUT", "/api/providers/deepseek/models/"
                                             "deepseek-pro", {"default": True}) in seen)
-        await _until(pilot, lambda: app.screen.rows[3][2] == "default")
-        assert app.screen.rows[2][2] == ""
+        await _until(pilot, lambda: app.top.rows[3][2] == "default")
+        assert app.top.rows[2][2] == ""
         assert ol.get_option_at_index(ol.highlighted).id == "deepseek/deepseek-pro"
         await pilot.press("enter")
         assert await _until(pilot, lambda: app.model == "deepseek/deepseek-pro")
@@ -767,15 +770,15 @@ async def test_provider_flow_sets_the_key_and_tests(cfg):
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/provider")
-        await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
+        await _until(pilot, lambda: type(app.top).__name__ == "Picker")
         await pilot.press(*"openai")
         await pilot.pause(0.1)
         await pilot.press("enter")
-        await _until(pilot, lambda: type(app.screen).__name__ == "Ask")
-        assert app.screen.query_one("#answer").password is True
+        await _until(pilot, lambda: type(app.top).__name__ == "Ask")
+        assert app.top.query_one("#answer").password is True
         await pilot.press(*"sk-1", "enter")
         await pilot.pause(0.2)
-        assert type(app.screen).__name__ == "Ask"               # base URL: enter keeps it
+        assert type(app.top).__name__ == "Ask"               # base URL: enter keeps it
         await pilot.press("enter")
         assert await _until(pilot, lambda: ("POST", "/api/providers/openai/test", {}) in seen)
         assert ("PUT", "/api/providers/openai", {"enabled": True, "api_key": "sk-1"}) in seen
@@ -797,10 +800,10 @@ async def test_project_picker_makes_a_new_project(cfg):
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/project")
-        await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
-        assert [r[0] for r in app.screen.rows] == [jav3.NEW_PROJECT, "none", "follow", "demo"]
+        await _until(pilot, lambda: type(app.top).__name__ == "Picker")
+        assert [r[0] for r in app.top.rows] == [jav3.NEW_PROJECT, "none", "follow", "demo"]
         await pilot.press("enter")                             # "+ New project"
-        await _until(pilot, lambda: type(app.screen).__name__ == "Ask")
+        await _until(pilot, lambda: type(app.top).__name__ == "Ask")
         await pilot.press(*"New thing", "enter")
         assert await _until(pilot, lambda: app.project == "new-thing")
         assert ("POST", "/api/projects", {"name": "New thing"}) in seen
@@ -995,10 +998,10 @@ async def test_tui_orchestration_sends_mode_project_and_braindump(cfg):
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/orchestration")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Picker")
         await pilot.press("s", "i", "enter")          # filter to "site"
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "BrainDump")
-        app.screen.query_one("#dump").text = "fix the build\nand ship the docs"
+        assert await _until(pilot, lambda: type(app.top).__name__ == "BrainDump")
+        app.top.query_one("#dump").text = "fix the build\nand ship the docs"
         await pilot.press("ctrl+s")
         assert await _until(pilot, lambda: srv.chats)
         body = srv.chats[0]
@@ -1012,10 +1015,10 @@ async def test_tui_orchestration_sends_mode_project_and_braindump(cfg):
         assert await _until(pilot, lambda: not app.busy)
         # esc cancels the brain-dump
         app.dispatch("/orchestrate demo")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "BrainDump")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "BrainDump")
         await pilot.press("escape")
         await pilot.pause(0.2)
-        assert type(app.screen).__name__ != "BrainDump" and len(srv.chats) == 1
+        assert type(app.top).__name__ != "BrainDump" and len(srv.chats) == 1
 
 
 def test_agent_tree_groups_roots_and_orders_descendants():
@@ -1067,9 +1070,9 @@ async def test_tui_agents_screen(cfg):
     app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport(), resume=20)
     async with app.run_test(size=(140, 40)) as pilot:
         assert await _until(pilot, lambda: app.cid == 20)
-        await pilot.press("left")                        # empty prompt: open the screen
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
-        scr = app.screen
+        app.dispatch("/agents")                          # the full page (← is the drawer)
+        assert await _until(pilot, lambda: type(app.top).__name__ == "AgentsPage")
+        scr = app.top
         assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 1)
 
         def rows():
@@ -1104,21 +1107,21 @@ async def test_tui_agents_screen(cfg):
         await pilot.pause(0.1)
         assert sel() == [10] and not scr.in_kids
         await pilot.press("right", "enter")              # open agent 11: running
-        assert await _until(pilot, lambda: type(app.screen).__name__ != "AgentsScreen")
+        assert await _until(pilot, lambda: type(app.top).__name__ != "AgentsPage")
         assert await _until(pilot, lambda: "GET /api/chat/agents/11/stream" in srv.paths)
         assert await _until(pilot, lambda: not app.busy and app.last_reply == "built")
         assert app.cid == 11 and "GET /api/conversations/11/messages" in srv.paths
         names = [tv.tname for tv in app.query("ToolView")]
         assert names == ["run_code", "read_file"]
         # back in: now 11 is the green one, inside its orchestrator; ← twice leaves
-        await pilot.press("left")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
-        scr = app.screen
+        app.dispatch("/agents")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "AgentsPage")
+        scr = app.top
         assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 1)
         assert [r.nid for r in scr.query("AgentRow") if r.has_class("current")] == [11]
         assert scr.in_kids and sel() == [11]
         await pilot.press("left", "left")
-        assert await _until(pilot, lambda: type(app.screen).__name__ != "AgentsScreen")
+        assert await _until(pilot, lambda: type(app.top).__name__ != "AgentsPage")
 
 
 async def test_tui_agents_screen_needs_you_and_finished_grouping(cfg):
@@ -1157,9 +1160,9 @@ async def test_tui_agents_screen_needs_you_and_finished_grouping(cfg):
     app = jav3.build_tui("http://h:1", "jvd_x", transport=httpx.MockTransport(handler))
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause(0.3)
-        await pilot.press("left")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
-        scr = app.screen
+        app.dispatch("/agents")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "AgentsPage")
+        scr = app.top
         assert await _until(pilot, lambda: scr.loaded and len(scr.query("AgentRow")) > 3)
         text = [str(r.render()) for r in scr.query("AgentRow")]
         assert text[0].startswith("Active") and any(t.startswith("Needs you") for t in text)
@@ -1303,8 +1306,8 @@ def _posts(seen):
 
 async def _open_security(pilot, app, arg=""):
     app.dispatch(f"/security {arg}".strip())
-    await _until(pilot, lambda: type(app.screen).__name__ == "SecurityScreen")
-    return app.screen
+    await _until(pilot, lambda: type(app.top).__name__ == "SecurityPage")
+    return app.top
 
 
 def _rows(scr):
@@ -1342,44 +1345,44 @@ async def test_tui_security_tabs_and_queue_verdicts_after_confirm(cfg):
         await _until(pilot, lambda: scr.loaded["queue"] and len(_rows(scr)) == 3)
         n0 = len(_posts(seen))
         await pilot.press("y")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
-        assert "evil.example" in app.screen.question and "own allow list" in app.screen.detail
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm")
+        assert "evil.example" in app.top.question and "own allow list" in app.top.detail
         await pilot.press("n")
         await pilot.pause(0.2)
         assert len(_posts(seen)) == n0
         await pilot.press("y")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm")
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/egress/pending/1/approve", None)
                             in _posts(seen))
         # n on the git request: reject, after a Confirm
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         await pilot.press("down")
         assert scr.sel["queue"] == "gdemo:5"
         assert "a.py" in _text(scr.query_one("#sec-detail"))
         await pilot.press("n")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm")
         assert not any("/git/requests/5" in p for _, p, _ in _posts(seen))
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/projects/demo/git/requests/5/reject",
                                             None) in _posts(seen))
         # a on the alert: acknowledge, after a Confirm; its diff shows in the detail
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         await pilot.press("down")
         assert "curl evil.example" in _text(scr.query_one("#sec-detail"))
         await pilot.press("a")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm")
         await pilot.press("escape")
         await pilot.pause(0.2)
         assert not any(p.endswith("/ack") for _, p, _ in _posts(seen))
         await pilot.press("a")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm")
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/security/events/7/ack", None)
                             in _posts(seen))
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         await pilot.press("escape")
-        assert await _until(pilot, lambda: type(app.screen).__name__ != "SecurityScreen")
+        assert await _until(pilot, lambda: type(app.top).__name__ != "SecurityPage")
 
 
 async def test_tui_security_network_and_logs(cfg):
@@ -1400,7 +1403,7 @@ async def test_tui_security_network_and_logs(cfg):
         assert ("GET", "/api/egress/policy/__general__", {}, None) in seen
         # p: the project picker narrows the feed and the policy
         await pilot.press("p")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Picker")
         await pilot.press("down", "enter")
         assert await _until(pilot, lambda: scr.project == "demo" and scr.loaded["network"])
         assert await _until(pilot, lambda: ("GET", "/api/egress/events",
@@ -1415,15 +1418,19 @@ async def test_tui_security_network_and_logs(cfg):
         assert "gate_flag" in rows[0] and "host_cut" in rows[1]
         assert "CRIT" in rows[0] and "✓" in rows[1]
         assert ("GET", "/api/security/events", {"limit": "200"}, None) in seen
-        await pilot.press("f")                                  # all -> gate_flag
-        assert scr.log_filter == "gate_flag"
+        await pilot.press("f")                                  # a list of kinds
+        assert await _modal(pilot, app, "Picker")
+        await pilot.press("down", "enter")                      # all -> gate_flag
+        assert await _until(pilot, lambda: scr.log_filter == "gate_flag")
         assert await _until(pilot, lambda: len(_rows(scr)) == 1)
-        await pilot.press("f")                                  # -> host_cut
-        assert await _until(pilot, lambda: "host_cut" in _rows(scr)[0])
+        await pilot.press("f")
+        assert await _modal(pilot, app, "Picker")
+        await pilot.press("down", "enter")                      # -> host_cut
+        assert await _until(pilot, lambda: "host_cut" in " ".join(_rows(scr)))
         assert "acknowledged" in _text(scr.query_one("#sec-detail"))
         await pilot.press("a")                                  # already acked: nothing
         await pilot.pause(0.2)
-        assert type(app.screen).__name__ == "SecurityScreen"
+        assert type(app.top).__name__ == "SecurityPage"
 
 
 async def test_tui_security_secrets_never_reads_values(cfg):
@@ -1441,30 +1448,30 @@ async def test_tui_security_secrets_never_reads_values(cfg):
         assert all("last4" not in e["raw"] for e in scr.entries["secrets"])
         # add: name, hidden value, hosts -> one PUT
         await pilot.press("a")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Ask")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Ask")
         await pilot.press(*"new_key", "enter")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Ask"
-                            and app.screen.secret)
-        assert app.screen.query_one("#answer").password is True
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Ask"
+                            and app.top.secret)
+        assert app.top.query_one("#answer").password is True
         await pilot.press(*"s3cr3t", "enter")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Ask"
-                            and not app.screen.secret)
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Ask"
+                            and not app.top.secret)
         await pilot.press(*"a.com, b.com", "enter")
         assert await _until(pilot, lambda: ("PUT", "/api/secrets/NEW_KEY",
                                             {"value": "s3cr3t", "hosts": ["a.com", "b.com"]})
                             in _posts(seen))
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         assert "s3cr3t" not in " ".join(_rows(scr)) + _text(scr.query_one("#sec-sub"))
         # delete: only after the Confirm
         await pilot.press("down")                               # NEWS_KEY
         await pilot.press("d")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
-        assert "NEWS_KEY" in app.screen.question
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm")
+        assert "NEWS_KEY" in app.top.question
         await pilot.press("n")
         await pilot.pause(0.2)
         assert not any(m == "DELETE" for m, _, _ in _posts(seen))
         await pilot.press("d")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm")
         await pilot.press("y")
         assert await _until(pilot, lambda: ("DELETE", "/api/secrets/NEWS_KEY", None)
                             in _posts(seen))
@@ -1482,12 +1489,12 @@ async def test_tui_security_locked_for_a_chat_only_login(cfg):
         assert not app.full_access
         scr = await _open_security(pilot, app)
         await pilot.pause(0.2)
-        assert "needs full access" in _text(scr.query_one("#sec-sub"))
-        assert "needs full access" in " ".join(_rows(scr))
+        assert "chat only" in _text(scr.query_one("#sec-sub"))
+        assert "logged in" in " ".join(_rows(scr))
         for key in ("2", "3", "4", "y", "a", "p", "r"):
             await pilot.press(key)
         await pilot.pause(0.3)
-        assert type(app.screen).__name__ == "SecurityScreen"
+        assert type(app.top).__name__ == "SecurityPage"
         guarded = ("/api/security", "/api/egress", "/api/secrets", "/api/projects")
         assert not [p for _, p, _, _ in seen if p.startswith(guarded)]
 
@@ -1534,10 +1541,10 @@ async def test_tui_brackets_in_titles_and_tool_args_do_not_crash(cfg):
     async with app.run_test(size=(140, 40)) as pilot:
         await pilot.pause(0.3)
         app.dispatch("/sessions")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Picker")
         await pilot.pause(0.2)
         assert app.is_running
-        assert app.screen.rows[1][1] == "summarise this"      # one line per chat
+        assert app.top.rows[1][1] == "summarise this"      # one line per chat
         await pilot.press("escape")
         await pilot.pause(0.1)
         # a command with an unbalanced bracket, running then done
@@ -1597,8 +1604,8 @@ async def test_tui_picker_keeps_letters_typed_before_the_filter_has_focus(cfg):
         await pilot.pause(0.3)
         rows = [("demo", "demo", ""), ("e2e-smoke", "e2e-smoke", "")]
         app.run_worker(app.pick("Projects", rows))
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Picker")
-        scr = app.screen
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Picker")
+        scr = app.top
         scr.start_typing("e")
         for ch in "2e":            # as if still in flight to the list
             scr.on_key(events.Key(ch, ch))
@@ -1620,10 +1627,10 @@ async def test_tui_local_approval_ignores_keys_typed_before_it_opened(cfg):
         async def ask():
             answers.append(await app.local_approve("shell", "$ rm -rf build"))
         app.run_worker(ask())
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "LocalApprove")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "LocalApprove")
         await pilot.press("a", "enter")                # the tail of a sentence
         await pilot.pause(0.1)
-        assert type(app.screen).__name__ == "LocalApprove" and not answers
+        assert type(app.top).__name__ == "LocalApprove" and not answers
         await pilot.pause(0.6)
         await pilot.press("n")
         assert await _until(pilot, lambda: answers == ["no"])
@@ -1652,9 +1659,9 @@ async def test_tui_finished_by_time_is_newest_first_and_footer_without_model(cfg
         await app.open_conversation(7)
         await pilot.pause(0.1)
         assert _text(app.query("Footer").last()).rstrip() == "▣ Jav3"   # no dangling ·
-        app.action_agents_view()
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
-        scr = app.screen
+        app.dispatch("/agents")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "AgentsPage")
+        scr = app.top
         from datetime import datetime, timedelta, timezone
         now = datetime.now(timezone.utc).replace(tzinfo=None)
 
@@ -1892,12 +1899,12 @@ def _boxes_server(seen, lan_ip="", token="sess", procs_enabled=True, docker_ok=T
 
 async def _screen(pilot, app, cmd, name):
     app.dispatch(cmd)
-    await _until(pilot, lambda: type(app.screen).__name__ == name)
-    return app.screen
+    await _until(pilot, lambda: type(app.top).__name__ == name)
+    return app.top
 
 
 async def _modal(pilot, app, name):
-    return await _until(pilot, lambda: type(app.screen).__name__ == name)
+    return await _until(pilot, lambda: type(app.top).__name__ == name)
 
 
 async def test_tui_queue_service_request_needs_placement_and_confirm(cfg):
@@ -1906,7 +1913,7 @@ async def test_tui_queue_service_request_needs_placement_and_confirm(cfg):
     app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security", "SecurityPage")
         assert await _until(pilot, lambda: scr.loaded["queue"]
                             and any("SVC" in r for r in _rows(scr)))
         rows = _rows(scr)
@@ -1921,7 +1928,7 @@ async def test_tui_queue_service_request_needs_placement_and_confirm(cfg):
         # y: the review dialog, placement preselected from the profile
         await pilot.press("y")
         assert await _modal(pilot, app, "ServiceApprove")
-        dlg = app.screen
+        dlg = app.top
         assert dlg.placement == "per_project" and dlg.options() == ["none", "host"]
         assert dlg.expose == ["none"]                         # nothing exposed unasked
         await pilot.press("1")                                # per_service
@@ -1930,14 +1937,14 @@ async def test_tui_queue_service_request_needs_placement_and_confirm(cfg):
         assert dlg.placement == "per_service" and dlg.expose == ["host"]
         await pilot.press("enter")
         assert await _modal(pilot, app, "Confirm")
-        q, detail = app.screen.question, app.screen.detail
+        q, detail = app.top.question, app.top.detail
         assert "per_service" in q and "abab" in detail and "loopback" in detail
         assert "changed from the profile's per_project" in detail
         await pilot.press("n")
         await pilot.pause(0.2)
         assert not [p for _, p, _ in _posts(seen) if p.startswith("/api/services")]
         # again, and yes: exactly the contract's request
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         await pilot.press("y")
         assert await _modal(pilot, app, "ServiceApprove")
         await pilot.press("space", "enter")
@@ -1956,22 +1963,22 @@ async def test_tui_service_dialog_refuses_without_placement_and_offers_lan(cfg):
                          transport=_boxes_server(seen, lan_ip="192.168.1.60"))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security", "SecurityPage")
         assert await _until(pilot, lambda: any("SVC" in r for r in _rows(scr)))
         scr.select_key("v11")
         # a row with no placement: enter refuses until one is picked
         scr.selected()["raw"]["placement"] = None
         await pilot.press("y")
         assert await _modal(pilot, app, "ServiceApprove")
-        dlg = app.screen
+        dlg = app.top
         assert dlg.placement is None and dlg.options() == ["none", "host", "lan"]
         await pilot.press("enter")
         await pilot.pause(0.1)
-        assert app.screen is dlg and "placement" in dlg.error
+        assert app.top is dlg and "placement" in dlg.error
         await pilot.press("3", "space", "space")              # shared, 8080 on the LAN
         await pilot.press("enter")
         assert await _modal(pilot, app, "Confirm")
-        assert "192.168.1.60" in app.screen.detail and "shared" in app.screen.question
+        assert "192.168.1.60" in app.top.detail and "shared" in app.top.question
         await pilot.press("y")
         assert await _until(pilot, lambda: (
             "POST", "/api/services/11/approve",
@@ -1985,7 +1992,7 @@ async def test_tui_queue_package_card_approve_and_reject(cfg):
     app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security", "SecurityPage")
         assert await _until(pilot, lambda: any("PKG" in r for r in _rows(scr)))
         assert ("GET", "/api/packages", {"status": "pending"}, None) in seen
         scr.select_key("pk3")
@@ -1997,8 +2004,8 @@ async def test_tui_queue_package_card_approve_and_reject(cfg):
         assert "installs into `dev` — used by: demo, site" in row   # the server's card
         await pilot.press("y")
         assert await _modal(pilot, app, "Confirm")
-        assert "Installs into `dev` — used by: demo, site" in app.screen.detail
-        assert "via dev-go: site" in app.screen.detail
+        assert "Installs into `dev` — used by: demo, site" in app.top.detail
+        assert "via dev-go: site" in app.top.detail
         await pilot.press("escape")
         await pilot.pause(0.2)
         assert not [p for _, p, _ in _posts(seen) if p.startswith("/api/packages")]
@@ -2009,7 +2016,7 @@ async def test_tui_queue_package_card_approve_and_reject(cfg):
             "POST", "/api/packages/3/approve",
             {"acknowledge": True, "target_variant": "dev", "build": True}) in _posts(seen))
         # n: a reason, then a Confirm, then the reject
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         scr.select_key("pk3")
         await pilot.press("n")
         assert await _modal(pilot, app, "Ask")
@@ -2028,7 +2035,7 @@ async def test_tui_queue_unattributed_host_needs_a_project_and_lan_error_shows(c
         seen, lan_conf="192.168.1.1", lan_error="the router's own address"))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security", "SecurityPage")
         assert await _until(pilot, lambda: any("cdn.example" in r for r in _rows(scr)))
         assert any("cdn.example" in r and "no project" in r for r in _rows(scr))
         scr.select_key("v11")
@@ -2038,15 +2045,15 @@ async def test_tui_queue_unattributed_host_needs_a_project_and_lan_error_shows(c
         scr.select_key("p2")
         await pilot.press("y")
         assert await _modal(pilot, app, "Picker")
-        assert [r[0] for r in app.screen.rows] == ["demo", "site"]
+        assert [r[0] for r in app.top.rows] == ["demo", "site"]
         await pilot.press("down", "enter")
         assert await _modal(pilot, app, "Confirm")
-        assert "site" in app.screen.question and "cdn.example" in app.screen.question
+        assert "site" in app.top.question and "cdn.example" in app.top.question
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/egress/pending/2/approve",
                                             {"project": "site"}) in _posts(seen))
         # an attributed one goes as before, no body
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         scr.select_key("p1")
         await pilot.press("y")
         assert await _modal(pilot, app, "Confirm")
@@ -2061,7 +2068,7 @@ async def test_tui_network_groups_by_project_with_allow_deny_and_baseline(cfg):
     app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security network", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security network", "SecurityPage")
         assert await _until(pilot, lambda: scr.loaded["network"]
                             and any("⌂ site" in r for r in _rows(scr)))
         rows = _rows(scr)
@@ -2077,10 +2084,10 @@ async def test_tui_network_groups_by_project_with_allow_deny_and_baseline(cfg):
         assert "profile baseline allow: pypi.org" in d and "bad.example" in d
         await pilot.press("e")
         assert await _modal(pilot, app, "Ask")
-        assert app.screen.value == "demo.dev"
+        assert app.top.value == "demo.dev"
         await pilot.press("end", *", x.org", "enter")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Ask"
-                            and "DENY" in app.screen.question)
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Ask"
+                            and "DENY" in app.top.question)
         await pilot.press("enter")
         assert await _modal(pilot, app, "Confirm")
         assert not any(m == "PUT" for m, _, _ in _posts(seen))
@@ -2099,19 +2106,19 @@ async def test_tui_network_allow_deny_a_host_and_promote(cfg):
     app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security network", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security network", "SecurityPage")
         assert await _until(pilot, lambda: any("⌂ site" in r for r in _rows(scr)))
         # y on site's denied traffic: the project's own allow list
         scr.select_key("e31")
         await pilot.press("y")
         assert await _modal(pilot, app, "Confirm")
-        assert "site" in app.screen.question and "evil.example" in app.screen.question
+        assert "site" in app.top.question and "evil.example" in app.top.question
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/egress/allow",
                                             {"project": "site", "host": "evil.example"})
                             in _posts(seen))
         # n on demo's traffic: appended to demo's own deny list
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         scr.select_key("e30")
         await pilot.press("n")
         assert await _modal(pilot, app, "Confirm")
@@ -2120,17 +2127,17 @@ async def test_tui_network_allow_deny_a_host_and_promote(cfg):
             "PUT", "/api/egress/policy/demo",
             {"deny": ["tracker.example", "pypi.org"]}) in _posts(seen))
         # u on demo's policy row: a host, then a profile, then the promote route
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         scr.select_key("Pdemo")
         await pilot.press("u")
         assert await _modal(pilot, app, "Picker")
-        assert [r[1] for r in app.screen.rows] == ["demo.dev", "tracker.example"]
+        assert [r[1] for r in app.top.rows] == ["demo.dev", "tracker.example"]
         await pilot.press("down", "enter")                    # tracker.example (deny)
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Picker"
-                            and app.screen.rows[0][0] == "own")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Picker"
+                            and app.top.rows[0][0] == "own")
         await pilot.press("enter")                            # its own profile
         assert await _modal(pilot, app, "Confirm")
-        assert "deny" in app.screen.question and "Default" in app.screen.question
+        assert "deny" in app.top.question and "Default" in app.top.question
         await pilot.press("y")
         assert await _until(pilot, lambda: (
             "POST", "/api/egress/policy/demo/promote",
@@ -2143,7 +2150,7 @@ async def test_tui_persistent_tree_mismatch_stop_and_revoke(cfg):
     app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security persistent", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security persistent", "SecurityPage")
         assert await _until(pilot, lambda: scr.loaded["persistent"]
                             and any("s-demo" in r for r in _rows(scr)))
         rows = _rows(scr)
@@ -2164,13 +2171,13 @@ async def test_tui_persistent_tree_mismatch_stop_and_revoke(cfg):
         assert "not a service" in d
         await pilot.press("s")                                # not a service: nothing
         await pilot.pause(0.2)
-        assert app.screen is scr
+        assert app.top is scr
         # the service process: s stops, d revokes, each after a Confirm
         await pilot.press("up")
         assert "verified" in _text(scr.query_one("#sec-detail"))
         await pilot.press("s")
         assert await _modal(pilot, app, "Confirm")
-        assert "worker" in app.screen.question
+        assert "worker" in app.top.question
         await pilot.press("n")
         await pilot.pause(0.2)
         assert not [p for _, p, _ in _posts(seen) if p.startswith("/api/services")]
@@ -2179,13 +2186,13 @@ async def test_tui_persistent_tree_mismatch_stop_and_revoke(cfg):
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/services/9/stop", None)
                             in _posts(seen))
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         scr.select_key("S9")
         await pilot.press("d")
         assert await _modal(pilot, app, "Confirm")
         await pilot.press("y")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm"
-                            and "/srv" in app.screen.question)
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm"
+                            and "/srv" in app.top.question)
         await pilot.press("n")                                # keep the data
         assert await _until(pilot, lambda: ("POST", "/api/services/9/revoke",
                                             {"confirm": True, "delete_data": False})
@@ -2200,7 +2207,7 @@ async def test_tui_persistent_orphans_report_notes_logs_and_start(cfg):
     app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security persistent", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security persistent", "SecurityPage")
         assert await _until(pilot, lambda: scr.loaded["persistent"]
                             and any("s-demo" in r for r in _rows(scr)))
         rows = _rows(scr)
@@ -2227,14 +2234,14 @@ async def test_tui_persistent_orphans_report_notes_logs_and_start(cfg):
         await pilot.press("l")
         assert await _modal(pilot, app, "View")
         assert ("GET", "/api/services/12/logs", {"lines": "200"}, None) in seen
-        assert "[bold]ok[/]" in _text(app.screen.query_one("#view-body Static"))
-        assert "untrusted" in _text(app.screen.query_one("#view-body Static"))
+        assert "[bold]ok[/]" in _text(app.top.query_one("#view-body Static"))
+        assert "untrusted" in _text(app.top.query_one("#view-body Static"))
         await pilot.press("escape")
         # s on a stopped service starts it
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         await pilot.press("s")
         assert await _modal(pilot, app, "Confirm")
-        assert "Start" in app.screen.question
+        assert "Start" in app.top.question
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/services/12/start", None)
                             in _posts(seen))
@@ -2247,7 +2254,7 @@ async def test_tui_persistent_says_boxes_are_off(cfg):
                          transport=_boxes_server(seen, procs_enabled=False))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security persistent", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security persistent", "SecurityPage")
         assert await _until(pilot, lambda: scr.loaded["persistent"])
         assert "boxes are off" in _text(scr.query_one("#sec-sub"))
         assert not any("▣" in r for r in _rows(scr))
@@ -2260,7 +2267,7 @@ async def test_tui_profiles_form_refuses_without_explicit_runtime_and_placement(
     app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security profiles", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security profiles", "SecurityPage")
         assert await _until(pilot, lambda: scr.loaded["profiles"] and len(_rows(scr)) == 2)
         rows = _rows(scr)
         assert "Default" in rows[0] and "default" in rows[0] and "per_project" in rows[0]
@@ -2271,42 +2278,42 @@ async def test_tui_profiles_form_refuses_without_explicit_runtime_and_placement(
         # a new profile: saving without runtime and placement is refused
         await pilot.press("a")
         assert await _modal(pilot, app, "ProfileForm")
-        form = app.screen
+        form = app.top
         assert form.v["box_runtime"] is None and form.v["service_placement"] is None
         await pilot.press("enter")                            # name
         assert await _modal(pilot, app, "Ask")
         await pilot.press(*"Lab", "enter")
-        assert await _until(pilot, lambda: app.screen is form and form.v["name"] == "Lab")
+        assert await _until(pilot, lambda: app.top is form and form.v["name"] == "Lab")
         await pilot.press("ctrl+s")
         await pilot.pause(0.1)
-        assert app.screen is form and "no default" in form.error.lower()
+        assert app.top is form and "no default" in form.error.lower()
         assert "runtime" in form.error and "placement" in form.error
         # the Save row refuses too (the plain-key route)
         for _ in range(len(form.FIELDS)):
             await pilot.press("down")
         await pilot.press("enter")
         await pilot.pause(0.1)
-        assert app.screen is form
+        assert app.top is form
         assert not [p for m, p, _ in _posts(seen) if p.startswith("/api/profiles")]
         # pick the runtime (kvm), then the placement (per_service)
         form.cur = 1
         await pilot.press("enter")
         assert await _modal(pilot, app, "Picker")
         await pilot.press("enter")                            # first row: kvm
-        assert await _until(pilot, lambda: app.screen is form and form.v["box_runtime"])
+        assert await _until(pilot, lambda: app.top is form and form.v["box_runtime"])
         await pilot.press("ctrl+s")
         await pilot.pause(0.1)
-        assert app.screen is form and "placement" in form.error
+        assert app.top is form and "placement" in form.error
         await pilot.press("down", "enter")
         assert await _modal(pilot, app, "Picker")
         await pilot.press("enter")                            # per_service
-        assert await _until(pilot, lambda: app.screen is form
+        assert await _until(pilot, lambda: app.top is form
                             and form.v["service_placement"] == "per_service")
         form.cur = 7                                          # secrets: names only
         await pilot.press("enter")
         assert await _modal(pilot, app, "Ask")
         await pilot.press(*"tba_key", "enter")
-        assert await _until(pilot, lambda: app.screen is form)
+        assert await _until(pilot, lambda: app.top is form)
         await pilot.press("ctrl+s")
         assert await _until(pilot, lambda: any(m == "POST" and p == "/api/profiles"
                                                for m, p, _ in _posts(seen)))
@@ -2315,22 +2322,22 @@ async def test_tui_profiles_form_refuses_without_explicit_runtime_and_placement(
         assert body["name"] == "Lab" and body["secrets"] == ["TBA_KEY"]
         assert body["default_verdict"] == "deny"
         # p: assign the selected profile to a project, after a Confirm
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         scr.select_key("R2")
         await pilot.press("p")
         assert await _modal(pilot, app, "Picker")
         await pilot.press("enter")                            # demo
         assert await _modal(pilot, app, "Confirm")
-        assert "less isolated" in app.screen.detail
+        assert "less isolated" in app.top.detail
         await pilot.press("y")
         assert await _until(pilot, lambda: ("PUT", "/api/projects/demo/profile",
                                             {"profile_id": 2}) in _posts(seen))
         # the default cannot be deleted; others after a Confirm
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         scr.select_key("R1")
         await pilot.press("d")
         await pilot.pause(0.2)
-        assert app.screen is scr and "the default" in _text(scr.query_one("#sec-sub"))
+        assert app.top is scr and "the default" in _text(scr.query_one("#sec-sub"))
         scr.select_key("R2")
         await pilot.press("d")
         assert await _modal(pilot, app, "Confirm")
@@ -2345,7 +2352,7 @@ async def test_tui_profiles_runtimes_weak_unavailable_and_server_refusals(cfg):
     app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security profiles", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security profiles", "SecurityPage")
         assert await _until(pilot, lambda: scr.loaded["profiles"] and scr.runtimes)
         scr.select_key("R2")                                  # the docker profile
         d = _text(scr.query_one("#sec-detail"))
@@ -2363,18 +2370,18 @@ async def test_tui_profiles_runtimes_weak_unavailable_and_server_refusals(cfg):
                          transport=_boxes_server(seen, docker_ok=False))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security profiles", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security profiles", "SecurityPage")
         assert await _until(pilot, lambda: scr.loaded["profiles"] and scr.runtimes)
         await pilot.press("a")
         assert await _modal(pilot, app, "ProfileForm")
-        form = app.screen
+        form = app.top
         form.cur = 1
         await pilot.press("enter")
         assert await _modal(pilot, app, "Picker")
-        docker = next(r for r in app.screen.rows if r[0] == "docker")
+        docker = next(r for r in app.top.rows if r[0] == "docker")
         assert "UNAVAILABLE: docker_enabled is off" in docker[2]
         await pilot.press("down", "enter")
-        assert await _until(pilot, lambda: app.screen is form)
+        assert await _until(pilot, lambda: app.top is form)
         await pilot.pause(0.1)
         assert form.v["box_runtime"] is None and "docker_enabled is off" in form.error
 
@@ -2385,12 +2392,12 @@ async def test_tui_profile_edit_keeps_explicit_values(cfg):
     app = jav3.build_tui("http://h:1", "session:sess", transport=_boxes_server(seen))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security profiles", "SecurityScreen")
+        scr = await _screen(pilot, app, "/security profiles", "SecurityPage")
         assert await _until(pilot, lambda: len(_rows(scr)) == 2 and scr.loaded["profiles"])
         await pilot.press("e")                                # Default
         assert await _modal(pilot, app, "ProfileForm")
-        assert app.screen.v["box_runtime"] == "kvm"
-        assert app.screen.v["service_placement"] == "per_project"
+        assert app.top.v["box_runtime"] == "kvm"
+        assert app.top.v["service_placement"] == "per_project"
         await pilot.press("ctrl+s")
         assert await _until(pilot, lambda: any(m == "PUT" and p == "/api/profiles/1"
                                                for m, p, _ in _posts(seen)))
@@ -2404,8 +2411,8 @@ async def test_tui_vms_boxes_images_catalogue(cfg):
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
         await pilot.press("ctrl+x", "c")                      # the leader letter
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "VmsScreen")
-        scr = app.screen
+        assert await _until(pilot, lambda: type(app.top).__name__ == "VmsPage")
+        scr = app.top
         assert await _until(pilot, lambda: scr.loaded["boxes"] and len(_rows(scr)) == 2)
         rows = _rows(scr)
         assert "shared" in rows[0] and "running" in rows[0] and "cpu 4%" in rows[0]
@@ -2421,7 +2428,7 @@ async def test_tui_vms_boxes_images_catalogue(cfg):
         # s on the running shared box: stop, after a Confirm
         await pilot.press("s")
         assert await _modal(pilot, app, "Confirm")
-        assert "Stop box shared" in app.screen.question
+        assert "Stop box shared" in app.top.question
         await pilot.press("n")
         await pilot.pause(0.2)
         assert not [p for _, p, _ in _posts(seen) if p.startswith("/api/vm/")]
@@ -2430,27 +2437,27 @@ async def test_tui_vms_boxes_images_catalogue(cfg):
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/vm/boxes/shared/stop", None)
                             in _posts(seen))
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         scr.select_key("Xp-site")                             # p-site: start, destroy
         await pilot.press("s")
         assert await _modal(pilot, app, "Confirm")
-        assert "Start box p-site" in app.screen.question
+        assert "Start box p-site" in app.top.question
         await pilot.press("y")
         assert await _until(pilot, lambda: ("POST", "/api/vm/boxes/p-site/start", None)
                             in _posts(seen))
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         scr.select_key("Xp-site")
         await pilot.press("d")
         assert await _modal(pilot, app, "Confirm")
         await pilot.press("y")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "Confirm"
-                            and "data disk" in app.screen.question)
+        assert await _until(pilot, lambda: type(app.top).__name__ == "Confirm"
+                            and "data disk" in app.top.question)
         await pilot.press("n")
         assert await _until(pilot, lambda: ("POST", "/api/vm/boxes/p-site/destroy",
                                             {"confirm": True, "delete_data": False})
                             in _posts(seen))
         # images: variants with their versions and who uses them; b builds
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         await pilot.press("2")
         assert await _until(pilot, lambda: scr.loaded["images"] and len(_rows(scr)) == 2)
         rows = _rows(scr)
@@ -2463,7 +2470,7 @@ async def test_tui_vms_boxes_images_catalogue(cfg):
         assert "golang [1]" in d and "untrusted" in d        # the log tail, as text
         await pilot.press("b")                                # one build at a time
         await pilot.pause(0.2)
-        assert app.screen is scr and "already running" in _text(scr.query_one("#sec-sub"))
+        assert app.top is scr and "already running" in _text(scr.query_one("#sec-sub"))
         tr.images["build"]["running"] = False
         await pilot.press("r")
         assert await _until(pilot, lambda: "building" not in _text(scr.query_one("#sec-sub")))
@@ -2473,22 +2480,22 @@ async def test_tui_vms_boxes_images_catalogue(cfg):
         assert await _until(pilot, lambda: ("POST", "/api/vm/images/dev/build",
                                             {"confirm": True}) in _posts(seen))
         # catalogue: every request, pending first; y approves after a Confirm
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         await pilot.press("3")
         assert await _until(pilot, lambda: scr.loaded["catalogue"] and len(_rows(scr)) == 2)
         assert "requests" in _rows(scr)[0] and "rich" in _rows(scr)[1]
         await pilot.press("down", "y")                        # built: nothing to approve
         await pilot.pause(0.2)
-        assert app.screen is scr
+        assert app.top is scr
         await pilot.press("up", "y")
         assert await _modal(pilot, app, "Confirm")
         await pilot.press("y")
         assert await _until(pilot, lambda: (
             "POST", "/api/packages/3/approve",
             {"acknowledge": True, "target_variant": "dev", "build": True}) in _posts(seen))
-        assert await _until(pilot, lambda: app.screen is scr)
+        assert await _until(pilot, lambda: app.top is scr)
         await pilot.press("escape")
-        assert await _until(pilot, lambda: type(app.screen).__name__ != "VmsScreen")
+        assert await _until(pilot, lambda: type(app.top).__name__ != "VmsPage")
 
 
 async def test_tui_vms_docker_greyed_out_with_its_reason(cfg):
@@ -2498,7 +2505,7 @@ async def test_tui_vms_docker_greyed_out_with_its_reason(cfg):
                          transport=_boxes_server(seen, docker_ok=False))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/vms", "VmsScreen")
+        scr = await _screen(pilot, app, "/vms", "VmsPage")
         assert await _until(pilot, lambda: scr.loaded["boxes"] and scr.runtimes)
         sub = _text(scr.query_one("#sec-sub"))
         assert "docker: unavailable — docker_enabled is off" in sub
@@ -2511,19 +2518,19 @@ async def test_tui_boxes_surfaces_locked_for_a_chat_only_login(cfg):
     app = jav3.build_tui("http://h:1", "jvd_x", transport=_boxes_server(seen))
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.pause(0.3)
-        scr = await _screen(pilot, app, "/security", "SecurityScreen")
-        for key in ("5", "enter", "s", "d", "6", "a", "e", "p", "y"):
+        scr = await _screen(pilot, app, "/security", "SecurityPage")
+        for key in ("5", "s", "d", "6", "a", "e", "p", "y"):
             await pilot.press(key)
         await pilot.pause(0.3)
-        assert type(app.screen).__name__ == "SecurityScreen"
-        assert "needs full access" in _text(scr.query_one("#sec-sub"))
+        assert type(app.top).__name__ == "SecurityPage"
+        assert "chat only" in _text(scr.query_one("#sec-sub"))
         await pilot.press("escape")
-        scr = await _screen(pilot, app, "/vms", "VmsScreen")
+        scr = await _screen(pilot, app, "/vms", "VmsPage")
         for key in ("s", "d", "2", "b", "3", "y", "n"):
             await pilot.press(key)
         await pilot.pause(0.3)
-        assert type(app.screen).__name__ == "VmsScreen"
-        assert "needs full access" in " ".join(_rows(scr))
+        assert type(app.top).__name__ == "VmsPage"
+        assert "logged in" in " ".join(_rows(scr))
         guarded = ("/api/services", "/api/packages", "/api/vm", "/api/profiles",
                    "/api/egress", "/api/projects", "/api/security", "/api/secrets")
         assert not [p for _, p, _, _ in seen if p.startswith(guarded)]
@@ -2776,7 +2783,7 @@ async def test_tui_themes_list_import_export_create(cfg, home, tmp_path):
             await app.c_theme("import")
         app.dispatch("/theme create")
         assert await _modal(pilot, app, "ThemeEditor")
-        ed = app.screen
+        ed = app.top
         ed.query_one("#th-primary").value = "#ff0000"
         await pilot.pause(0.1)
         assert app.theme == jav3.THEME_PREVIEW              # live preview
@@ -2791,7 +2798,7 @@ async def test_tui_themes_list_import_export_create(cfg, home, tmp_path):
         assert json.loads((cfg / "themes" / "red-one.json").read_text())["primary"] == "#ff0000"
         app.dispatch("/theme create")
         assert await _modal(pilot, app, "ThemeEditor")
-        app.screen.query_one("#th-primary").value = "#00ff00"
+        app.top.query_one("#th-primary").value = "#00ff00"
         await pilot.pause(0.1)
         await pilot.press("escape")
         assert await _until(pilot, lambda: app.theme == "Red one")
@@ -2848,7 +2855,7 @@ async def test_tui_new_commands_complete_and_are_in_help(cfg):
         assert app.commands["stop-project"] is app.commands["stop-a"]
         app.dispatch("/help")
         assert await _modal(pilot, app, "Help")
-        md = app.screen.text
+        md = app.top.text
         assert "/stop-all" in md and "/screenshot" in md and "/theme create" in md
 
 
@@ -2886,11 +2893,12 @@ async def test_agents_reload_after_close_does_not_crash():
     srv = _LiveServer(nodes=nodes, messages={})
     app = jav3.build_tui("http://h:1", "jvd_x", transport=srv.transport())
     async with app.run_test(size=(140, 40)) as pilot:
-        await pilot.press("left")
-        assert await _until(pilot, lambda: type(app.screen).__name__ == "AgentsScreen")
-        scr = app.screen
+        await pilot.pause(0.3)
+        app.dispatch("/agents")
+        assert await _until(pilot, lambda: type(app.top).__name__ == "AgentsPage")
+        scr = app.top
         await pilot.press("escape")
-        assert await _until(pilot, lambda: type(app.screen).__name__ != "AgentsScreen")
+        assert await _until(pilot, lambda: type(app.top).__name__ != "AgentsPage")
         await scr._reload_safe()                    # the late result: dropped, no crash
         await pilot.pause(0.1)
         assert app.is_running

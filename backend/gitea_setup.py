@@ -12,6 +12,9 @@ Idempotent — every step checks before it acts, so a re-run is safe:
   5. a systemd --user unit, enabled and started; wait for it to answer
   6. the operator's password set through the API (never in argv)
   7. JARVIS_GITEA_* written to the env file; a repo for every project
+  8. every enabled account (not the owner, the bot or a site admin) a read
+     collaborator on every repo; `--access` runs only this step, against a
+     Gitea that is already running
 
 --dry-run prints the plan and changes nothing.
 """
@@ -394,9 +397,44 @@ async def _ensure_all_repos() -> None:
                 print(f"  warn  repo {proj.name}: {gitea.scrub(str(e))}")
 
 
+async def _ensure_access(dry: bool) -> None:
+    """Step 8: read access for every enabled account on every repo. Existing
+    grants are never lowered, so a write the operator chose stays."""
+    from . import gitea
+    try:
+        r = await gitea.backfill_access(dry=dry)
+    except Exception as e:              # Gitea down, a token refused: say so, don't trace
+        print(f"  warn  repo access: {gitea.scrub(str(e))}")
+        return
+    who = ", ".join(r["accounts"])
+    if not r["accounts"]:
+        print(f"  ok    no enabled account besides {gitea.owner()} (owner) and "
+              f"{gitea.bot_user()} (bot) and site admins: nobody to share with")
+    elif not r["missing"]:
+        print(f"  ok    {who} can read all {r['repos']} repos")
+    for m in r["missing"]:
+        print(f"  {'would: ' if dry else ''}grant read: {m['login']} -> "
+              f"{gitea.owner()}/{m['repo']}")
+    if r["missing"] and not dry:
+        print(f"  ok    {len(r['granted'])} grants made for {who}")
+
+
+def run_access(dry: bool) -> None:
+    from . import gitea
+    if not gitea.enabled():
+        raise SystemExit("gitea-setup --access: Gitea is not set up here "
+                         "(run gitea-setup without --access first)")
+    if not _healthy():
+        raise SystemExit(f"gitea-setup --access: Gitea is not answering on 127.0.0.1:"
+                         f"{settings.gitea_port} — systemctl --user start {unit_name()}")
+    print(f"== Gitea access: every enabled account reads every repo"
+          f"{' (dry run)' if dry else ''}")
+    asyncio.run(_ensure_access(dry))
+
+
 USAGE = ("usage: python -m backend.cli gitea-setup [--dry-run] [--user NAME] [--port N] "
-         "[--password-stdin] [--reset-password] [--yes]")
-_FLAGS = {"--dry-run", "--password-stdin", "--reset-password", "--yes"}
+         "[--password-stdin] [--reset-password] [--yes] [--access]")
+_FLAGS = {"--dry-run", "--password-stdin", "--reset-password", "--yes", "--access"}
 _VALUED = {"--user", "--port"}
 
 
@@ -411,6 +449,8 @@ def run(args: list[str]) -> None:
         else:
             raise SystemExit(USAGE)
     dry = "--dry-run" in args
+    if "--access" in args:
+        return run_access(dry)
     plan = Plan(dry)
     user_arg = args[args.index("--user") + 1] if "--user" in args else None
     if "--port" in args:
@@ -467,4 +507,5 @@ def run(args: list[str]) -> None:
         return
     settings.gitea_enabled, settings.gitea_owner = True, login
     asyncio.run(_ensure_all_repos())
+    asyncio.run(_ensure_access(False))
     print(f"done. Gitea: {root_url}  (restart Jav3 to pick it up: systemctl --user restart jarvis)")

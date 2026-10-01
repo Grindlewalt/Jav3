@@ -1,11 +1,11 @@
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import JobTree from './JobTree.jsx'
 import Md from './Md.jsx'
 import { isKnownModel, useModel } from './modelInfo.js'
 import { PATHS } from './nav.jsx'
 import {
-  applyTurnEvent, clipText, errorLine, exitNote, finishTurn, fmtElapsed, fmtMs, foldParts,
-  toolLine,
+  activityOf, applyTurnEvent, clipText, errorLine, exitNote, finishTurn, fmtElapsed, fmtMs,
+  foldParts, stepCount, toolLine,
 } from './turnEvents.js'
 
 // Live tool-activity rendering shared by Chat and ChatBox: one-line rows
@@ -66,6 +66,16 @@ export function humanizeTool(name, args = {}) {
 // into a group, which remounts them; remembering the ids keeps a row the
 // reader had open open, so finishing does not close what they were reading.
 const openRows = new Set()
+
+// "Open chat at step" (a security card): routes.jsx keeps `<chat id>:<step id>`
+// for the chat to scroll to. A group holding that step, and the step's row, open
+// themselves so it is on the page to be found (Chat.jsx scrolls to #step-<id>).
+// Each row carries its tool_calls id as `step`, set by the server.
+export function pendingStep() {
+  try { return (sessionStorage.getItem('jarvis.chat.step') || '').split(':')[1] || null }
+  catch { return null }
+}
+const isPending = (p) => p?.step != null && String(p.step) === pendingStep()
 const rememberOpen = (id, on) => {
   if (id == null) return
   if (on) openRows.add(id)
@@ -113,7 +123,7 @@ function ToolDetail({ part, full, onFull }) {
 }
 
 export const ToolRow = memo(function ToolRow({ part }) {
-  const [open, setOpen] = useState(() => part.id != null && openRows.has(part.id))
+  const [open, setOpen] = useState(() => isPending(part) || (part.id != null && openRows.has(part.id)))
   const [full, setFull] = useState(false)
   const status = rowStatus(part)
   const { glyph, title, arg } = toolLine(part.name, part.args)
@@ -121,7 +131,8 @@ export const ToolRow = memo(function ToolRow({ part }) {
   const badExit = exit && exit !== 'exit 0'
   const toggle = () => setOpen((o) => { rememberOpen(part.id, !o); return !o })
   return (
-    <div className={`tool-row ${status}${badExit ? ' warn' : ''}${open ? ' open' : ''}`}>
+    <div className={`tool-row ${status}${badExit ? ' warn' : ''}${open ? ' open' : ''}`}
+         id={part.step != null ? `step-${part.step}` : undefined}>
       <div className="tool-row-head" role="button" tabIndex={0} aria-expanded={open}
            onClick={toggle}
            onKeyDown={(e) => {
@@ -187,16 +198,21 @@ const FoldRow = memo(function FoldRow({ parts }) {
 })
 
 // Finished turns collapse their activity into one header above the reply:
-// how many steps, how long the turn took, and whether anything failed.
+// how many steps, how long the turn took, and whether anything failed. Opened,
+// the group reads as the turn did: the rows, with the agent's own text between
+// the ones it came between (kept by the server, turnEvents.activityOf).
 // `expanded` lets a transcript-wide "expand all" drive every group at once;
 // each still toggles on its own afterwards.
 export const ActivityGroup = memo(function ActivityGroup({ parts, expanded, ms }) {
-  const [open, setOpen] = useState(() => !!expanded
+  const [open, setOpen] = useState(() => !!expanded || parts.some(isPending)
     || parts.some((p) => p.id != null && openRows.has(p.id)))
   useEffect(() => { if (expanded !== undefined) setOpen(expanded) }, [expanded])
   if (!parts?.length) return null
-  const tools = parts.filter((p) => p.kind === 'tool')
-  const failed = tools.filter((p) => p.ok === false && !p.interrupted).length
+  // rows loaded from the server carry no `kind`: anything that is not text or a
+  // job is a tool call
+  const failed = parts.filter((p) => p.kind !== 'text' && p.kind !== 'job'
+    && p.ok === false && !p.interrupted).length
+  const steps = stepCount(parts)
   return (
     <div className="activity-group">
       <div className="steps-pill" role="button" tabIndex={0} aria-expanded={open}
@@ -205,13 +221,15 @@ export const ActivityGroup = memo(function ActivityGroup({ parts, expanded, ms }
              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen((o) => !o) }
            }}>
         <span className={`chev ${open ? 'open' : ''}`} aria-hidden="true">›</span>
-        <span>{parts.length} step{parts.length !== 1 ? 's' : ''}</span>
+        <span>{steps} step{steps !== 1 ? 's' : ''}</span>
         {ms != null && <span className="steps-dim">{fmtElapsed(ms)}</span>}
         {failed > 0 && <span className="steps-bad">{failed} failed</span>}
       </div>
-      {open && parts.map((p, i) => (p.kind === 'job'
-        ? <JobRow key={`job${p.root_id}`} part={p} />
-        : <ToolRow key={p.id ?? i} part={p} />))}
+      {open && parts.map((p, i) => {
+        if (p.kind === 'text') return <div key={`n${i}`} className="narration"><Text text={p.text} /></div>
+        if (p.kind === 'job') return <JobRow key={`job${p.root_id}`} part={p} />
+        return <ToolRow key={p.id ?? i} part={p} />
+      })}
     </div>
   )
 })
@@ -247,6 +265,7 @@ function rowsOf(parts) {
 }
 
 export const MessageBody = memo(function MessageBody({ m }) {
+  const activity = useMemo(() => activityOf(m), [m.activity, m.narration])
   if (m.parts) {
     return (
       <div className="bubble">
@@ -259,7 +278,7 @@ export const MessageBody = memo(function MessageBody({ m }) {
   if (!m.content && m.streaming) return <div className="bubble"><Typing /></div>
   return (
     <div className="bubble">
-      {m.activity?.length > 0 && <ActivityGroup parts={m.activity} ms={m.ms} />}
+      {activity.length > 0 && <ActivityGroup parts={activity} ms={m.ms} />}
       <Text text={m.content} />
       <ModelTag model={m.model} />
     </div>

@@ -13,6 +13,10 @@ async def run(message: str, paths: list[str] | None = None) -> str:
     except ValueError as e:
         return f"error: {e}"
     scope = f" (paths: {', '.join(paths)})" if paths else ""
+    replaced = row.get("replaced") or []
+    if replaced:
+        scope += "; replaces pending " + ", ".join(
+            f"request #{r['id']} ({r['message'][:60]!r})" for r in replaced)
     return (f"commit request #{row['id']} filed{scope} — status pending. "
             "Nothing is committed or pushed until the operator approves it "
             "in the dashboard.")

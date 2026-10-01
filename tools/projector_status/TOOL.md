@@ -4,6 +4,7 @@ description: What the projection mapper is doing — every surface and what it i
 when_to_use: When the operator asks what's on the wall, or when something did not appear and you need to know why. You do NOT need this before projector_show — that finds surfaces by name itself.
 enabled: true
 section: projector
+action: status
 requires_settings: [mcp_projector_url, mcp_projector_token]
 read_only: true
 parameters:

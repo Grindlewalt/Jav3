@@ -200,6 +200,14 @@ async def _warm_project_box(box_id: str):
             boxes.follow_profile_image(b, eff.get("image"))
     if b is not None or not boxes.enabled() or not box_id.startswith("p-"):
         return _box_or_404(box_id)
+    from .db import get_db
+    db = await get_db()
+    try:
+        known = await placement._project_exists(db, box_id[2:])
+    finally:
+        await db.close()
+    if not known:      # a typo would reserve RAM and boot a box for nothing
+        raise HTTPException(status_code=404, detail=f"no project {box_id[2:]!r}")
     eff = await placement.effective(box_id[2:])
     if eff["mode"] != "own":
         # warmed up the way the profile would make it (before placements a
@@ -228,10 +236,17 @@ async def start_box(box_id: str, user: dict = Depends(require_user)):
     return await _box_row(b)
 
 
+def _cut(b, what: str) -> str:
+    """The history's reason for an operator action, saying when it ended
+    turns that were running in the box."""
+    n = int(getattr(b.ctl, "inflight", 0) or 0) if b.ctl is not None else 0
+    return f"{what}, cutting off {n} running turn{'s' * (n != 1)}" if n else what
+
+
 @router.post("/boxes/{box_id}/stop")
 async def stop_box(box_id: str, user: dict = Depends(require_user)):
     b = _box_or_404(box_id)
-    with boxlog.by(_who(user), "operator stop"):
+    with boxlog.by(_who(user), _cut(b, "operator stop")):
         await boxes.stop(b)
     return await _box_row(b)
 
@@ -242,7 +257,7 @@ async def restart_box(box_id: str, user: dict = Depends(require_user)):
     running in it are cut off; the operator's client says so first."""
     b = _box_or_404(box_id)
     try:
-        with boxlog.by(_who(user), "operator restart"):
+        with boxlog.by(_who(user), _cut(b, "operator restart")):
             await boxes.restart(b)
     except (VMError, boxes.BoxError) as e:
         raise HTTPException(status_code=502, detail=str(e))
@@ -254,9 +269,10 @@ async def destroy_box(box_id: str, body: DestroyBody, user: dict = Depends(requi
     if not body.confirm:
         raise HTTPException(status_code=400, detail="destroy requires confirm=true")
     b = _box_or_404(box_id)
-    with boxlog.by(_who(user), "operator destroy"):
+    with boxlog.by(_who(user), _cut(b, "operator destroy")):
         await boxes.destroy(b, delete_data=body.delete_data)
-    return {"ok": True}
+    # the shared box cannot be removed: destroy only stops it
+    return {"ok": True, "removed": not b.is_shared}
 
 
 _BOX_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,90}$")
@@ -269,7 +285,11 @@ async def box_events(box_id: str, limit: int = 50, before: int | None = None):
     reason and actor. A destroyed box's history still reads."""
     if not _BOX_ID_RE.match(box_id):
         raise HTTPException(status_code=400, detail="bad box id")
-    return {"box_id": box_id, "events": await boxlog.events(box_id, limit, before)}
+    evs = await boxlog.events(box_id, limit, before)
+    if not evs and not before and boxes.get(box_id) is None:
+        # a typo must not look like a box with no history
+        raise HTTPException(status_code=404, detail=f"no box {box_id!r}, and no history of one")
+    return {"box_id": box_id, "events": evs}
 
 
 # --- leftovers (backend/vm/leftovers.py) ---------------------------------------------

@@ -136,6 +136,9 @@ MIN_EXT_VERSION = {"select": "0.3.0", "hover": "0.3.0", "key": "0.3.0",
 # version means "0.3.0 or older": 0.3.0 verbs are let through (and an
 # `unknown action` answer is turned into the reload message), 0.4.0 forms are not.
 UNREPORTED_EXT = "0.3.0"
+# 0.6.0: a click is real mouse input through chrome.debugger (sign-in popups, isTrusted
+# checks, coordinates inside iframes). An older build still clicks, with script events.
+TRUSTED_CLICK_VERSION = "0.6.0"
 _VERSION_RE = re.compile(r"^(\d{1,4})\.(\d{1,4})\.(\d{1,4})$")
 
 
@@ -528,14 +531,15 @@ async def disconnect(device_id: int, reason: str = "stopped") -> bool:
     return True
 
 
-async def stop(device_id: int, by: str = "") -> dict:
+async def stop(device_id: int, by: str = "", by_operator: bool = False) -> dict:
     """Settings' Stop: every grant for this browser off, then kill."""
     for g in await list_grants(device_id):
         await set_grant(device_id, g["project"], read=False, act=False)
     name = _browsers[device_id].name if device_id in _browsers else str(device_id)
     was = await disconnect(device_id, "stopped from Settings")
     await _event("browser_killed", f"browser use on '{name}' stopped by {by or 'operator'}",
-                 detail={"device_id": device_id, "was_connected": was, "by": by})
+                 detail={"device_id": device_id, "was_connected": was, "by": by},
+                 by_operator=by_operator)
     return {"ok": True}
 
 
@@ -806,8 +810,68 @@ def _opened_line(data: dict) -> str:
               and not isinstance(o.get("tab"), bool)]
     if not opened:
         return ""
-    return "\nadopted popup tab(s) (UNTRUSTED urls): " + ", ".join(
-        f"tab {o['tab']} {_s(o.get('url'), 200)}" for o in opened)
+    return ("\nadopted popup tab(s) — the action opened a new window; browser_list_tabs lists "
+            "it, browser_read_page reads it (UNTRUSTED urls): " + ", ".join(
+                f"tab {o['tab']} {_s(o.get('url'), 200)}" + (" (closed again)" if o.get("closed") is True else "")
+                for o in opened))
+
+
+# How a click was delivered (the extension's `via`, 0.6.0+), and why only a script
+# event when it was.
+_VIA_WHY = {
+    "no_permission": "the extension has no debugger permission; reload it in chrome://extensions "
+                     "(Developer mode → Reload) so it takes the one this version asks for",
+    "disabled": "real mouse input is switched off in the extension's Options (Clicks)",
+    "attach_failed": "Chrome would not let the extension attach its debugger to the tab ({detail})",
+    "input_failed": "Chrome did not take the mouse event ({detail})",
+    "no_event": "the page got no mouse event from the real click (is the tab hidden?)",
+    "frame_unplaced": "Jav3 could not tell where that iframe sits on the page",
+    "offscreen": "the element has no visible area to aim at, or is outside the visible page",
+    "outside_after_attach": "the point is under Chrome's debugging bar",
+}
+
+
+def _why(data: dict) -> str:
+    code = _s(data.get("via_why"), 40)
+    text = _VIA_WHY.get(code)
+    if text is None:
+        return code or "not available"
+    return text.replace("{detail}", _s(data.get("via_detail"), 160) or "no detail")
+
+
+def _via_line(data: dict) -> str:
+    """The `input:` line of a click result: real mouse input or script events."""
+    via = data.get("via")
+    if via == "trusted":
+        ms = _num(data.get("debug_ms"))
+        bar = f"; Chrome's debugging bar showed for {ms / 1000:.1f} s" if ms is not None else ""
+        return f"\ninput: real mouse input through chrome.debugger{bar}"
+    if via == "synthetic":
+        return (f"\ninput: script events, not real mouse input ({_why(data)}); a page that "
+                "needs a real click (a sign-in popup, a file chooser) ignores them")
+    return ""
+
+
+def frame_refusal(ext: str | None, res: dict) -> str:
+    """The error for a click by coordinates that landed in an iframe and could not
+    go in: an extension older than 0.6.0 cannot click there at all, a newer one only
+    lacks real mouse input right now."""
+    by_id = 'Meanwhile click the element by its id: browser_read_page, then element="f1:…".'
+    if ext_outdated(ext, TRUSTED_CLICK_VERSION):
+        return ("that point is inside an iframe, and the jav3-browser extension in that browser is "
+                f"{ext or UNREPORTED_EXT + ' or older'}; {TRUSTED_CLICK_VERSION} clicks there with real "
+                "mouse input — reload it in chrome://extensions (Developer mode → Reload), read the "
+                f"page again and take a new screenshot. {by_id}")
+    return ("that point is inside an iframe, and a script click cannot go in by coordinates; real "
+            f"mouse input is not available now: {_why(res)}. {by_id}")
+
+
+def reload_note(ext: str | None) -> str:
+    """Said after a click that changed nothing, when the extension predates trusted clicks."""
+    return (f"note: the jav3-browser extension in that browser is {ext or UNREPORTED_EXT + ' or older'}, "
+            "so this click was a script event; pages that need a real click (a sign-in popup in an "
+            f"iframe) ignore those. {TRUSTED_CLICK_VERSION} sends real mouse input: ask the operator to "
+            "reload the extension in chrome://extensions (Developer mode → Reload).")
 
 
 def _q(v: str) -> str:
@@ -967,13 +1031,13 @@ def screenshot_elements(view: dict | None, img_w: int, img_h: int,
 
 
 def render(verb: str, data: dict, p: dict, max_chars: int = 8000,
-           changed: bool | None = None, first: bool = False) -> str:
+           changed: bool | None = None, first: bool = False, note: str = "") -> str:
     """The model's view of a result: compact, bounded, labelled untrusted.
     Actions and reads end with `changed: yes/no` (page signature vs the last
-    one seen for that tab)."""
+    one seen for that tab); `note` goes just before that line."""
     if verb in ("list_tabs", "close_tab", "screenshot_tab"):
         return _render(verb, data, p, max_chars)
-    tail = f"\n{_changed_line(changed, first)}"
+    tail = (f"\n{note}" if note else "") + f"\n{_changed_line(changed, first)}"
     if verb == "read_page":
         return _render(verb, data, p, max_chars, tail)   # budgeted with the tail
     return f"{_render(verb, data, p, max_chars)}{tail}"
@@ -1006,6 +1070,8 @@ def _render(verb: str, data: dict, p: dict, max_chars: int = 8000, tail: str = "
         did = _s(data.get("text"), 300) if verb in _INPUT_VERBS else ""
         if did:
             base += f"\n{did}"
+        if verb == "click":
+            base += _via_line(data)
         return base + _opened_line(data)
     text = data.get("text") if isinstance(data.get("text"), str) else ""
     full_len = len(text)
@@ -1306,6 +1372,8 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
         if code == "stale" and p.get("element"):
             return (f"error: element {p['element']} is no longer on the page — "
                     "browser_read_page again")
+        if code == "frame" and verb == "click":
+            return "error: " + frame_refusal(b.ext, res)
         if code == "invalid" and err.startswith("unknown action"):
             # an unreported (pre-0.4.0) build that is older than 0.3.0
             return "error: " + outdated_error(b.ext or "0.2.0 or older",
@@ -1334,8 +1402,11 @@ async def act(verb: str, params: dict, want: str | None = None) -> str:
         b.reads[(op, tab)] = time.monotonic()
     elif verb in ("navigate", "close_tab", "back", "forward") and isinstance(tab, int):
         b.reads.pop((op, tab), None)      # the old element ids are gone
+    note = ""
+    if verb == "click" and changed is not True and ext_outdated(b.ext, TRUSTED_CLICK_VERSION):
+        note = reload_note(b.ext)      # a script click that did nothing: say why, and the fix
     text = render(verb, data, p, p.get("max_chars", 8000), changed=changed,
-                  first=first and verb == "read_page")
+                  first=first and verb == "read_page", note=note)
     if verb != "screenshot_tab":
         return text
     img = _image(res)

@@ -2,13 +2,14 @@
 and the gateway (key policy, budget, ledger) lives in front of it. `providers.resolve` routes each
 call — `provider/model` -> endpoint, key, wire kind — and the non-OpenAI
 wire formats live in adapters.py."""
+import asyncio
 import contextvars
 import json
 import re
 from typing import AsyncIterator
 
 from ..config import settings
-from .. import providers
+from .. import provider_balance, providers
 from ..providers import base_url_allowed, endpoint as _endpoint  # noqa: F401 (re-export)
 from . import adapters, budget as budget_mod
 from .adapters import ModelError, retrying
@@ -240,7 +241,7 @@ class ModelClient:
         # while nothing has streamed to the caller yet (adapters.retrying).
         raw: dict | None = None
         async for ev in retrying(lambda: self._stream_once(base, key, payload)):
-            if ev["type"] == "token":
+            if ev["type"] in ("token", "retry"):
                 yield ev
             else:
                 raw = ev
@@ -256,6 +257,10 @@ class ModelClient:
                 tcs = recovered
                 content = dsml_prose(content)   # the markup was the tool call
         yield {"type": "message", "content": content, "tool_calls": tcs,
+               # present only on a reply the output cap cut off: the loop must
+               # not take it for a finished answer (or run its last tool call)
+               **({"finish_reason": "length"} if raw.get("finish_reason") == "length"
+                  else {}),
                "usage": raw["usage"]}
 
     async def _stream_once(self, base: str, key: str, payload: dict) -> AsyncIterator[dict]:
@@ -264,6 +269,8 @@ class ModelClient:
         content_parts: list[str] = []
         tool_calls: dict[int, dict] = {}
         usage: dict | None = None
+        finish: str | None = None   # the last finish_reason the stream carried
+        done = False                # [DONE] arrived
         dsml = False   # once the native tool-call markup starts, stop streaming it
         watch_dsml = _is_deepseek_endpoint(base)
         tail = ""      # rolling window for mark detection across chunk splits —
@@ -285,14 +292,31 @@ class ModelClient:
                         continue
                     data = line[5:].strip()
                     if data == "[DONE]":
+                        done = True
                         break
-                    obj = json.loads(data)
+                    try:
+                        obj = json.loads(data)
+                    except ValueError:
+                        raise ModelError("model stream sent a line that is not JSON",
+                                         retryable=True) from None
+                    if not isinstance(obj, dict):
+                        continue
+                    if obj.get("error"):        # an error object in the stream
+                        raise _stream_error(obj["error"])
                     if obj.get("usage"):        # final include_usage chunk
                         usage = obj["usage"]
                     choices = obj.get("choices") or []
                     if not choices:             # usage-only chunk has no choices
                         continue
-                    delta = choices[0].get("delta", {})
+                    if choices[0].get("finish_reason"):
+                        finish = choices[0]["finish_reason"]
+                        # the provider broke mid-stream (OpenRouter: error, DeepSeek:
+                        # insufficient_system_resource): a retry may get through
+                        if finish in ("error", "insufficient_system_resource"):
+                            raise ModelError("model API stream error: the provider "
+                                             f"ended the reply with finish_reason {finish}",
+                                             retryable=True)
+                    delta = choices[0].get("delta") or {}
                     if delta.get("content"):
                         content_parts.append(delta["content"])
                         if not dsml and watch_dsml:
@@ -315,9 +339,24 @@ class ModelClient:
                         if fn.get("arguments"):
                             slot["function"]["arguments"] += fn["arguments"]
 
+        if not done and finish is None:
+            # the connection closed with neither the end marker nor a finish
+            # reason: what we hold is a prefix (a tool call cut mid-argument
+            # looks like a finished one), so it is asked for again
+            raise ModelError("model stream ended before the reply was complete "
+                             "(no [DONE] and no finish_reason)", retryable=True)
         yield {"type": "raw", "content": "".join(content_parts),
                "tool_calls": [tool_calls[i] for i in sorted(tool_calls)],
-               "usage": usage}
+               "finish_reason": finish, "usage": usage}
+
+
+def _stream_error(err) -> ModelError:
+    """An `error` object that arrived inside a 200 stream. An int code is its
+    HTTP status (5xx is retried, 4xx is not); anything else is not retried."""
+    msg = err.get("message") if isinstance(err, dict) else None
+    code = err.get("code") if isinstance(err, dict) else None
+    status = code if isinstance(code, int) and not isinstance(code, bool) else None
+    return ModelError(f"model API stream error: {msg or err}", status=status)
 
 
 def _shape_for_provider(payload: dict, base: str, name: str) -> None:
@@ -371,6 +410,17 @@ def _normalise_usage(usage: dict | None) -> dict | None:
     prompt = usage.get("prompt_tokens") or 0
     return {**usage, "prompt_cache_hit_tokens": cached,
             "prompt_cache_miss_tokens": max(prompt - cached, 0)}
+
+
+def _estimate_usage(messages: list[dict], tools: list[dict] | None, out_chars: int) -> dict:
+    """Token usage for a call that never reported any: about four characters to
+    a token, no cache credit (the Budget then charges the whole prompt, which
+    errs towards caution)."""
+    prompt = len(json.dumps(_redact_images(messages), default=str, ensure_ascii=False))
+    prompt += len(json.dumps(tools, default=str)) if tools else 0
+    p = max(prompt // 4, 1)
+    return {"prompt_tokens": p, "completion_tokens": out_chars // 4,
+            "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": p}
 
 
 def _cache_weight(route) -> float | None:
@@ -455,33 +505,63 @@ class ModelGateway:
                 **({"max_tokens": max_tokens} if max_tokens else {}),
                 **({"extra": extra} if extra else {}))
 
+        async def account(usage: dict | None) -> None:
+            if budget is not None:
+                budget.add(usage or {}, cache_weight=_cache_weight(route))
+            try:
+                await record_model_call(conversation_id, route.model_id, usage,
+                                        messages, tools,
+                                        op_id=op_id or budget_mod.active_op_id.get(),
+                                        box_id=call_box_id.get())
+            except Exception:  # noqa: BLE001 — the ledger must never fail a call
+                pass
+
         final: dict | None = None
+        streamed = 0          # chars of this attempt's reply the provider has sent us
+        abandoned = False     # the caller stopped reading (or was cancelled) mid-call
         try:
             async for ev in stream:
                 if ev["type"] == "token":
+                    streamed += len(ev["text"])
+                    yield ev
+                elif ev["type"] == "retry":
+                    # the dropped attempt was billed for its prompt and what it
+                    # sent, and the retry will be billed again
+                    await account(_estimate_usage(messages, tools, streamed))
+                    streamed = 0
                     yield ev
                 else:
                     final = ev
+                    provider_balance.ok(route)     # it answered: credit is back
         except ModelError as e:
             # an error body that echoes the request must not carry the key
             # into the transcript, the logs or the guest
-            if route.key and len(route.key) >= 6 and route.key in str(e):
-                raise ModelError(str(e).replace(route.key, "***"),
-                                 status=e.status) from None
+            text = str(e)
+            if route.key and len(route.key) >= 6 and route.key in text:
+                text = text.replace(route.key, "***")
+            if e.status == 402:
+                # out of credit: one plain message, one bell, plans can pause
+                # (provider_balance.py) instead of the provider's raw body
+                raise provider_balance.refused(route, text) from None
+            if text != str(e):
+                raise ModelError(text, status=e.status) from None
             raise
+        except (GeneratorExit, asyncio.CancelledError):
+            abandoned = True
+            raise
+        finally:
+            # A call that ended without its final event still ran at the
+            # provider: a stop closes the stream mid-reply, a drop that was not
+            # retried away ends it. Its usage never arrived, so it is estimated
+            # from what was sent and received; a call that failed before the
+            # first token was refused or never started, and costs nothing.
+            if final is None and (streamed or abandoned):
+                await account(_estimate_usage(messages, tools, streamed))
 
         assert final is not None
         usage = _normalise_usage(final["usage"])
         final = {**final, "usage": usage}
-        if budget is not None:
-            budget.add(usage or {}, cache_weight=_cache_weight(route))
-        try:
-            await record_model_call(conversation_id, route.model_id, usage,
-                                    messages, tools,
-                                    op_id=op_id or budget_mod.active_op_id.get(),
-                                    box_id=call_box_id.get())
-        except Exception:  # noqa: BLE001 — the ledger must never fail a call
-            pass
+        await account(usage)
         yield final
 
 

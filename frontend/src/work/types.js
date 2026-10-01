@@ -7,6 +7,7 @@ export const WINDOW_TYPES = {
   board: { title: 'Task board', label: 'Task board — goal / plan / runs' },
   git: { title: 'Git', label: 'Git — review, approve, push' },
   terminal: { title: 'Terminal', label: 'Terminal — shell in the guest VM' },
+  desktop: { title: 'Desktop', label: 'Desktop — watch the box’s screen' },
   journal: { title: 'Journal', label: 'Journal — project.md' },
   editor: { title: 'Editor', label: 'Editor — text & markdown' },
   renderer: { title: 'Renderer', label: 'Renderer — html / pdf / images' },

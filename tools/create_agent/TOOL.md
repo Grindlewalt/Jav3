@@ -4,6 +4,7 @@ description: Define a new named agent (system prompt + roster entry) that you ca
 when_to_use: The operator asks for a new kind of agent ("make a news agent"), wants an existing agent's behavior changed ("make the news agent shorter" -> update=true), or a RECURRING task needs a role no agent in your roster covers. Check the roster first — never duplicate an existing agent, and don't mint roster entries for one-off jobs (that is spawn_temp_agent's job).
 enabled: true
 section: agents
+action: create
 parameters:
   type: object
   properties:

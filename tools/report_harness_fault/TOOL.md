@@ -4,6 +4,7 @@ description: Report that the HARNESS itself misbehaved — a tool that errored o
 when_to_use: When a tool rejects arguments that match its schema, a documented behaviour is missing (e.g. you cannot address a peer the system says exists), or a capability fails in a way you cannot route around by fixing your own call. First read the error and try the fix it suggests; report only a genuine harness fault, then route around it and keep working.
 enabled: true
 section: system
+action: report_fault
 read_only: true
 parameters:
   type: object

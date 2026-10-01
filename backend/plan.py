@@ -77,6 +77,7 @@ MAX_FIXES = 4             # orchestrator re-dispatches per item (plan_fix retry)
 
 _locks: dict[str, asyncio.Lock] = {}
 _runs: dict[str, asyncio.Task] = {}          # project slug -> the detached runner
+_starting: set[str] = set()                  # slugs inside start_run, before _runs has the task
 # slugs whose _drive loop is live and will read the file again on its next tick
 # (changed only under the plan lock), and slugs whose _drive has STARTED this
 # run — the pair tells a plan_fix whether a run is starting, live or winding
@@ -84,6 +85,11 @@ _runs: dict[str, asyncio.Task] = {}          # project slug -> the detached runn
 _driving: set[str] = set()
 _drive_began: set[str] = set()
 _live_items: dict[int, dict] = {}            # conversation id -> {project, item_id, title}
+# (project, item id) -> its port block number. Handed out round-robin and kept for
+# the process's life, so a retry reuses its block and a server an item left
+# running is not handed to the next item (PLANS-09)
+_port_blocks: dict[tuple[str, str], int] = {}
+_port_cursor = 0
 
 
 def _now() -> str:
@@ -333,7 +339,9 @@ roster; null means a general worker.
 Write every brief for an agent that must FINISH on its own: name the files it
 owns, the command that proves it works (a test, a run, a build) and what done
 looks like. A root item gates everything after it, so keep roots small and
-certain. Tell items that depend on unfinished work to stub or build what they
+certain. Depend on an item only if you read its output: an environment or setup
+proof (does pip work, does the toolchain run) never gates items that just write
+files. Tell items that depend on unfinished work to stub or build what they
 need rather than wait for it."""
 
 # appended to the planner's instructions only when the operator made explicit
@@ -589,6 +597,12 @@ REPORT_RULES = """# Keep moving
 - "blocked" is ONLY for what an agent cannot do at all: a credential or
   account, a paid service, a decision only the operator can make. Everything
   else you solve.
+- The work is written and only the proof RUN is blocked (a host the egress
+  proxy refuses, a tool the box lacks): report "done" with the caveat and the
+  exact command still to run, or "blocked" naming the hosts. Never "failed": a
+  failed attempt is re-spawned from scratch. A proxy 403 means that host is
+  refused or queued for the operator: say which hosts in your report at once;
+  do not probe the proxy, the gateway or the sandbox for a way around it.
 
 # Reporting — required
 When the item is finished, call plan_report with status "done" and a summary
@@ -601,17 +615,33 @@ Report as soon as the proof passes; a final reply without a plan_report call
 counts as a failed attempt and throws your work's summary away.
 
 # Teammates
-The other items of this plan are separate agents. They start as their
-dependencies clear, so a sibling you want may not be running at the same instant
-as you — address it by item:<id> anyway (for example to="item:i2"): a running
-item gets the message now, and one that has not started keeps it as a note it
-reads when it begins, so don't wait for a reply. send_message to="?" lists the
-plan's item:<id> addresses (running or not) alongside whoever is live. Say so
-before you touch files another item owns; ask when only a teammate knows the
-answer. Messages to you arrive between your reasoning rounds."""
+The other items of this plan are separate agents. What you finish reaches the
+items that depend on you through plan_report, so do not message to report. Message
+a teammate only when your work overlaps files or names it owns, or when only it
+knows the answer: address it by item:<id> (for example to="item:i2"). A running
+item gets the message now; any other keeps it as a note for its next run, so
+don't wait for a reply. send_message to="?" lists the addresses. Messages to you
+arrive between your reasoning rounds."""
 
 
-def _item_task(plan: dict, it: dict, deps: list[dict]) -> str:
+def item_ports(slug: str, item_id: str) -> tuple[int, int]:
+    """The block of ports this item may bind, first and last (PLANS-09). All
+    items of all projects share the shared box's network namespace; with no
+    allocation they picked the same ports (8099 held by a teammate's server,
+    8000 by an earlier item's) and nothing reaped what they started."""
+    global _port_cursor
+    key = (slug, item_id)
+    n = _port_blocks.get(key)
+    if n is None:
+        n = _port_cursor % max(1, settings.plan_port_blocks)
+        _port_cursor += 1
+        _port_blocks[key] = n
+    first = settings.plan_port_base + n * settings.plan_port_block
+    return first, first + settings.plan_port_block - 1
+
+
+def _item_task(plan: dict, it: dict, deps: list[dict],
+               ports: tuple[int, int] | None = None) -> str:
     parts = [f"[item {it['id']}] {it['title']}",
              f"\nYou are working item {it['id']} of the plan \"{plan['title']}\". "
              "Do exactly this item, nothing more.",
@@ -637,6 +667,14 @@ def _item_task(plan: dict, it: dict, deps: list[dict]) -> str:
             if h.get("progress"):
                 line += f"\n  got to: {h['progress']}"
             parts.append(line)
+    if ports:
+        parts.append(
+            f"\n# Ports\nThis item owns ports {ports[0]}\u2013{ports[1]} on the shared box; "
+            "teammates have their own blocks. If you start a server, bind one of these "
+            "(never a fixed port like 8000, 8080 or 8099), run it in the background with "
+            "its output sent to a file, and stop it before you call plan_report: save "
+            "its PID when you start it and kill that. A server left running keeps its "
+            "port until the box is scrubbed.")
     rounds = plan.get("max_iterations") or settings.plan_item_max_iterations
     parts.append(f"\n# Budget\nYou have about {rounds} tool rounds (several calls can go in "
                  "one round). Spend at most a fifth of them looking around, then build. "
@@ -694,24 +732,35 @@ def resolve_item(project: str | None, item_id: str) -> int | None:
     return hits[0][0] if hits else None
 
 
+NOTE_STATUSES = ("todo", "blocked", "failed")   # items that will read a note on their next run
+
+
 async def leave_note(project: str | None, item_id: str, *, sender: str,
-                     body: str) -> str | None:
+                     body: str) -> tuple[str | None, str | None]:
     """A message to an item that is not running: kept on the item and shown in
-    its brief when it starts. Returns None when queued, else why not."""
+    its brief when it next starts. A blocked or failed item keeps it too — a
+    retry (plan_fix, the operator's reset) shows the brief with its notes, and
+    the alternative was the orchestrator re-sending the same text as a fix
+    brief (PLANS-12). Returns (why not, None) or (None, the item's status)."""
     if not project:
-        return "you are not in a project, so there is no plan to leave a note in"
+        return "you are not in a project, so there is no plan to leave a note in", None
     try:
         async with edit(project) as plan:
             it = index(plan).get(item_id)
             if it is None:
-                return f"the plan for project {project} has no item {item_id!r}"
-            if it["status"] != "todo":
+                return f"the plan for project {project} has no item {item_id!r}", None
+            if it["status"] == "running":
+                # no live conversation yet (just spawned) or none left (a lost run):
+                # its brief is already built, so a note would be read by no one
+                return (f"item {item_id} is starting up and cannot read a message yet — "
+                        "send it again in a moment"), None
+            if it["status"] not in NOTE_STATUSES:
                 return (f"item {item_id} is {it['status']}, not running — it will not "
-                        "read a message now; its outcome is in the plan")
+                        "read a message now; its outcome is in the plan"), None
             it["notes"].append({"from": sender, "body": body[:SUMMARY_CHARS], "at": _now()})
+            return None, it["status"]
     except LookupError:
-        return f"project {project} has no plan"
-    return None
+        return f"project {project} has no plan", None
 
 
 async def report(slug: str, *, cid: int | None, item_id: str | None,
@@ -771,8 +820,18 @@ async def _open_head(slug: str, plan: dict, job_id: str) -> tuple[int, str | Non
 async def start_run(slug: str, *, resume: bool = False) -> dict:
     """Launch the runner as a detached task. Returns {job_id, root_id}. Raises
     RuntimeError when a run is already live or there is nothing to run."""
-    if is_running(slug):
+    # check and reserve with no await between them (ROBUST-08): the awaits below
+    # (the resume edit, the head conversation) let a second start in
+    if is_running(slug) or slug in _starting:
         raise RuntimeError("a plan run is already in progress")
+    _starting.add(slug)
+    try:
+        return await _start_run(slug, resume=resume)
+    finally:
+        _starting.discard(slug)
+
+
+async def _start_run(slug: str, *, resume: bool) -> dict:
     plan = load(slug)
     if plan is None:
         raise RuntimeError("this project has no plan yet")
@@ -901,6 +960,10 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
     meta: dict[str, dict] = {}
     spawned = 0
     pausing = False
+    # PLANS-02: the guest's shared write buffer comes home after every settle
+    # and every plan_flush_seconds (orchestrator.flush_workspace), and once more
+    # on the way out; `flush_cid` is the item whose flags the pull should name
+    need_flush, flush_cid, last_flush = False, None, time.monotonic()
     async with edit(slug) as plan:
         base_tokens = plan.get("tokens_used", 0)     # earlier runs of this plan
         _driving.add(slug)
@@ -925,10 +988,16 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                 for iid, t in list(tasks.items()):
                     if t.done():
                         tasks.pop(iid)
-                        if await _settle(plan, idx[iid], t, meta.pop(iid), job_id) and not pausing:
+                        m_done = meta.pop(iid)
+                        need_flush, flush_cid = True, m_done.get("cid")
+                        if await _settle(plan, idx[iid], t, m_done, job_id) and not pausing:
                             pausing = True
-                            plan["paused_reason"] = ("the token budget ran out mid-item "
-                                                     f"({iid} is back to todo, no attempt spent)")
+                            from . import provider_balance
+                            plan["paused_reason"] = (
+                                f"{provider_balance.reason()} ({iid} is back to todo, no attempt spent)"
+                                if provider_balance.is_empty() else
+                                "the token budget ran out mid-item "
+                                f"({iid} is back to todo, no attempt spent)")
                             bus.publish(job_id, {"type": "node_status", "node_id": root_id,
                                                  "status": "pausing"})
                 # after settling, so a dependency that just failed for the last
@@ -940,7 +1009,13 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                 now = time.monotonic()
                 for iid, t in list(tasks.items()):
                     m, it = meta[iid], idx[iid]
-                    if now - m["last_activity"] < settings.plan_stall_seconds:
+                    # an outstanding tool call is work, not silence (ROBUST-17):
+                    # a brokered call emits nothing until it returns, and a
+                    # nudge cannot reach an item blocked inside one. The long
+                    # window only catches a call that is really hung.
+                    window = (settings.plan_stall_call_seconds if m.get("calls")
+                              else settings.plan_stall_seconds)
+                    if now - m["last_activity"] < max(window, settings.plan_stall_seconds):
                         continue
                     if not m["nudged"]:
                         m["nudged"] = True
@@ -951,14 +1026,25 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                     tasks.pop(iid)
                     meta.pop(iid)
                     _live_items.pop(m.get("cid"), None)
+                    need_flush, flush_cid = True, m.get("cid")
                     it["stalls"] += 1
                     it["last_error"] = "stalled: no tool call or message for too long"
+                    progress = ""
+                    if m.get("in_flight"):
+                        # the hung call is never recorded by the guest; say which
+                        # one it was so the retry does not walk into it again
+                        progress = (f"interrupted: {m['in_flight']} had been running "
+                                    f"{int(now - m.get('in_flight_at', now))}s with no result")
+                        it["last_error"] += f" (in flight: {m['in_flight']})"
                     it.setdefault("history", []).append(
                         {"attempt": it["attempts"], "outcome": "stalled",
-                         "error": it["last_error"], "progress": "",
+                         "error": it["last_error"], "progress": progress,
                          "conversation_id": m.get("cid"), "at": _now()})
                     it["history"] = it["history"][-HISTORY_KEEP:]
-                    it["status"] = "todo" if it["stalls"] <= 1 else "failed"
+                    # a stall respawn counts against attempts_max like any retry
+                    # (attempt 3 of 2 was seen)
+                    it["status"] = ("todo" if it["stalls"] <= 1
+                                    and it["attempts"] < plan["attempts_max"] else "failed")
                     _emit_item(job_id, it)
                 # the review checkpoint: past it, start nothing new, let what is
                 # running finish its turn, then pause for the operator
@@ -1001,6 +1087,12 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                             _emit_item(job_id, it)
                     return ("done" if all(it["status"] in SETTLED for it in plan["items"])
                             else "failed")
+            if tasks and time.monotonic() - last_flush >= settings.plan_flush_seconds:
+                need_flush = True
+            if need_flush:
+                need_flush, last_flush = False, time.monotonic()
+                await orchestrator.flush_workspace(slug, flush_cid)
+                flush_cid = None
             if tasks:
                 await asyncio.wait(list(tasks.values()), timeout=settings.plan_tick_seconds,
                                    return_when=asyncio.FIRST_COMPLETED)
@@ -1014,6 +1106,8 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
             _live_items.pop(m.get("cid"), None)
         if tasks:
             await asyncio.gather(*tasks.values(), return_exceptions=True)
+        if need_flush:              # the last settle before a return / a stop
+            await orchestrator.flush_workspace(slug, flush_cid)
 
 
 async def _notify_paused(slug: str, plan: dict) -> None:
@@ -1039,7 +1133,7 @@ async def _run_item(slug: str, job_id: str, root_id: int, plan: dict, it: dict,
                     deps: list[dict], m: dict) -> dict:
     """One attempt of one item, as a headless agent run under the plan's head."""
     from . import agents_run
-    task = _item_task(plan, it, deps)
+    task = _item_task(plan, it, deps, item_ports(slug, it["id"]))
     item_id, title = it["id"], it["title"]
 
     async def on_open(cid: int) -> None:
@@ -1057,6 +1151,15 @@ async def _run_item(slug: str, job_id: str, root_id: int, plan: dict, it: dict,
 
     def on_event(ev: dict) -> None:
         m["last_activity"] = time.monotonic()
+        # the calls still outstanding, by id: a model may issue several at once,
+        # and one result must not clear the others (ROBUST-17)
+        calls = m.setdefault("calls", {})
+        if ev.get("type") == "tool":
+            calls[ev.get("id") or ev.get("name")] = ev.get("name")
+            m["in_flight"], m["in_flight_at"] = ev.get("name"), m["last_activity"]
+        elif ev.get("type") == "tool_result":
+            calls.pop(ev.get("id") or ev.get("name"), None)
+            m["in_flight"] = next(reversed(calls.values()), None)
         if ev.get("type") == "tool" and m["cid"] is not None:
             bus.publish(job_id, {"type": "tool", "name": ev.get("name"), "node_id": m["cid"]})
 
@@ -1097,6 +1200,13 @@ async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -
     result = (t.result() or {}) if exc is None else {}
     if isinstance(exc, BudgetExceeded) or result.get("stop") == "budget":
         _budget_stop(it, plan, result.get("final") or "", cid, job_id)
+        return True
+    from . import provider_balance
+    if provider_balance.is_empty() and (it.get("report") or {}).get("status") != "done":
+        # the provider refused for money (402): not the item's fault and not a
+        # spent attempt; retrying would only burn attempts until it is topped up
+        _budget_stop(it, plan, result.get("final") or "", cid, job_id)
+        it["last_error"] = provider_balance.reason() or "the model provider's balance is empty"
         return True
     rep = it.get("report") or {}
     final = ""
@@ -1148,6 +1258,7 @@ async def _nudge(root_id: int, it: dict, m: dict) -> None:
     try:
         await agentmsg.send(
             db, sender_cid=root_id, to=str(m["cid"]),
+            sender_tainted=False,           # fixed text of ours: nothing untrusted in it
             body=(f"[plan] item {it['id']} has been quiet for a while. Take the next "
                   "concrete step now: run the check, fix what it shows, or build what is "
                   "missing. Only if you need something only the operator can give, call "
@@ -1235,7 +1346,12 @@ a small unblocking fix directly (a missing stub, a name clash, a wrong path).
    done or skipped. Exception: every {pause_tokens} tokens the run PAUSES for the
    operator's review (running turns finish, nothing new starts). Then report
    where it stands and stop; only the operator resumes it. Go to the operator ONLY for what agents cannot do at all:
-   a credential or account, money, a decision that is genuinely theirs.
+   a credential or account, money, a decision that is genuinely theirs. While
+   a run is live never park on that question: nobody watches the plan while you
+   wait. Put open questions in your final report; if one truly cannot wait,
+   ask_user hands control back after about two minutes with the question left
+   open (the answer then reaches you as a message), so check first that it is
+   still a real question (plan_status, the project's Network tab) before asking.
 5. A single focused task outside the plan can go to spawn_agent or
    spawn_temp_agent; you wait for that one's report.
 6. When everything is done, report to the operator: what got done (exact
@@ -1389,7 +1505,7 @@ async def fix(slug: str, *, action: str, item: str | None = None,
     try:
         started = await start_run(slug)
     except RuntimeError as e:
-        if is_running(slug):                        # a sibling plan_fix relaunched it
+        if is_running(slug) or slug in _starting:   # a sibling plan_fix relaunched it
             return f"{what}.{note} The run that is starting picks it up."
         return f"{what}.{note} Could not relaunch: {e}"
     return (f"{what}.{note} Relaunched the run (head conversation {started['root_id']}); "

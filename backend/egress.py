@@ -21,6 +21,7 @@ raises a security_event and a `cut`, which this module records so the proxy
 refuses the host immediately.
 """
 import json
+import time
 
 import aiosqlite
 
@@ -456,7 +457,8 @@ def _profile_ref(slug: str) -> int | str | None:
 
 
 async def remove_host(db: aiosqlite.Connection, slug: str, host: str,
-                      which: str = "allow") -> dict:
+                      which: str = "allow", *, actor: str = profiles.UNMARKED,
+                      by_operator: bool = False) -> dict:
     """Operator removes a standing entry from the list that holds it. `slug` is
     the list's own key: a project slug, `profile:<id>` for a profile's list,
     or GENERAL for the Default profile's (the successor of the old shared
@@ -473,7 +475,8 @@ async def remove_host(db: aiosqlite.Connection, slug: str, host: str,
         if host not in hosts:
             return {"ok": False, "error": "host is not on that list"}
         hosts.remove(host)
-        await profiles.set_hosts(db, prof["id"], **{("deny" if which == "deny" else "allow"): hosts})
+        await profiles.set_hosts(db, prof["id"], actor=actor, by_operator=by_operator,
+                                 **{("deny" if which == "deny" else "allow"): hosts})
         return {"ok": True, "project": slug, "profile": prof["name"], "host": host}
     row = await _row(db, slug)
     if row is None:
@@ -490,7 +493,8 @@ async def remove_host(db: aiosqlite.Connection, slug: str, host: str,
 
 async def promote_to_profile(db: aiosqlite.Connection, slug: str, host: str,
                              profile_id: int | None = None, which: str = "allow",
-                             actor: str = "operator") -> dict:
+                             actor: str = profiles.UNMARKED,
+                             by_operator: bool = False) -> dict:
     """"Promote to profile": move a host from the project's own list onto a
     profile's list of the same kind (default: the project's own profile), in
     one step. The profile edit is a `profile_changed` event; the project entry
@@ -505,12 +509,13 @@ async def promote_to_profile(db: aiosqlite.Connection, slug: str, host: str,
     key = "deny_hosts" if which == "deny" else "allow_hosts"
     if host not in prof[key]:
         try:
-            await profiles.set_hosts(db, prof["id"], actor=actor,
+            await profiles.set_hosts(db, prof["id"], actor=actor, by_operator=by_operator,
                                      **{("deny" if which == "deny" else "allow"):
                                         [*prof[key], host]})
         except profiles.ProfileError as e:
             return {"ok": False, "error": str(e)}
-    removed = (await remove_host(db, slug, host, which=which))["ok"]
+    removed = (await remove_host(db, slug, host, which=which, actor=actor,
+                                 by_operator=by_operator))["ok"]
     return {"ok": True, "host": host, "list": "deny" if which == "deny" else "allow",
             "profile": {"id": prof["id"], "name": prof["name"]},
             "removed_from_project": removed}
@@ -826,7 +831,8 @@ async def set_lists(db: aiosqlite.Connection, slug: str, *, allow: list[str] | N
 
 
 async def set_policy(db: aiosqlite.Connection, slug: str, *, mode: str = "allowlist",
-                     inherit_general: bool = True, hosts: list[str] | None = None) -> dict:
+                     inherit_general: bool = True, hosts: list[str] | None = None,
+                     actor: str = profiles.UNMARKED, by_operator: bool = False) -> dict:
     """The pre-profiles call, kept as a translation: the old mode picks the
     profile that reproduces it (allowlist+inherit -> Default,
     allowlist -> Scoped, denylist -> Open, denyall -> Offline) and `hosts`
@@ -837,8 +843,9 @@ async def set_policy(db: aiosqlite.Connection, slug: str, *, mode: str = "allowl
     if is_reserved(slug):
         return {"ok": False, "error": RESERVED}
     name = profiles.legacy_profile_name(mode, inherit_general)
-    prof = await profiles.legacy_profile(db, name)
-    await profiles.assign(db, slug, prof["id"], require_project=False)
+    prof = await profiles.legacy_profile(db, name, by_operator=by_operator)
+    await profiles.assign(db, slug, prof["id"], require_project=False, actor=actor,
+                          by_operator=by_operator)
     allow, deny = profiles.legacy_lists(mode, sorted(hosts or []))
     await db.execute("UPDATE egress_policy SET hosts = ?, deny_hosts = ?, "
                      "updated_at = datetime('now') WHERE project_slug = ?",
@@ -859,6 +866,40 @@ def mark_cut(slug: str | None, host: str) -> None:
 
 def clear_cut(slug: str | None, host: str) -> None:
     _cut.discard((slug or GENERAL, host))
+
+
+# Un-cut (the Security queue's "Un-cut host"). Taking a cut back must stick: the
+# volume and cadence detectors judge the hours BEFORE a host's latest hit, so the
+# very next request would trip the same detector and cut it again. A host the
+# operator un-cut is not re-judged by the anomaly detectors for this long (in
+# memory: a restart forgets it, the way it forgets the cut).
+UNCUT_GRACE_S = 3600
+_uncut_until: dict[tuple[str, str], float] = {}
+
+
+def uncut(slug: str | None, host: str) -> bool:
+    """Lift an auto-cut and start the grace. True when the host was cut here (the
+    nft drop is the caller's to undo: backend/vm/egress_proxy.nft_undrop)."""
+    was = False
+    for h in {host, _norm(host)}:
+        for s in {slug or GENERAL, GENERAL}:
+            if (s, h) in _cut:
+                was = True
+            _cut.discard((s, h))
+        _uncut_until[(slug or GENERAL, h)] = time.monotonic() + UNCUT_GRACE_S
+    return was
+
+
+def in_uncut_grace(slug: str | None, host: str) -> bool:
+    until = _uncut_until.get((slug or GENERAL, host)) or _uncut_until.get(
+        (slug or GENERAL, _norm(host)))
+    if until is None:
+        return False
+    if time.monotonic() >= until:
+        _uncut_until.pop((slug or GENERAL, host), None)
+        _uncut_until.pop((slug or GENERAL, _norm(host)), None)
+        return False
+    return True
 
 
 # --- secret grants (B1; profiles (d)) -----------------------------------------

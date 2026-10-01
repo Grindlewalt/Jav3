@@ -34,6 +34,9 @@ def _mock_transport(monkeypatch, recv_seq):
     """Drive guest_turn's vsock transport from a list of recv() results
     (bytes, or an Event to block on forever)."""
     monkeypatch.setattr(gt.workspace_xfer, "build_merged_tar", lambda s: b"")
+    # a stopped owner pulls its edits home; this scripted guest never answers,
+    # so the pull runs into its timeout: keep that short
+    monkeypatch.setattr(gt, "RESCUE_TIMEOUT", 0.2)
 
     async def _acquire():
         return None

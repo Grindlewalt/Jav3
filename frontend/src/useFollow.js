@@ -132,10 +132,20 @@ export function useDockHeight(ref) {
     const el = ref.current
     const host = el?.parentElement
     if (!el || !host) return undefined
-    const write = () => host.style.setProperty('--dock-h', `${el.offsetHeight}px`)
+    // also on the root: the toast stack (.notices) lives outside this box and
+    // has to ride above an open question, not across its right end
+    const root = document.documentElement
+    const write = () => {
+      host.style.setProperty('--dock-h', `${el.offsetHeight}px`)
+      root.style.setProperty('--dock-h-root', `${el.offsetHeight}px`)
+    }
     write()
     const ro = new ResizeObserver(write)
     ro.observe(el)
-    return () => { ro.disconnect(); host.style.removeProperty('--dock-h') }
+    return () => {
+      ro.disconnect()
+      host.style.removeProperty('--dock-h')
+      root.style.removeProperty('--dock-h-root')
+    }
   }, [ref])
 }

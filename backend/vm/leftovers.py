@@ -16,7 +16,8 @@ positively identify as THIS server's:
                no box controller here started.
     box_dir    <vm_dir>/boxes/<id> with no box registered (overlay disk, EFI
                vars, console log: disposable by design, destroy deletes it).
-    sock_dir   <vm_dir>/sock/<n> with no docker box in slot n.
+    sock_dir   <vm_dir>/sock/<n> with no docker box in slot n and something in it
+               (an empty one is just a directory: not listed).
     overlay    the shared box's overlay.qcow2 while it is stopped.
     tap        a jvtapN / jvbrN interface no box here uses. Listed, never
                removed: the names are not per-install, and removing one needs
@@ -72,6 +73,13 @@ def _du(p: Path) -> int | None:
     return total
 
 
+def _empty_dir(d: Path) -> bool:
+    try:
+        return not any(d.iterdir())
+    except OSError:
+        return False
+
+
 def _controllers():
     """(box, controller) for every registered box, the shared one included."""
     for b in boxes.all_boxes():
@@ -119,6 +127,11 @@ def _qemu_procs() -> list[dict]:
             continue
         cid = next((a.decode(errors="replace").split("guest-cid=", 1)[1].split(",")[0]
                     for a in argv if b"guest-cid=" in a), None)
+        # A box's QEMU always has a vsock CID. One without (the image build's
+        # provisioning VM runs in vm_dir too, booting base-work.qcow2) is not a
+        # box's, so never a leftover: cleaning it once killed a rebuild.
+        if cid is None or any(b"-work.qcow2" in a for a in argv):
+            continue
         out.append({"pid": int(p.name), "cwd": str(c), "box_id": bid, "cid": cid})
     return out
 
@@ -131,16 +144,18 @@ async def _containers() -> list[dict]:
     if not settings.docker_enabled:
         return []
     from . import docker_runtime as dr
-    rc, out, _ = await dr.cli.run("ps", "--all", "--filter", f"label={dr.LABEL}=1",
-                                  "--format", "{{.Names}}", timeout=30)
-    names = [n for n in out.split() if n.startswith("jav3-")] if rc == 0 else []
+    rc, out, err = await dr.cli.run("ps", "--all", "--filter", f"label={dr.LABEL}=1",
+                                    "--format", "{{.Names}}", timeout=30)
+    if rc != 0:      # a dead or wedged daemon is not "no leftovers": say so
+        raise dr.DockerError(f"docker ps failed: {err.strip()[:200] or f'exit {rc}'}")
+    names = [n for n in out.split() if n.startswith("jav3-")]
     if not names:
         return []
     fmt = ('{{.Name}}\t{{index .Config.Labels "' + dr.LABEL + '"}}\t'
            '{{index .Config.Labels "jav3.box"}}\t{{.State.Status}}\t{{json .Mounts}}')
-    rc, out, _ = await dr.cli.run("inspect", "--format", fmt, *names, timeout=30)
+    rc, out, err = await dr.cli.run("inspect", "--format", fmt, *names, timeout=30)
     if rc != 0:
-        return []
+        raise dr.DockerError(f"docker inspect failed: {err.strip()[:200] or f'exit {rc}'}")
     import json
     sock_root = settings.vm_dir / "sock"
     found = []
@@ -230,8 +245,8 @@ async def scan(*, cached: bool = False) -> dict:
     except OSError:
         socks = []
     for d in socks:
-        if d.name in slots:
-            continue
+        if d.name in slots or _empty_dir(d):
+            continue        # in use, or nothing in it (stop_all and old destroys leave these)
         items.append({"id": f"sock_dir:{d.name}", "type": "sock_dir", "name": f"sock/{d.name}",
                       "why": f"socket directory for slot {d.name}, which no docker box uses",
                       "cleanable": True, "detail": {"path": str(d)}})
@@ -320,8 +335,10 @@ async def _remove(it: dict) -> None:
 def summary_line(res: dict) -> str:
     """The startup log line."""
     n = len(res.get("items") or [])
+    down = str(res.get("docker") or "")
     if not n:
-        return "[boxes] no leftovers"
+        return ("[boxes] no leftovers" if not down.startswith("unavailable")
+                else f"[boxes] no leftovers found, but docker could not be asked ({down})")
     kinds: dict[str, int] = {}
     for i in res["items"]:
         kinds[i["type"]] = kinds.get(i["type"], 0) + 1

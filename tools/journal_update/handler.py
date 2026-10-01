@@ -7,7 +7,11 @@ from backend.memory import UNVERIFIED_MARK, read_project_md, refresh_all_project
 from backend.agent.tools.toolctx import require_project
 from backend.runtime import write_taint
 
-ENTRY_MAX = 500            # chars of one journal line
+ENTRY_MAX = 300            # chars of one journal line; longer is refused, not trimmed
+
+# the model copies the dated lines already in the journal, so an entry often
+# opens with "- 2026-09-29:" of its own; the handler adds the date
+_OWN_DATE = re.compile(r"^(?:[-*]\s+)?(?:\d{4}-\d{2}-\d{2}\s*:?\s*)+")
 
 _JOURNAL_HEAD = re.compile(r"^## Journal[ \t]*$", re.M)
 _NEXT_HEAD = re.compile(r"^## ", re.M)
@@ -31,9 +35,15 @@ def _add_line(md: str, line: str) -> str:
 async def run(entry: str) -> str:
     slug = await require_project()
     # one plain line: an entry is not a place to open a new heading or section
-    entry = memory.flat_line(entry, ENTRY_MAX)
+    entry = memory.flat_line(entry, ENTRY_MAX * 4)
+    entry = _OWN_DATE.sub("", entry, count=1).strip()
     if not entry:
         return "error: the journal entry is empty."
+    if len(entry) > ENTRY_MAX:
+        # project.md rides every prompt: a paragraph here is paid for on every turn
+        return (f"error: journal entry is too long (the limit is {ENTRY_MAX} characters); "
+                "shorten it to one line: what changed and why, not a log. "
+                "Nothing was written.")
     # a turn that had read untrusted content (the broker sets this for
     # journal_update, like memory_write) marks the line: project.md is loaded
     # whole into every future prompt, so the line stays in the file for the

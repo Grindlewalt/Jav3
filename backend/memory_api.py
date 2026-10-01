@@ -2,6 +2,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from . import alwaysloaded
 from .auth import require_user
 from .config import settings
 from .fsutil import list_tree, read_text_or_binary, safe_join
@@ -10,6 +11,7 @@ from .memory import (NoteChanged, ProposalChanged, ProposalStale, approve_propos
                      note_description, note_taint, note_trusted, notes_dir, parse_note,
                      pending_counts, promote_note, proposal_path, proposal_view,
                      reject_proposal, restore_trash, sha256_text, trash_note)
+from .writes import SecretLeakError
 
 router = APIRouter(prefix="/api/memory", tags=["memory"],
                    dependencies=[Depends(require_user)])
@@ -155,7 +157,7 @@ async def delete_note(name: str):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="no such note") from None
     await audit("memory_deleted", "info", f"memory note '{name}' deleted by the operator",
-                {"note": name, "by": "operator", "trash_id": tid})
+                {"note": name, "by": "operator", "trash_id": tid}, by_operator=True)
     return {"ok": True, "name": name, "trash_id": tid}
 
 
@@ -200,7 +202,7 @@ async def approve(name: str, body: Approve | None = None):
             detail="the note was edited after this proposal began; the approval would "
                    "overwrite that edit. Reject it, or approve with force") from None
     await audit("memory_approved", "info", f"proposed change to note '{name}' approved",
-                {"note": name, "by": "operator"})
+                {"note": name, "by": "operator"}, by_operator=True)
     return {"ok": True, "name": name}
 
 
@@ -209,6 +211,52 @@ async def reject(name: str):
     if not reject_proposal(_check_name(name)):
         raise HTTPException(status_code=404, detail="no proposal for that note")
     return {"ok": True, "name": name}
+
+
+# --- project files that ride every prompt (backend/alwaysloaded.py) -----------
+# A write to project.md or an operator-ticked context file by a turn that had
+# read untrusted content is held here; the prompt keeps the file as it was until
+# the operator approves the change (a diff, bound to the text they read).
+
+@router.get("/held-files")
+async def held_files(project: str | None = None):
+    """Held changes to always-loaded project files, all projects or one, each
+    with a diff against the file as it is now."""
+    return {"items": alwaysloaded.list_held(project)}
+
+
+@router.post("/held-files/{slug}/{item_id}/approve")
+async def approve_held(slug: str, item_id: str, body: Approve | None = None):
+    body = body or Approve()
+    try:
+        path = await alwaysloaded.approve(slug, item_id, sha256=body.sha256, force=body.force,
+                                          by_operator=True)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="no held change with that id") from None
+    except alwaysloaded.HeldChanged:
+        raise HTTPException(
+            status_code=409,
+            detail="the held change changed since you opened it (the agent wrote again); "
+                   "reload and review it") from None
+    except alwaysloaded.HeldStale:
+        raise HTTPException(
+            status_code=409,
+            detail="the file was changed after this change was held; the approval would "
+                   "overwrite that. Reject it, or approve with force") from None
+    except SecretLeakError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"the change contains the value of secret(s) {', '.join(e.names)}; "
+                   "it cannot be written") from None
+    return {"ok": True, "project": slug, "path": path}
+
+
+@router.post("/held-files/{slug}/{item_id}/reject")
+async def reject_held(slug: str, item_id: str):
+    path = await alwaysloaded.reject(slug, item_id, by_operator=True)
+    if path is None:
+        raise HTTPException(status_code=404, detail="no held change with that id")
+    return {"ok": True, "project": slug, "path": path}
 
 
 @router.get("/trash")

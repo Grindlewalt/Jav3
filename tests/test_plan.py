@@ -359,6 +359,30 @@ async def _const(v):
     return v
 
 
+async def test_a_stall_names_the_hung_tool_and_respects_attempts_max(client, monkeypatch):
+    """PLANS-08: the call a stalled attempt was stuck in was never recorded (the
+    retry started blind), and the stall respawn ran past attempts_max."""
+    monkeypatch.setattr(settings, "plan_stall_seconds", 0.05)
+    monkeypatch.setattr(settings, "plan_stall_call_seconds", 0.05)    # a call is hung past this
+    await _put(client, [{"title": "hangs", "brief": "h"}], attempts_max=1)
+
+    async def turn(cid, system_prompt, history, **kw):
+        yield {"type": "tool", "id": "c1", "name": "run_code", "args": {}}
+        await asyncio.Event().wait()             # the call never returns
+        yield {"type": "final", "content": "never"}
+
+    monkeypatch.setattr(agents_run, "run_agent_turn", turn)
+    monkeypatch.setattr(plan_mod, "complete_text", lambda *a, **k: _const("R"))
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    it = _by_id(plan_mod.load(SLUG))["i1"]
+    assert it["status"] == "failed" and it["attempts"] == 1       # not respawned past the cap
+    h = it["history"][-1]
+    assert h["outcome"] == "stalled" and "run_code" in h["progress"]
+    assert "in flight: run_code" in it["last_error"]
+
+
 async def test_siblings_talk_by_item_id_and_leave_notes(client, monkeypatch):
     await _put(client, [{"title": "left hand", "brief": "l"},
                         {"title": "right hand", "brief": "r"},
@@ -757,3 +781,243 @@ async def test_token_checkpoint_pauses_after_turns_finish(client, tmp_env, monke
     await _wait_run()
     p = plan_mod.load(SLUG)
     assert _by_id(p)["i2"]["status"] == "done" and p["pause_at"] == 11_100
+
+
+async def test_a_plans_writes_are_pulled_home_as_items_settle(client, monkeypatch):
+    """PLANS-02: an item's writes sat in the guest's shared buffer until the
+    orchestrator's turn ended, so the host (git tools, panels, the operator)
+    saw an empty project all run and a guest crash lost the lot. The runner now
+    pulls the buffer home after each settle, attributed to the item that just
+    finished, and on a timer while items run."""
+    from backend.vm import guest_turn
+    await _put(client, [{"title": "one", "brief": "a"},
+                        {"title": "two", "brief": "b", "depends_on": ["i1"]}])
+    pulled = []
+
+    async def fake_pull(slug):
+        pulled.append((slug, runtime.conversation_id.get()))
+    monkeypatch.setattr(guest_turn, "pull_writes", fake_pull)
+    monkeypatch.setitem(guest_turn._ws_holds, SLUG, 1)      # a guest workspace is held
+
+    async def done(cid, attempt, text):
+        await _report(cid, "done", "ok")
+        return "ok"
+    monkeypatch.setattr(agents_run, "run_agent_turn",
+                        _scripted({"i1": done, "i2": done}, {}))
+
+    async def fake_synth(system, user, temperature=0.3):
+        return "ROLLUP"
+    monkeypatch.setattr(plan_mod, "complete_text", fake_synth)
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    items = _by_id(plan_mod.load(SLUG))
+    assert all(it["status"] == "done" for it in items.values())
+    cids = [c for _, c in pulled]
+    # one pull per settle, each attributed to the item that had just finished
+    assert items["i1"]["conversation_id"] in cids
+    assert items["i2"]["conversation_id"] in cids
+    # ...and none when no guest workspace is held (tests, or a guest that never came up)
+    guest_turn._ws_holds.pop(SLUG, None)
+    pulled.clear()
+    await orchestrator.flush_workspace(SLUG, 5)
+    assert pulled == []
+
+
+async def test_two_simultaneous_starts_run_one_runner(client, monkeypatch):
+    """ROBUST-08: start_run checked is_running, then awaited (the head
+    conversation), and only then registered the task: two starts both passed the
+    check and ran two runners for one plan, of which stop_run could end one."""
+    await _put(client, [{"title": "a", "brief": "a"}])
+    started: list[int] = []
+
+    async def hold(cid, attempt, text):
+        started.append(cid)
+        await asyncio.sleep(0.2)
+        await _report(cid, "done", "ok")
+        return "ok"
+    monkeypatch.setattr(agents_run, "run_agent_turn", _scripted({"i1": hold}, {}))
+    monkeypatch.setattr(plan_mod, "complete_text", lambda *a, **k: _const("R"))
+    res = await asyncio.gather(plan_mod.start_run(SLUG), plan_mod.start_run(SLUG),
+                               return_exceptions=True)
+    ok = [r for r in res if isinstance(r, dict)]
+    bad = [r for r in res if isinstance(r, RuntimeError)]
+    assert len(ok) == 1 and len(bad) == 1, res
+    assert "already in progress" in str(bad[0])
+    await _wait_run()
+    assert len(started) == 1
+    assert SLUG not in plan_mod._starting
+
+
+async def test_an_item_inside_one_long_tool_call_is_not_stalled(client, monkeypatch):
+    """ROBUST-17: the stall clock counted silence, and a brokered call (a
+    research run, spawn_agent children, run_code) emits nothing between its
+    `tool` and `tool_result`: the item was nudged, cancelled and failed while
+    working. An outstanding call is activity; only a call past
+    plan_stall_call_seconds counts as hung, and a call that has returned puts
+    the ordinary window back."""
+    monkeypatch.setattr(settings, "plan_stall_seconds", 0.1)
+    monkeypatch.setattr(settings, "plan_stall_call_seconds", 5)
+    await _put(client, [{"title": "long", "brief": "l"}])
+    cids: list[int] = []
+
+    async def turn(cid, system_prompt, history, **kw):
+        cids.append(cid)
+        yield {"type": "tool", "id": "c1", "name": "research", "args": {}}
+        await asyncio.sleep(0.5)                     # 5 stall windows, one call
+        yield {"type": "tool_result", "id": "c1", "name": "research", "content": "ok"}
+        await _report(cid, "done", "finished")
+        yield {"type": "final", "content": "ok"}
+
+    monkeypatch.setattr(agents_run, "run_agent_turn", turn)
+    monkeypatch.setattr(plan_mod, "complete_text", lambda *a, **k: _const("R"))
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    it = _by_id(plan_mod.load(SLUG))["i1"]
+    assert it["status"] == "done" and it["stalls"] == 0 and it["attempts"] == 1, it
+    assert len(cids) == 1
+
+
+async def _sender_cid() -> int:
+    from backend.db import open_conversation
+    db = await get_db()
+    try:
+        return await open_conversation(db, project=SLUG, title="sender", kind="agent")
+    finally:
+        await db.close()
+
+
+async def test_notes_reach_blocked_and_failed_items_and_a_question_mark_keeps_the_message(
+        client):
+    """PLANS-12: a note to a blocked or failed item came back 'cannot reach'
+    although a retry shows its brief the notes (the orchestrator re-sent the
+    same text as plan_fix briefs), and `to:"?"` with a message returned the
+    roster and dropped the message."""
+    await _put(client, [{"title": "a", "brief": "a"}, {"title": "b", "brief": "b"},
+                        {"title": "c", "brief": "c"}, {"title": "d", "brief": "d"}])
+    async with plan_mod.edit(SLUG) as plan:
+        st = {"i1": "blocked", "i2": "failed", "i3": "done", "i4": "todo"}
+        for it in plan["items"]:
+            it["status"] = st[it["id"]]
+    cid = await _sender_cid()
+    db = await get_db()
+    try:
+        for target in ("i1", "i2", "i4"):
+            out = await agentmsg.send(db, sender_cid=cid, to=f"item:{target}",
+                                      body=f"note for {target}")
+            assert not out.get("error") and out.get("note_for") == target, out
+        out = await agentmsg.send(db, sender_cid=cid, to="item:i3", body="too late")
+        assert "done" in out["error"] and "outcome" in out["error"], out
+        # `?` lists the addresses and holds the message; the follow-up needs only `to`
+        out = await agentmsg.send(db, sender_cid=cid, to="?", body="the real message")
+        assert "was not sent" in out["error"] and "Running turns" in out["error"], out
+        out = await agentmsg.send(db, sender_cid=cid, to="item:i1", body="")
+        assert out.get("note_for") == "i1", out
+    finally:
+        await db.close()
+    items = _by_id(plan_mod.load(SLUG))
+    assert [n["body"] for n in items["i1"]["notes"]] == ["note for i1", "the real message"]
+    assert [n["body"] for n in items["i2"]["notes"]] == ["note for i2"]
+    assert items["i3"]["notes"] == []
+    assert "the real message" in plan_mod._item_task(plan_mod.load(SLUG), items["i1"], [])
+    # an empty message with nothing held is still refused
+    db = await get_db()
+    try:
+        out = await agentmsg.send(db, sender_cid=cid, to="item:i1", body="")
+        assert "needs a message" in out["error"], out
+    finally:
+        await db.close()
+
+
+async def test_peer_messages_inside_a_plan_run_taint_only_from_a_tainted_sender(client):
+    """PLANS-11: any peer message tainted the receiver, so a plan item that was
+    told something by its sibling had its journal entries quarantined as
+    [unverified]. Between items of one plan run (and the head's own nudge) the
+    message now carries the sender's taint instead: a sender that has read
+    nothing untrusted does not taint; one that has, still does. A sender outside
+    the run is a plain peer, and so is a recipient outside it."""
+    from backend.agent import budget as budget_mod
+    from backend.db import open_conversation
+    await _put(client, [{"title": "a", "brief": "a"}, {"title": "b", "brief": "b"}])
+    db = await get_db()
+    try:
+        i1, i2, outsider, head = [
+            await open_conversation(db, project=SLUG, title=t, kind=k)
+            for t, k in (("i1", "agent"), ("i2", "agent"), ("o", "chat"), ("h", "head"))]
+    finally:
+        await db.close()
+    async with plan_mod.edit(SLUG) as plan:
+        plan["root_id"] = head
+    plan_mod._live_items[i1] = {"project": SLUG, "item_id": "i1", "title": "a"}
+    plan_mod._live_items[i2] = {"project": SLUG, "item_id": "i2", "title": "b"}
+    n = 0
+
+    async def drained_taint(cid) -> bool:
+        nonlocal n
+        n += 1
+        op = f"op-{cid}-{n}"
+        t1, t2 = runtime.conversation_id.set(cid), budget_mod.active_op_id.set(op)
+        try:
+            text = await agentmsg.fetch_tool()
+        finally:
+            runtime.conversation_id.reset(t1)
+            budget_mod.active_op_id.reset(t2)
+        assert text, "nothing was delivered"
+        return broker.op_tainted(op)
+
+    async def send(frm, to, **kw):
+        db = await get_db()
+        try:
+            out = await agentmsg.send(db, sender_cid=frm, to=to, body="hello", **kw)
+        finally:
+            await db.close()
+        assert not out.get("error"), out
+
+    await send(i1, "item:i2", sender_tainted=False)
+    assert await drained_taint(i2) is False, "a clean sibling's message tainted the item"
+    await send(i1, "item:i2", sender_tainted=True)
+    assert await drained_taint(i2) is True, "a tainted sender's message must still taint"
+    await send(i1, "item:i2")                          # unknown: fails closed
+    assert await drained_taint(i2) is True
+    await send(outsider, "item:i2", sender_tainted=False)
+    assert await drained_taint(i2) is True, "a sender outside the plan run is a plain peer"
+    await send(i1, str(outsider), sender_tainted=False)
+    assert await drained_taint(outsider) is True, "a recipient outside the run is a plain peer"
+    # the head's stall nudge is fixed plan text, not model output
+    await plan_mod._nudge(head, {"id": "i2"}, {"cid": i2})
+    assert await drained_taint(i2) is False, "the plan head's own nudge tainted the item"
+
+
+async def test_each_item_gets_its_own_port_block_in_its_brief(client, monkeypatch):
+    """PLANS-09: items on the shared box share one network namespace and each
+    picked its own port (8099 held by a teammate, 8000 by an earlier item's
+    server), so they collided and leaked. Every item now owns a block of ports
+    (stable across its retries) and its brief says to use only those, send the
+    server's output to a file and stop what it starts."""
+    import re
+    await _put(client, [{"title": "a", "brief": "a"}, {"title": "b", "brief": "b"},
+                        {"title": "c", "brief": "c", "depends_on": ["i1"]}], max_concurrent=3)
+    seen: dict = {}
+
+    async def done(cid, attempt, text):
+        await _report(cid, "failed" if (attempt == 1 and "[item i1]" in text) else "done", "x")
+        return "ok"
+    monkeypatch.setattr(agents_run, "run_agent_turn", _scripted(
+        {"i1": done, "i2": done, "i3": done}, seen))
+    monkeypatch.setattr(plan_mod, "complete_text", lambda *a, **k: _const("R"))
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+
+    def block(text):
+        m = re.search(r"ports (\d+)–(\d+)", text)
+        assert m, text[-1500:]
+        return int(m.group(1)), int(m.group(2))
+    b1, b2, b3 = block(seen["i1"][0]), block(seen["i2"][0]), block(seen["i3"][0])
+    assert len({b1, b2, b3}) == 3, "items shared a port block"
+    ranges = sorted([b1, b2, b3])
+    assert all(a[1] < b[0] for a, b in zip(ranges, ranges[1:])), "port blocks overlap"
+    assert len(seen["i1"]) == 2 and block(seen["i1"][1]) == b1, "a retry kept its block"
+    ports_rule = seen["i2"][0].split("# Ports", 1)[1].split("\n#", 1)[0]
+    assert "stop" in ports_rule and "output" in ports_rule

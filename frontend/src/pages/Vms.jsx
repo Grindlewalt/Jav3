@@ -232,7 +232,10 @@ function BoxRow({ b, legacy, open, unlimited, histTick, onToggle, onVerb }) {
             : up && b.stop_after_s && b.inflight > 0
               ? <span className="dim" title="the idle clock starts when the last turn ends">
                   {b.stop_action === 'scrub' ? 'scrub' : 'stop'} after {mins(b.stop_after_s)} idle</span>
-              : <span className="dim">{up ? (STOPS_OTHER[b.kind] || '–') : '–'}</span>}
+              : !up && b.removed_in_s != null
+                ? <span className="dim" title="a stopped project box is released after the idle window: the row goes, its history stays">
+                    removed in {mins(b.removed_in_s)}</span>
+                : <span className="dim">{up ? (STOPS_OTHER[b.kind] || '–') : '–'}</span>}
         </span>
         <span role="cell" data-label="Runtime"><RuntimeTag runtime={b.runtime} /></span>
         <span role="cell" className="small" data-label="Image · RAM · CPU">

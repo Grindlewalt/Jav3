@@ -19,7 +19,7 @@ FROM ${BASE}
 
 # the same curated toolchain as the KVM golden image (vm/build_base.sh), so
 # run_code behaves the same in both runtimes
-ARG JAV3_PACKAGES="python3-pip python3-venv python3-dev git curl ca-certificates nodejs npm build-essential pkg-config jq ripgrep sqlite3 unzip zip xz-utils"
+ARG JAV3_PACKAGES="python3-pip python3-venv python3-dev python3-pytest git curl ca-certificates nodejs npm build-essential pkg-config jq ripgrep sqlite3 unzip zip xz-utils"
 RUN set -eux; \
     export DEBIAN_FRONTEND=noninteractive; \
     apt-get update; \
@@ -38,8 +38,11 @@ RUN set -eux; \
 
 # the directory exists (0755) BEFORE the COPY: a COPY --chmod that creates its
 # parent gave the directory 0644 too — untraversable, so uid 10001 could not
-# read bootstrap.py and every docker box died at start (2026-09-27, the Pi)
-COPY --chown=root:root --chmod=0644 bootstrap.py /usr/local/lib/jav3/bootstrap.py
+# read bootstrap.py and every docker box died at start (2026-09-27, the Pi).
+# No `COPY --chmod`: the classic builder (a host without the buildx plugin, the
+# Arch box 2026-09-29) refuses it as BuildKit-only, so the mode is set by a RUN.
+COPY --chown=root:root bootstrap.py /usr/local/lib/jav3/bootstrap.py
+RUN chmod 0644 /usr/local/lib/jav3/bootstrap.py
 
 USER 10001:10001
 WORKDIR /opt/jarvis

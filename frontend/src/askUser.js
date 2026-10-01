@@ -116,6 +116,14 @@ export function answerBody(id, answers) {
   return answers == null ? { id, skipped: true } : { id, answers }
 }
 
+// The turn ended (stopped, finished, dropped): the asks it raised are void, the
+// server no longer holds them. A child agent's ask (another conversation_id)
+// belongs to that agent's own turn and stays until its ask_done.
+export function settleAsks(asks, cid) {
+  if (!asks.length) return asks
+  return asks.filter((x) => x.conversation_id != null && x.conversation_id !== cid)
+}
+
 // fold one stream event into the list of open asks
 export function foldAsks(asks, ev) {
   if (ev.type === 'ask_user' && ev.id && !asks.some((a) => a.id === ev.id)) return [...asks, ev]

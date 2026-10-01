@@ -4297,3 +4297,277 @@ a:has(> .nav-dot) { position: relative; }
 .mem-banner .link { padding: 0 2px; margin-left: 0; text-decoration: underline; }
 .nav-more { position: relative; }
 .nav-more > .nav-dot { top: 6px; left: auto; right: 6px; }
+
+/* turn narration: the agent's own text between its tool calls, kept after the turn */
+.activity-group .narration { margin: 6px 0 6px 2px; padding-left: 10px;
+  border-left: 2px solid var(--border); color: var(--dim); font-size: 0.95em; }
+.activity-group .narration > :first-child { margin-top: 0; }
+.activity-group .narration > :last-child { margin-bottom: 0; }
+.log-msg.narration { margin-left: 16px; border-left: 3px solid var(--accent);
+  background: var(--bg-soft); }
+.log-msg.narration .log-role { color: var(--accent); }
+/* always-loaded files */
+.ctx-flag { font-size: 11px; color: var(--dim); white-space: nowrap; }
+.ctx-flag.warn { color: var(--amber); }
+.ctx-held { margin: 0 0 6px; padding: 7px 10px; border: 1px solid var(--amber);
+  border-radius: 7px; font-size: 12.5px; }
+.ctx-held a { text-decoration: underline; }
+
+/* web fixes (WEBA-02, WEBA-18): a floating menu opened inside the Projects
+   sheet (4000) sat behind it at 2000, so it is above every sheet and dialog
+   now; popups and dialogs are solid so text behind them cannot read through */
+.menu.floating { z-index: 5000; }
+.menu, .notif-drop, .proj-menu, .rc-menu, .work-picker, .modal, .sbd-modal, .ask-modal {
+  background: var(--panel);
+  backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+
+/* web fixes (WEBA-03): a tall question scrolled its Skip / Answer row out of
+   the card's box, where the composer sat on top of it. The card is a column
+   now: the detail and the options shrink and scroll, the answer row stays put.
+   Toasts ride above the whole dock (--dock-h-root, useFollow.js), not across it. */
+.composer .ask-card { display: flex; flex-direction: column; }
+.composer .ask-card > * { flex-shrink: 0; }
+.composer .ask-card > .ask-detail,
+.composer .ask-card > .ask-opts { flex-shrink: 1; min-height: 2.6em; overflow-y: auto; }
+.app:has(form.composer) .notices {
+  bottom: max(calc(var(--sab) + 104px), calc(var(--dock-h-root, 0px) + 6px));
+}
+
+/* web fixes (WEBA-10): a window's header sheds its extra buttons as it narrows
+   (Work.jsx sets data-narrow from the header's width); Close stays reachable */
+.work-wh[data-narrow] .work-wh-btn.opt1,
+.work-wh[data-narrow='tiny'] .work-wh-btn.opt2 { display: none; }
+
+/* web fixes (WEBA-25): the provider row head is one target */
+.prov-head { cursor: pointer; }
+
+.sched-form.collapsed { display: none; }
+.sched-new { align-self: flex-start; }
+
+/* web fixes (WEBA-24): the Grounding table is one card per model on a phone,
+   not a five-letter-wide table that scrolls sideways */
+@media (max-width: 768px) {
+  .sbd-table.stack, .sbd-table.stack tbody { display: block; }
+  .sbd-table.stack thead { display: none; }
+  .sbd-table.stack tr { display: block; padding: 6px 0; }
+  .sbd-table.stack td { display: flex; justify-content: space-between; gap: 12px;
+    padding: 2px 10px; }
+  .sbd-table.stack td[data-label]::before { content: attr(data-label);
+    color: var(--dim); font-family: inherit; flex-shrink: 0; }
+  .sbd-table.stack td.stack-head { font-weight: 600; }
+  .sbd-table.stack td.stack-note { white-space: normal; flex-wrap: wrap; }
+  .sbd-table.stack td.stack-note:empty { display: none; }
+}
+
+/* resume a failed turn */
+.resume-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: -6px 0 22px 43px; font-size: 13px; }
+.resume-bar button { margin: 0; }
+.resume-bar.compact { margin: -2px 0 10px 0; }
+@media (max-width: 768px) {
+  .resume-bar { margin-left: 0; }
+}
+.msg.error + .resume-bar { justify-content: center; margin-left: 0; }
+/* notification settings: own actions, a mode per kind, do not disturb */
+.settings-page .notif-aside { align-self: center; }
+.notif-row { display: flex; align-items: center; gap: var(--sp-5); margin: var(--sp-5) 0; }
+.notif-dnd { margin-top: var(--sp-8); align-items: flex-end; }
+.notif-kinds { margin-top: var(--sp-8); max-height: 22rem; overflow: auto;
+  border: 1px solid var(--border); border-radius: 8px; }
+.notif-kinds table { width: 100%; border-collapse: collapse; }
+.notif-kinds th, .notif-kinds td { padding: 4px 10px; text-align: left; font-weight: 400;
+  border-bottom: 1px solid var(--border); }
+.notif-kinds thead th { position: sticky; top: 0; background: var(--panel-2);
+  color: var(--dim); font-size: 12px; z-index: 1; }
+.notif-kinds tbody tr:last-child th, .notif-kinds tbody tr:last-child td { border-bottom: 0; }
+.notif-kinds .notif-mode { text-align: center; width: 4.5rem; }
+.notif-kinds .notif-reset { width: 3.5rem; text-align: right; }
+.notif-kinds tr.chosen > th { color: var(--text); }
+.notif-kinds input[type="radio"] { margin: 0; accent-color: var(--accent); }
+.notif-kinds .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap; }
+.tag.by-you { color: var(--accent); }
+.sec-history { margin-top: var(--sp-9); }
+.sec-history > summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+.sec-history-filter { display: flex; gap: var(--sp-4); margin: var(--sp-5) 0; flex-wrap: wrap; }
+.sec-history-filter .ghost.on { background: var(--panel-2); color: var(--text); }
+.sec-history-row { opacity: 0.85; }
+/* top bar, while do-not-disturb is on */
+.dnd-mark { display: inline-flex; align-items: center; gap: 6px; background: none;
+  border: 1px solid var(--amber); color: var(--amber); border-radius: 999px;
+  padding: 0 10px; height: 26px; font-size: 12px; font-family: inherit;
+  white-space: nowrap; cursor: pointer; margin-right: var(--sp-4); }
+.dnd-mark:hover:not(:disabled) { background: var(--panel-2); filter: none; transform: none; }
+.dnd-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
+.rail-links ~ .dnd-mark { margin-right: 0; padding: 0 6px; font-size: 11px; }
+.rail-links ~ .dnd-mark .dnd-left { display: none; }
+@media (max-width: 768px) {
+  .notif-kinds { max-height: 18rem; }
+  .notif-kinds th, .notif-kinds td { padding: 4px 6px; }
+  .notif-kinds .notif-mode { width: 3.5rem; }
+  .dnd-mark { padding: 0 8px; margin-right: 0; }
+}
+
+/* Settings tabs: the strip beside the title, the Advanced folds, and the Notifications kinds table */
+.settings-page > .page-head { flex-wrap: wrap; row-gap: var(--sp-4); }
+.settings-adv { margin: 0 0 var(--sp-7); }
+.settings-adv > summary { display: inline-flex; align-items: center; gap: var(--sp-3); cursor: pointer;
+  list-style: none; user-select: none; color: var(--dim); font-size: var(--fs-md); padding: 4px 0;
+  margin-bottom: var(--sp-5); }
+.settings-adv > summary::-webkit-details-marker { display: none; }
+.settings-adv > summary:hover { color: var(--text); }
+.settings-adv[open] > summary .chev { transform: rotate(90deg); }
+.settings-adv:not([open]) > summary { margin-bottom: 0; }
+.notif-kinds-wrap { margin-top: var(--sp-8); }
+.notif-kinds-head { display: flex; align-items: baseline; gap: var(--sp-5); margin-bottom: var(--sp-4); }
+.notif-kinds-title { margin: 0; font-size: var(--fs-md); font-weight: 600; }
+.notif-kinds-rule { flex: 1 1 auto; align-self: center; border-top: 1px solid var(--border); min-width: 1rem; }
+.notif-kinds-wrap .notif-kinds { margin-top: 0; }
+.notif-kinds tr.notif-group > th { position: static; padding-top: var(--sp-5); color: var(--dim);
+  font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+.notif-kinds-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-4);
+  margin-top: var(--sp-5); }
+.notif-kinds-tools > input { flex: 1 1 14rem; min-width: 0; }
+@media (max-width: 768px) {
+  /* the strip drops under the title and spans the page, as the full-height shells' does */
+  .settings-page > .page-head > .scroll-hint { flex: 1 1 100%; }
+  .settings-page > .page-head > .scroll-hint > .tabs > a { flex: 1 1 auto; justify-content: center; }
+  .notif-kinds-tools > input { flex-basis: 100%; }
+}
+/* tools as the model sees them: a merged tool is one wide card listing its actions */
+.tools-help { margin: 0 0 var(--sp-6); max-width: 78ch; line-height: 1.45; }
+.tools-bar { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-6);
+  margin-bottom: var(--sp-6); }
+.tools-bar input { flex: 1 1 260px; min-width: 0; }
+.tools-sec { margin: var(--sp-9) 0 var(--sp-4); font-size: var(--fs-base); font-weight: 600;
+  color: var(--text); }
+.tools-sec .dim { font-weight: 400; }
+.tool-card.tool-merged { grid-column: 1 / -1; }
+.tool-actions { list-style: none; margin: var(--sp-5) 0 0; padding: 0; display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 0 var(--sp-9); }
+.tool-action { padding: var(--pad-row-sm); border-top: 1px solid var(--border); min-width: 0; }
+.tool-action-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--sp-3);
+  min-width: 0; }
+.tool-old { overflow-wrap: anywhere; }
+.tool-gate { font-size: var(--fs-xs); }
+.tool-card .tool-reqs { margin-top: var(--sp-3); }
+/* Git page */
+.git-page > .card, .git-page > .git-bar, .git-page > p { margin-bottom: var(--sp-7); }
+.git-bar { display: flex; align-items: center; gap: var(--sp-5); flex-wrap: wrap; }
+.git-bar select { max-width: 100%; }
+.git-refresh { display: flex; justify-content: flex-end; margin-bottom: var(--sp-3); }
+.git-note { margin: var(--sp-4) 0 0; }
+.git-card-link { margin-left: auto; color: var(--dim); }
+.git-sync { display: flex; align-items: center; gap: var(--sp-5); flex-wrap: wrap; }
+.git-sync > .grow { min-width: 12rem; }
+.git-pulls, .git-commits, .git-access, .git-chips { list-style: none; margin: 0; padding: 0; }
+.git-pull { padding: var(--sp-5) 0; border-top: 1px solid var(--border); }
+.git-pull:first-child { border-top: 0; padding-top: 0; }
+.git-pull-row { display: flex; align-items: center; gap: var(--sp-5); min-width: 0; }
+.git-pull-row > .grow { min-width: 0; }
+.git-branch-name { max-width: 14rem; flex-shrink: 1; color: var(--dim); }
+.git-pull-actions { display: flex; align-items: center; gap: var(--sp-5); margin-top: var(--sp-4);
+  flex-wrap: wrap; }
+.git-diff-view { margin-top: var(--sp-5); max-height: 28rem; overflow: auto; border-radius: 6px; }
+.mem-dl.file { color: var(--dim); font-weight: 600; }
+.git-recent { margin-top: var(--sp-6); }
+.git-recent > summary { cursor: pointer; }
+.git-recent .git-pull-row { padding: var(--sp-2) 0; }
+.git-chips { display: flex; flex-wrap: wrap; gap: var(--sp-4); }
+.git-chip { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+.git-chip.on { background: var(--panel-2); color: var(--text); }
+.git-commits li { display: flex; align-items: baseline; gap: var(--sp-5); padding: var(--sp-2) 0;
+  min-width: 0; }
+.git-commits li > .grow { min-width: 0; }
+.git-commits + button { margin-top: var(--sp-5); }
+.git-access { display: flex; flex-wrap: wrap; gap: var(--sp-4) var(--sp-8); }
+.git-access li { display: flex; align-items: center; gap: var(--sp-4); }
+.git-access select { width: auto; }
+@media (max-width: 768px) {
+  .git-pull-row { flex-wrap: wrap; }
+  .git-pull-row > strong { flex-basis: 100%; order: 2; white-space: normal; }
+  .git-branch-name { max-width: 100%; }
+  .git-commits li { flex-wrap: wrap; }
+}
+
+/* live desktop window: the box's screen, watch only */
+.desktop-pane { overflow: hidden; }
+.desk-status.watching { color: var(--green); }
+.desk-status.lost, .desk-status.closed { color: var(--red); }
+.desk-warning { flex-shrink: 0; font-size: var(--fs-sm); color: var(--dim);
+  padding: 4px 10px; border-left: 3px solid var(--amber);
+  background: color-mix(in srgb, var(--amber) 10%, transparent); border-radius: 4px; }
+/* the remote desktop is dark whatever the theme: a fixed backdrop, like the terminal's */
+.desk-screen { position: relative; flex: 1 1 auto; min-height: 140px; overflow: hidden;
+  border-radius: var(--radius-md); background: #14161a; border: 1px solid var(--border); }
+.desk-idle { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sp-5);
+  padding: var(--sp-6) var(--sp-2); }
+.desk-idle p { margin: 0; max-width: 46ch; }
+.desk-idle-title { font-weight: 600; }
+
+/* security queue: one card per run */
+.srun-list { display: flex; flex-direction: column; gap: var(--sp-5); }
+.srun { background: var(--panel); border: 1px solid var(--border); border-left-width: 3px;
+  border-radius: 8px; padding: var(--sp-4) var(--sp-5); font-size: 13px; }
+.srun.sev-info { border-left-color: var(--accent); }
+.srun.sev-warn { border-left-color: var(--amber); }
+.srun.sev-crit { border-left-color: var(--red); }
+.srun-head { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; min-width: 0; }
+.srun-title { min-width: 0; overflow-wrap: anywhere; }
+.srun-state.running { color: var(--green); border-color: var(--green); }
+.srun-counts { margin: var(--sp-2) 0 var(--sp-3); color: var(--dim); }
+.srun-link { background: none; border: 0; padding: 0; color: var(--accent); cursor: pointer;
+  font: inherit; text-decoration: underline; text-align: left; }
+.srun-link:hover { color: var(--text); }
+.srun-filtered { margin: 0 0 var(--sp-3); padding: var(--sp-3) var(--sp-4) var(--sp-3) var(--sp-6);
+  border-left: 2px solid var(--border); font-size: 12px; list-style: none; }
+.srun-filtered li { margin: 2px 0; overflow-wrap: anywhere; }
+.srun-kind { border-top: 1px solid var(--border); padding-top: var(--sp-4); margin-top: var(--sp-4); }
+.srun-ev { margin-bottom: var(--sp-4); }
+.srun-evtop { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap; }
+.srun-evtitle { overflow-wrap: anywhere; font-weight: 600; }
+.srun-subjects, .srun-subject { color: var(--dim); overflow-wrap: anywhere; }
+.srun-more { margin: 0 0 var(--sp-3); font-size: 12px; }
+.srun-doing { margin: var(--sp-3) 0; padding: var(--sp-3) var(--sp-5);
+  background: var(--bg-soft); border-radius: 6px; border-left: 2px solid var(--border); }
+.srun-untrusted { color: var(--amber); }
+.srun-step { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.srun-says { margin-top: 2px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.srun-actions { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; }
+.srun-ack { margin-left: auto; }
+.srun-mute { position: relative; display: inline-block; }
+.srun-mute > summary { list-style: none; cursor: pointer; display: inline-block; }
+.srun-mute > summary::-webkit-details-marker { display: none; }
+.srun-mute-menu { position: absolute; z-index: 5; top: 100%; left: 0; margin-top: 2px;
+  display: flex; flex-direction: column; gap: 2px; padding: var(--sp-3);
+  background: var(--panel-2); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: var(--shadow-pop); white-space: nowrap; }
+.srun-foot { display: flex; align-items: center; gap: var(--sp-3); flex-wrap: wrap;
+  border-top: 1px solid var(--border); padding-top: var(--sp-4); margin-top: var(--sp-3); }
+/* "Open chat at step": the step the chat scrolled to */
+.tool-row.step-hit, .tool-fold.step-hit { animation: step-hit 3.5s ease-out; }
+@keyframes step-hit {
+  0%, 60% { box-shadow: 0 0 0 2px var(--accent); }
+  100% { box-shadow: 0 0 0 2px transparent; }
+}
+@media (max-width: 640px) {
+  .srun-ack { margin-left: 0; }
+  .srun-actions > * { flex: 0 0 auto; }
+}
+/* live desktop take-over (P3): the click-to-take layer, the control bars */
+.desk-stage { position: relative; flex: 1 1 auto; min-height: 140px; min-width: 0;
+  display: flex; flex-direction: column; }
+.desk-stage > .desk-screen { flex: 1 1 auto; }
+.desk-takeover { position: absolute; inset: 0; z-index: 2; cursor: pointer;
+  border-radius: var(--radius-md); }
+.desk-takeover:hover, .desk-takeover:focus-visible { outline: 2px solid var(--accent);
+  outline-offset: -2px; background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.desk-bar { display: flex; align-items: center; gap: var(--sp-4); flex-shrink: 0;
+  padding: var(--sp-2) var(--sp-5); border-radius: var(--radius-md); font-size: var(--fs-sm);
+  background: var(--panel-2); border: 1px solid var(--border); }
+.desk-bar.agent { border-color: var(--amber); }
+.desk-bar.you { border-color: var(--accent); background: var(--accent); color: var(--accent-ink); }
+.desk-bar.you button { background: var(--accent-ink); color: var(--text); border-color: var(--accent-ink); }
+.desk-status.agent { color: var(--amber); }
+.desk-status.you { color: var(--accent); font-weight: 600; }

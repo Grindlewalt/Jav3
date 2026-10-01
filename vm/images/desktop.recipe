@@ -3,9 +3,21 @@
 # mode. About +450 MB. chromium peaks at 300-500 MB, hence the memory floor:
 # on a 4 GB host the RAM budget then keeps it from running beside another
 # large box.
+#
+# The live desktop (guest/backend/display.py, docs/desktop.md) adds a VNC X
+# server (tigervnc), a window manager (openbox), a terminal on a tmux session
+# (xterm, tmux) and the input/capture tools the agent drives it with (xdotool,
+# maim): about +60 MB. httpx and textual are the jav3 terminal client's own
+# libraries, baked in so it can be tried in the box without PyPI egress (pip
+# lines land in the /opt/jav3/py venv, which run_code and the desktop terminal
+# put first on PATH). The recipe takes exact pins only; both sit inside
+# clients/jav3cli/install.sh's ranges (httpx>=0.27,<1; textual>=8,<9), which
+# tests/test_desktop_display.py checks.
 name desktop
 from main
 min_mem_mb 1280
 
 apt xvfb chromium fonts-dejavu-core scrot matchbox-window-manager
 apt python3-pil
+apt tigervnc-standalone-server xterm openbox xdotool maim tmux
+pip httpx==0.28.1 textual==8.2.8

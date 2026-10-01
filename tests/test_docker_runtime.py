@@ -688,7 +688,9 @@ async def test_prepare_sock_dir_acl_for_the_container_uid(short_dir, monkeypatch
     assert os.path.exists("/etc/passwd")
 
 
-async def test_reap_orphans(harness):
+async def test_reap_orphans(tmp_env, harness):
+    from backend.db import init_db
+    await init_db()                          # the reap writes each box's history
     fake = harness["cli"]
     gone = await dr.reap_orphans()
     assert gone == ["jav3-p-alpha", "jav3-p-ghost"]      # none registered+running
@@ -753,3 +755,388 @@ def test_missing_memory_cgroup_is_a_warning():
     assert d.NO_MEMORY_LIMIT in d.plan_isolation(info).warnings
     ok = d.DaemonInfo(seccomp=True, raw={"MemoryLimit": True})
     assert d.NO_MEMORY_LIMIT not in d.plan_isolation(ok).warnings
+
+
+async def test_destroy_removes_the_box_socket_dir(harness, monkeypatch):
+    """A destroyed docker box (idle reaper, operator) takes its sock/<cid>
+    directory with it; a stopped one keeps it for the next start. The leftovers
+    scan lists a sock dir no box uses, so the reaper used to create one per box."""
+    import contextlib
+    from backend.vm import boxlog
+    box = harness["box"]
+    ctl = boxes.controller(box)
+    d = box.transport.host_dir
+
+    @contextlib.asynccontextmanager
+    async def quiet(*a, **k):
+        yield
+    monkeypatch.setattr(boxlog, "action", quiet)
+    await ctl.acquire()
+    ctl.release()
+    await boxes.stop(box)
+    assert d.is_dir()                              # stopped: the slot stays
+    await boxes.destroy(box)
+    assert not d.exists()
+    assert d.parent.is_dir()                       # only this box's slot
+
+
+async def test_forget_leaves_a_running_boxs_dir(harness):
+    box = harness["box"]
+    ctl = boxes.controller(box)
+    await ctl.acquire()
+    await ctl.forget()
+    assert box.transport.host_dir.is_dir() and box.transport.gateway_path().exists()
+    ctl.release()
+    await boxes.stop(box)
+
+
+# --- second box hunt: failed and crashed boxes, diagnostics ----------------------------
+
+@pytest.fixture
+async def hist(tmp_env, harness, monkeypatch):
+    """The harness plus the box history in a temp DB, with box_up/box_down
+    reaching boxlog like the real _emit."""
+    from backend.db import init_db
+    from backend.vm import boxlog
+    await init_db()
+    boxlog.reset()
+
+    async def emit(event, box):
+        for fn in list(boxes._hooks):
+            await fn(event, box)
+        await boxlog.on_emit(event, box)
+    monkeypatch.setattr(boxes, "_emit", emit)
+    monkeypatch.setattr(settings, "vm_boxes_enabled", True)
+    monkeypatch.setattr(settings, "vm_box_idle_stop_seconds", 60)
+    boxes.registry.reset()
+    boxes.registry._boxes[harness["box"].id] = harness["box"]
+    yield harness
+    boxes.registry.reset()
+    boxlog.reset()
+
+
+async def _events(box_id):
+    from backend.vm import boxlog
+    return [(e["event"], e["actor"], e["reason"]) for e in await boxlog.events(box_id)]
+
+
+async def test_a_dead_container_is_failed_not_running(hist):
+    """`docker kill` from outside: the row used to stay running/idle with a stop
+    countdown until the reaper destroyed the box."""
+    from backend.vm import boxlog
+    box, fake = hist["box"], hist["cli"]
+    ctl = boxes.controller(box)
+    await ctl.acquire()
+    ctl.release()
+    assert boxes.status_json(box)["activity"] == "idle"
+    fake.alive = False
+    await boxlog.watch(box)
+    row = boxes.status_json(box)
+    assert (row["state"], row["activity"]) == ("stopped", "failed")
+    assert "no longer running" in row["last_error"] and row["stops_in_s"] is None
+    await boxlog.watch(box)                                  # once per occurrence
+    assert [e[:2] for e in await _events(box.id)] == [("crashed", "app"), ("started", "app")]
+    assert hist["hooks"][-1] == ("box_down", box.id)         # listeners and hook cleaned
+    await ctl.acquire()                                      # the next use boots it again
+    ctl.release()
+    assert ctl.state == "running" and boxes.status_json(box)["activity"] == "idle"
+    await ctl.teardown()
+
+
+async def test_an_unanswering_daemon_is_not_a_crash(hist, monkeypatch):
+    from backend.vm import boxlog
+    box, fake = hist["box"], hist["cli"]
+    ctl = boxes.controller(box)
+    await ctl.acquire()
+    ctl.release()
+    real = fake.run
+
+    async def wedged(*args, timeout=120):
+        if args[0] == "inspect":
+            return 124, "", "docker inspect: timed out"
+        return await real(*args, timeout=timeout)
+    monkeypatch.setattr(fake, "run", wedged)
+    await boxlog.watch(box)
+    assert ctl.state == "running" and boxes.status_json(box)["activity"] == "idle"
+    await ctl.teardown()
+
+
+async def test_a_failed_boot_is_released_by_the_reaper(hist):
+    """A box whose boot failed held its project-box slot and RAM reservation
+    until someone destroyed it."""
+    box, fake = hist["box"], hist["cli"]
+    fake.run_rc = 125
+    ctl = boxes.controller(box)
+    with pytest.raises(dr.DockerError):
+        await ctl.acquire()
+    assert ctl.state == "failed" and boxes.budget()["project_boxes"] == 1
+    await boxes.reap_idle()
+    assert boxes.get(box.id) is box                          # the window counts from the failure
+    ctl.idle_since -= 61
+    await boxes.reap_idle()
+    assert boxes.get(box.id) is None and boxes.budget()["project_boxes"] == 0
+    ev = (await _events(box.id))[0]
+    assert ev[0] == "idle_stopped" and ev[1] == "reaper" and "boot failed" in ev[2]
+    assert "boom" in ev[2]
+
+
+class _Diag(FakeCLI):
+    """docker run says the image is missing, or logs say why the guest died."""
+    run_err = "boom"
+    logs = ""
+
+    async def run(self, *args, timeout=120):
+        if args[0] == "run" and self.run_rc:
+            self.calls.append(list(args))
+            return self.run_rc, "", self.run_err
+        if args[0] == "logs":
+            self.calls.append(list(args))
+            return 0, self.logs, ""
+        return await super().run(*args, timeout=timeout)
+
+
+async def test_a_missing_image_says_what_to_do(hist, monkeypatch):
+    fake = _Diag(run_rc=125)
+    fake.run_err = ("Unable to find image 'jav3-guest-nope:latest' locally\n"
+                    "docker: Error response from daemon: pull access denied")
+    monkeypatch.setattr(dr, "cli", fake)
+    monkeypatch.setattr(settings, "docker_image_turn", "jav3-guest-nope:latest")
+    ctl = boxes.controller(hist["box"])
+    with pytest.raises(dr.DockerError) as e:
+        await ctl.acquire()
+    msg = str(e.value)
+    assert "jav3-guest-nope:latest is not built on this host" in msg
+    assert "docker-setup" in msg and "pull access" not in msg
+    assert ["--pull", "never"] == fake.ran("run")[0][2:4]
+
+
+async def test_a_guest_that_never_served_leaves_its_output(hist, monkeypatch):
+    """The container was removed before anyone could read its logs."""
+    box = hist["box"]
+    fake = _Diag(on_run=None)
+    fake.logs = "GUEST-BOOT: starting\nTraceback (most recent call last):\nImportError: no module named x\n"
+
+    async def no_guest():
+        pass
+    fake.on_run = no_guest
+    monkeypatch.setattr(dr, "cli", fake)
+    monkeypatch.setattr(settings, "vm_boot_timeout_seconds", 1)
+    ctl = boxes.controller(box)
+    with pytest.raises(dr.DockerError, match="did not become ready"):
+        await ctl.acquire()
+    assert "ImportError: no module named x" in ctl.error
+    order = [c[0] for c in fake.calls]
+    assert order.index("logs") < len(order) - 1 - order[::-1].index("rm")   # read before the last rm
+    from backend.vm import boxlog
+    await boxlog.watch(box)                       # the reaper's pass records the failure
+    ev = (await _events(box.id))[0]
+    assert ev[0] == "error" and "ImportError" in ev[2]
+
+
+class _SlowRm(FakeCLI):
+    async def run(self, *args, timeout=120):
+        if args[0] == "rm":
+            await asyncio.sleep(0.05)
+        return await super().run(*args, timeout=timeout)
+
+
+async def test_a_turn_arriving_while_destroy_runs_does_not_boot_a_ghost(hist, monkeypatch):
+    """destroy stopped, then released; acquire on the same box object took the
+    lock after the stop and booted a container the release left unowned."""
+    box = hist["box"]
+    fake = _SlowRm(on_run=hist["cli"].on_run)
+    monkeypatch.setattr(dr, "cli", fake)
+    ctl = boxes.controller(box)
+    await ctl.acquire()
+    ctl.release()
+    t = asyncio.create_task(boxes.destroy(box))
+    await asyncio.sleep(0.01)                          # destroy is inside the slow rm
+    with pytest.raises(boxes.BoxError, match="was removed"):
+        await ctl.acquire()
+    await t
+    assert boxes.get(box.id) is None and not fake.alive and len(fake.ran("run")) == 1
+
+
+async def test_a_turn_waiting_on_the_lock_when_destroy_starts_is_refused(hist):
+    box = hist["box"]
+    ctl = boxes.controller(box)
+    await ctl._lock.acquire()
+    w = asyncio.create_task(ctl.acquire())
+    await asyncio.sleep(0)
+    ctl.retired = True
+    ctl._lock.release()
+    with pytest.raises(boxes.BoxError, match="was removed"):
+        await w
+    assert hist["cli"].ran("run") == []
+
+
+async def test_a_failed_destroy_leaves_the_box_usable(hist, monkeypatch):
+    box = hist["box"]
+    ctl = boxes.controller(box)
+
+    async def boom():
+        raise RuntimeError("docker is wedged")
+    monkeypatch.setattr(ctl, "teardown", boom)
+    with pytest.raises(RuntimeError):
+        await boxes.destroy(box)
+    assert boxes.get(box.id) is box and ctl.retired is False
+
+
+class _Squatter(FakeCLI):
+    """A container named jav3-p-other exists that this server did not start."""
+
+    async def run(self, *args, timeout=120):
+        if args[0] == "inspect" and args[2] == "{{.Name}}":
+            self.calls.append(list(args))
+            return 0, "/jav3-p-other\n", ""
+        return await super().run(*args, timeout=timeout)
+
+
+async def test_a_container_of_another_install_is_never_replaced(harness, monkeypatch):
+    """Two installs on one daemon: the pre-run `docker rm --force jav3-<box>`
+    replaced (killed) the other install's running box of the same id."""
+    box = make_box(harness["box"].dir.parent, bid="p-other", project="other")
+    fake = _Squatter(on_run=harness["cli"].on_run)
+    monkeypatch.setattr(dr, "cli", fake)
+    ctl = boxes.controller(box)
+    with pytest.raises(dr.DockerError, match="not this install's"):
+        await ctl.acquire()
+    assert ctl.state == "failed" and fake.ran("run") == []
+    assert ["rm", "--force", "jav3-p-other"] not in fake.calls     # not at boot, not in cleanup
+    assert harness["hooks"][-1] == ("box_down", "p-other")         # its own listeners are undone
+
+
+async def test_our_own_stale_container_is_still_replaced(harness, monkeypatch):
+    box = harness["box"]                                           # jav3-p-alpha: ours by its mount
+    fake = harness["cli"]
+    real = fake.run
+
+    async def stale(*args, timeout=120):
+        if args[0] == "inspect" and args[2] == "{{.Name}}":
+            fake.calls.append(list(args))
+            return 0, "/jav3-p-alpha\n", ""
+        return await real(*args, timeout=timeout)
+    monkeypatch.setattr(fake, "run", stale)
+    ctl = boxes.controller(box)
+    await ctl.acquire()
+    ctl.release()
+    assert ["rm", "--force", "jav3-p-alpha"] in fake.calls and len(fake.ran("run")) == 1
+    await ctl.teardown()
+
+
+async def test_reaped_orphans_leave_a_stopped_event(tmp_env, harness):
+    """A container reaped at startup after a hard kill left nothing in the
+    box's history."""
+    from backend.db import init_db
+    from backend.vm import boxlog
+    await init_db()
+    boxlog.reset()
+    gone = await dr.reap_orphans()
+    assert gone == ["jav3-p-alpha", "jav3-p-ghost"]
+    for bid, proj in (("p-alpha", "alpha"), ("p-ghost", "ghost")):
+        (ev,) = await boxlog.events(bid)
+        assert (ev["event"], ev["actor"], ev["kind"], ev["project"], ev["runtime"]) == (
+            "stopped", "app", "project", proj, "docker")
+        assert "removed at startup" in ev["reason"] and "exited" in ev["reason"]
+    assert await boxlog.events("p-other") == []                # another install's: untouched
+
+
+# --- G1: a lost guest says why; a variant with no Docker image is refused -------------
+
+class _State(FakeCLI):
+    """`docker inspect --format {{json .State}}` answers with a canned state."""
+    state = None
+    logs = ""
+
+    async def run(self, *args, timeout=120):
+        if args[0] == "inspect" and "json .State" in args[2]:
+            self.calls.append(list(args))
+            if self.state is None:
+                return 1, "", "Error: No such object: jav3-p-alpha"
+            return 0, json.dumps(self.state) + "\n", ""
+        if args[0] == "logs":
+            self.calls.append(list(args))
+            return 0, self.logs, ""
+        return await super().run(*args, timeout=timeout)
+
+
+async def test_death_note_reads_the_container_state_and_last_output(harness, monkeypatch):
+    """The turn's error used to say only 'the guest crashed, ran out of memory or its
+    VM was reaped' (benchmark-game, 2026-10-01); the container knew which."""
+    fake = _State()
+    fake.state = {"Status": "exited", "Running": False, "OOMKilled": True, "ExitCode": 137,
+                  "Error": ""}
+    fake.logs = "GUEST-RUNTURN-SERVER: listening\nKilled\n"
+    monkeypatch.setattr(dr, "cli", fake)
+    note = await boxes.controller(harness["box"]).death_note()
+    assert "exited (exit code 137, killed)" in note
+    assert "killed for running out of memory (limit 512 MB)" in note
+    assert "last output: GUEST-RUNTURN-SERVER: listening | Killed" in note
+
+
+async def test_death_note_for_a_container_that_is_still_up_or_gone(harness, monkeypatch):
+    fake = _State()
+    fake.state = {"Status": "running", "Running": True, "OOMKilled": True, "ExitCode": 0}
+    monkeypatch.setattr(dr, "cli", fake)
+    ctl = boxes.controller(harness["box"])
+    note = await ctl.death_note()
+    # docker's OOMKilled is true when ANY process in the container was killed, so it
+    # is reported as that, not as the container's death
+    assert "still running" in note and "a process in it was killed" in note
+    fake.state = None
+    assert "container is gone" in await ctl.death_note()
+
+    class Down(FakeCLI):
+        async def run(self, *args, timeout=120):
+            return 1, "", "Cannot connect to the Docker daemon"
+    monkeypatch.setattr(dr, "cli", Down())
+    assert await ctl.death_note() == ""                 # a daemon that will not say: no note
+
+
+async def test_a_variant_with_no_docker_image_is_refused_before_anything_starts(
+        harness, monkeypatch):
+    """The Desktop profile asks for the `desktop` variant, a KVM layer: with the
+    runtime on docker the box failed with 'jav3-guest-turn:desktop is not built, run
+    docker-setup', advice that could never work (no Docker image of it is built)."""
+    class NoImage(FakeCLI):
+        async def run(self, *args, timeout=120):
+            if tuple(args[:2]) == ("image", "inspect"):
+                self.calls.append(list(args))
+                return 1, "", "Error: No such image: jav3-guest-turn:desktop"
+            return await super().run(*args, timeout=timeout)
+    fake = NoImage()
+    monkeypatch.setattr(dr, "cli", fake)
+    box = harness["box"]
+    box.image = ("desktop", None)
+    ctl = boxes.controller(box)
+    with pytest.raises(dr.DockerError) as e:
+        await ctl.acquire()
+    msg = str(e.value)
+    assert "`desktop` image variant" in msg and "no Docker image" in msg
+    assert "KVM" in msg and "`main`" in msg and "docker-setup" not in msg
+    assert fake.ran("run") == [] and ctl.state == "failed"        # nothing was started
+    assert fake.ran("image")[0][-1] == "jav3-guest-turn:desktop"
+
+
+async def test_a_variant_image_someone_built_by_hand_still_runs(harness):
+    box = harness["box"]
+    box.image = ("desktop", None)
+    ctl = boxes.controller(box)
+    await ctl.acquire()                           # FakeCLI: `image inspect` succeeds
+    assert harness["cli"].ran("run")[0][-1] == "jav3-guest-turn:desktop"
+    ctl.release()
+    await ctl.teardown()
+
+
+async def test_a_down_daemon_is_not_reported_as_a_missing_variant(harness, monkeypatch):
+    class Down(FakeCLI):
+        async def run(self, *args, timeout=120):
+            if tuple(args[:2]) == ("image", "inspect"):
+                return 1, "", "Cannot connect to the Docker daemon at unix:///var/run/docker.sock"
+            return await super().run(*args, timeout=timeout)
+    monkeypatch.setattr(dr, "cli", Down())
+    box = harness["box"]
+    box.image = ("desktop", None)
+    with pytest.raises(dr.DockerError) as e:
+        await boxes.controller(box).acquire()
+    assert "no Docker image" not in str(e.value)       # the daemon probe speaks, not this

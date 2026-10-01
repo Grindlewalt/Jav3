@@ -28,6 +28,8 @@ class VMError(Exception):
 
 _VERSION_RE = re.compile(r"base-v(\d+)\.qcow2$")
 REBUILD_LOG_LINES = 400           # the base rebuild's log kept for the Images tab
+WEDGED_AFTER_S = 30               # an already-running guest this quiet on vsock is restarted
+CONSOLE_TAIL_BYTES = 256 * 1024   # how much of the console death_note reads
 
 
 def _base_image() -> Path:
@@ -70,18 +72,28 @@ def base_built() -> bool:
     return _base_image().exists()
 
 
+def docker_only_host() -> bool:
+    """Docker boxes carry the agent turns here: the runtime and boxes are on and
+    KVM cannot be used (no /dev/kvm). Such a host needs none of the KVM pieces
+    (vsock, the golden image), so they are not blockers there. A KVM-capable
+    host keeps every one of them: its shared box needs them."""
+    return bool(settings.docker_enabled and settings.vm_boxes_enabled
+                and not os.path.exists("/dev/kvm"))
+
+
 def blockers() -> list[str]:
     """Everything that stops an agent turn on this host, all at once, so the
     operator does not fix KVM only to discover the missing key next."""
     out = []
-    if not os.path.exists("/dev/kvm"):
-        out.append("no /dev/kvm (CPU virtualization off in BIOS, or the kvm module "
-                   f"not loaded; `bash {settings.base_dir}/scripts/install.sh --check` says which)")
-    if not os.path.exists("/dev/vhost-vsock"):
-        out.append("no /dev/vhost-vsock (sudo modprobe vhost_vsock)")
-    if not base_built():
-        out.append("no guest image (VM_DIR=%s bash %s/vm/build_base.sh, once KVM works)"
-                   % (settings.vm_dir, settings.base_dir))
+    if not docker_only_host():
+        if not os.path.exists("/dev/kvm"):
+            out.append("no /dev/kvm (CPU virtualization off in BIOS, or the kvm module "
+                       f"not loaded; `bash {settings.base_dir}/scripts/install.sh --check` says which)")
+        if not os.path.exists("/dev/vhost-vsock"):
+            out.append("no /dev/vhost-vsock (sudo modprobe vhost_vsock)")
+        if not base_built():
+            out.append("no guest image (VM_DIR=%s bash %s/vm/build_base.sh, once KVM works)"
+                       % (settings.vm_dir, settings.base_dir))
     try:
         from .. import providers
         pid = providers.default_provider()
@@ -96,6 +108,10 @@ def no_image_message() -> str:
     """Why there is no guest image, and the next step, from facts on this host:
     without /dev/kvm build_base.sh cannot run either, so saying "run it" alone
     sends the operator into a second failure."""
+    if docker_only_host():
+        return ("this project runs in the shared KVM guest, which this host cannot run "
+                "(no /dev/kvm); agent turns run in Docker boxes here: give the project "
+                "its own box on the docker runtime (Runs in)")
     b = blockers()
     if len(b) > 1:
         return "cannot run an agent turn on this host yet:\n" + "\n".join(
@@ -135,6 +151,11 @@ class GuestVM:
         self._inflight = 0
         self._idle_since: float | None = None
         self._booted_at: float | None = None
+        # booted and not used since: a scrub would only reboot a fresh guest
+        # (every window, forever, and a "wiped" history row each time)
+        self._fresh = False
+        # set when boxes.destroy starts (see docker_runtime.DockerBox.retired)
+        self.retired = False
         self._rebuilding = False
         # the /vms rows: booting but not yet serving, and the last boot error
         # (cleared by the next good start)
@@ -193,6 +214,8 @@ class GuestVM:
                 "egress": settings.vm_egress,
                 "rebuilding": self._rebuilding,
                 "blockers": blockers(),
+                "notes": (["no /dev/kvm here: the shared KVM guest cannot run and agent "
+                           "turns run in Docker boxes"] if docker_only_host() else []),
                 "persist": persist_status(),
                 **_image_meta()}
 
@@ -320,6 +343,7 @@ class GuestVM:
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         self._booted_at = time.monotonic()
         self._idle_since = time.monotonic()
+        self._fresh = True
         if self.box is None:
             # a non-shared box's boot is recorded at box_up (boxes._emit)
             from . import boxlog
@@ -428,7 +452,13 @@ class GuestVM:
     async def acquire(self) -> None:
         """Ensure the guest is up and pin it for one turn. Serialized so the reaper
         can't tear down between the readiness check and the pin."""
+        if self.retired:
+            raise VMError(f"box {self._record_box().id} was removed while your turn "
+                          "was starting: send it again")
         async with self._lock:
+            if self.retired:
+                raise VMError(f"box {self._record_box().id} was removed while your turn "
+                              "was starting: send it again")
             self.starting = not self.running()
             try:
                 await self._ensure_ready_locked()
@@ -440,6 +470,7 @@ class GuestVM:
             finally:
                 self.starting = False
             self.error = None
+            self._fresh = False
             self._inflight += 1
 
     def release(self) -> None:
@@ -451,9 +482,10 @@ class GuestVM:
     async def reap_if_idle(self) -> None:
         """If scrubbing is on and the guest has sat idle past the threshold, reboot
         it so the next operation batch starts fresh. No-op while a turn is in
-        flight or scrubbing is disabled."""
+        flight, while scrubbing is disabled, and once it is fresh: a guest nothing
+        has used since its last boot has nothing to scrub."""
         window = settings.vm_idle_scrub_seconds
-        if not window or not self.running() or self._inflight > 0:
+        if not window or not self.running() or self._inflight > 0 or self._fresh:
             return
         if self._idle_since is None or time.monotonic() - self._idle_since < window:
             return
@@ -480,9 +512,15 @@ class GuestVM:
             # a service box runs svcd (5558), not the run-turn server
             from .boxes import PORT_SVCD
             ready_port = PORT_SVCD
+        # A guest that was already up and answers nothing is wedged, not booting
+        # (a box-wide OOM left one like that on 2026-10-01: ping worked, vsock
+        # never did, and every turn waited out the boot timeout until someone
+        # restarted the box). With no other turn pinned to it, restart it once.
+        warm = self.running() and self._inflight == 0 and ready_port == GUEST_RUNTURN_PORT
         await self.boot()
         loop = asyncio.get_event_loop()
         deadline = loop.time() + settings.vm_boot_timeout_seconds
+        wedged_at = loop.time() + WEDGED_AFTER_S if warm else None
         while loop.time() < deadline:
             s = socket.socket(socket.AF_VSOCK, socket.SOCK_STREAM)
             try:
@@ -490,10 +528,43 @@ class GuestVM:
                     None, s.connect, (self._cid, ready_port))
                 return
             except OSError:
+                if wedged_at is not None and loop.time() >= wedged_at and self._inflight == 0:
+                    wedged_at = None
+                    from . import boxlog
+                    note = await self.death_note()
+                    async with boxlog.action(
+                            self._record_box(), "restarted", actor="app",
+                            reason="the guest stopped answering" + (f": {note}" if note else "")):
+                        await self.teardown()
+                        await self.boot()
+                    deadline = loop.time() + settings.vm_boot_timeout_seconds
+                    continue
                 await asyncio.sleep(1)
             finally:
                 s.close()
-        raise VMError("guest run-turn server did not become ready in time")
+        note = await self.death_note()
+        raise VMError("guest run-turn server did not become ready in time"
+                      + (f" ({note})" if note else ""))
+
+    async def death_note(self) -> str:
+        """Why a turn lost this guest, from what it left behind: the kernel's last
+        OOM kill or panic on the console, or a QEMU that exited. '' when there is
+        nothing to say. guest_turn puts it in the turn's error and the box's
+        history; read it BEFORE a teardown, which deletes the console log."""
+        from . import deathnote
+        rc = self._proc.returncode if self._proc is not None else None
+        if rc is not None:
+            return f"the VM process exited by itself (QEMU exit code {rc})"
+
+        def tail() -> str:
+            try:
+                with open(self._console(), "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    f.seek(max(0, f.tell() - CONSOLE_TAIL_BYTES))
+                    return f.read().decode(errors="replace")
+            except OSError:
+                return ""
+        return deathnote.console_note(await asyncio.to_thread(tail))
 
     def _isolation(self) -> dict:
         log = self._console()
@@ -543,6 +614,30 @@ vm = GuestVM()
 _boxes_mod.register_runtime("kvm", GuestVM)
 
 
+_reaper_noted: dict[str, float] = {}
+REAPER_NOTE_EVERY = 600.0          # one print + history row per distinct failure per 10 minutes
+
+
+async def _reaper_step(name: str, fn) -> None:
+    """One reaper duty. A failure never stops the others (a raising scrub used
+    to skip that tick's project-box reaping and crash watch as well) and is no
+    longer silent: printed and recorded as an `error` event on the shared box's
+    history, at most once per distinct message per REAPER_NOTE_EVERY (the loop
+    ticks every 30 s)."""
+    try:
+        await fn()
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — a reaper hiccup must never kill the loop
+        msg = f"reaper {name}: {type(e).__name__}: {e}"
+        now = time.monotonic()
+        if now - _reaper_noted.get(msg, -REAPER_NOTE_EVERY) >= REAPER_NOTE_EVERY:
+            _reaper_noted[msg] = now
+            print(f"[boxes] {msg}")
+            from . import boxlog
+            await boxlog.record(_boxes_mod.shared(), "error", actor="app", reason=msg)
+
+
 async def reaper_loop() -> None:
     """Background: scrub the guest once it has gone idle (M4c). Cheap and inert
     while vm_idle_scrub_seconds is 0. Started from the app lifespan.
@@ -561,11 +656,12 @@ async def reaper_loop() -> None:
                     print(leftovers.summary_line(await leftovers.scan()))
                 except Exception as e:  # noqa: BLE001 — advice only
                     print(f"[boxes] leftover scan skipped: {e}")
-            await vm.reap_if_idle()
+            await _reaper_step("scrub", lambda: vm.reap_if_idle())
             if settings.vm_boxes_enabled:
-                await _boxes_mod.reap_idle()
+                await _reaper_step("idle boxes", _boxes_mod.reap_idle)
             from . import boxlog
-            await boxlog.watch_all()      # crashes and failed boots nobody reported
+            # crashes and failed boots nobody reported
+            await _reaper_step("crash watch", boxlog.watch_all)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — a reaper hiccup must never kill the loop

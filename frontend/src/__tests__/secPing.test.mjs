@@ -19,6 +19,9 @@ assert.equal(countsInBadge({ tier: 'record', severity: 'info' }), false)
 assert.equal(countsInBadge({ tier: 'approval', severity: 'info' }), true)   // a package request
 assert.equal(countsInBadge({ tier: 'alert', severity: 'warn', repeat: true }), false)
 assert.equal(countsInBadge({ severity: 'info' }), false)
+// filed already acknowledged: "by you", or a kind set to Record only
+assert.equal(countsInBadge({ tier: 'alert', severity: 'warn', acknowledged: true }), false)
+assert.equal(countsInBadge({ tier: 'alert', severity: 'warn', acknowledged: false }), true)
 assert.equal(countsInBadge({ severity: 'warn' }), true)
 
 console.log('secPing ok')

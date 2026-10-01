@@ -23,6 +23,18 @@ from .agent.loop import run_turn
 PORT = 5556                                 # guest run-turn server (host dials this)
 
 
+# slug -> the files the host put in the workspace copy, plus every file staged
+# since. Deletions are measured against it: the shell's rm and mv act on the copy
+# (write_file buffers into .staging), so a file that is in here but no longer in
+# the tree or the buffer was deleted or renamed away, and the host is told.
+# In memory on purpose: nothing the agent runs can reach this process.
+_known: dict[str, set[str]] = {}
+
+# the member of the staged tarball that carries that list; `.staging` is a name
+# the guest's own write tools refuse, so no file the agent writes can collide
+DELETED_MEMBER = ".staging/deleted.json"
+
+
 def _unpack_workspace(slug: str, tar_b64: str) -> None:
     dest = guest_config.settings.projects_dir / slug
     if dest.exists():
@@ -30,16 +42,30 @@ def _unpack_workspace(slug: str, tar_b64: str) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(base64.b64decode(tar_b64)), mode="r:gz") as t:
         t.extractall(dest, filter="data")
+        _known[slug] = {m.name for m in t.getmembers() if m.isfile()}
 
 
 def _pack_staging(slug: str) -> str:
-    staging_dir = guest_config.settings.projects_dir / slug / ".staging"
+    root = guest_config.settings.projects_dir / slug
+    staging_dir = root / ".staging"
     buf = io.BytesIO()
+    staged: set[str] = set()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         if staging_dir.is_dir():
             for p in sorted(staging_dir.rglob("*")):
                 if p.is_file():
-                    tar.add(p, arcname=str(p.relative_to(staging_dir)))
+                    rel = str(p.relative_to(staging_dir))
+                    staged.add(rel)
+                    tar.add(p, arcname=rel)
+        known = _known.setdefault(slug, set())
+        known |= staged
+        # a staged file is a write, not a deletion, even if the tree copy is gone
+        gone = sorted(r for r in known if r not in staged and not (root / r).is_file())
+        if gone:
+            data = json.dumps(gone).encode()
+            ti = tarfile.TarInfo(DELETED_MEMBER)
+            ti.size = len(data)
+            tar.addfile(ti, io.BytesIO(data))
     return base64.b64encode(buf.getvalue()).decode()
 
 
@@ -92,6 +118,20 @@ async def _handle(loop, conn) -> None:
                 await send({"type": "ps", "ok": False,
                             "error": f"{type(e).__name__}: {e}"[:300]})
             return
+        # kill one process the host's last ps snapshot named: only if /proc still
+        # shows the same program and start time (procwatch.kill_pid); a pid that
+        # was reused is refused, never killed
+        if mode == "kill_pid":
+            try:
+                from . import procwatch
+                out = await asyncio.to_thread(
+                    procwatch.kill_pid, spec.get("pid"), spec.get("exe"),
+                    spec.get("start_ticks"), spec.get("cmd"), spec.get("sig"))
+                await send({"type": "kill", **out})
+            except Exception as e:  # noqa: BLE001 — answer, never kill the server
+                await send({"type": "kill", "ok": False, "why": "error",
+                            "error": f"{type(e).__name__}: {e}"[:300]})
+            return
         if mode == "pull":
             slug = spec.get("active_slug")
             await send({"type": "staged", "slug": slug,
@@ -135,8 +175,12 @@ async def _handle(loop, conn) -> None:
                     on_tool_call=None):
                 await send(ev)
         except Exception as e:  # noqa: BLE001 — surface any loop crash as a final
+            # `error` marks it as a failure, not an answer: the host raises it
+            # (after the edits come home) so the chat shows an error; `content`
+            # keeps older hosts working
             await send({"type": "final",
-                        "content": f"(guest loop error: {type(e).__name__}: {e})"})
+                        "content": f"(guest loop error: {type(e).__name__}: {e})",
+                        "error": f"{type(e).__name__}: {e}"})
 
         # ship the guest's staged edits back for host-side reconcile + approval
         if owns_workspace:
@@ -246,6 +290,13 @@ async def serve() -> None:
         asyncio.ensure_future(shell.serve())
     except Exception as e:  # noqa: BLE001
         print(f"GUEST-SHELL-SERVER: not started ({e})", flush=True)
+    # the live desktop listener (display.py): same best-effort rule, and it only
+    # starts Xvnc when a viewer asks, so a box nobody watches pays nothing
+    try:
+        from . import display
+        asyncio.ensure_future(display.serve())
+    except Exception as e:  # noqa: BLE001
+        print(f"GUEST-DISPLAY-SERVER: not started ({e})", flush=True)
     while True:
         conn, _ = await loop.sock_accept(s)
         conn.setblocking(False)

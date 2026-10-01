@@ -1,4 +1,4 @@
-"""Tool sections: at most 15 tools in the prompt, the rest loaded on demand
+"""Tool sections: at most 11 tools in the prompt, the rest loaded on demand
 through `tools(section=...)`, merged tools with an action argument, the old
 names still working, and nothing loadable that was not granted
 (backend/agent/tools/toolsections.py)."""
@@ -59,16 +59,21 @@ def test_every_tool_names_a_known_section():
         assert meta.get("section") in toolsections.SECTIONS, md.parent.name
 
 
-def test_core_is_at_most_fifteen_with_the_meta_tool(monkeypatch):
+def test_core_is_at_most_eleven_with_the_meta_tool(monkeypatch):
     specs = _all_specs(monkeypatch)
     v = View(specs, _hist("hi"))
     assert v.active
     shown = v.wire()
+    assert toolsections.CORE_MAX == 11
     assert len(shown) <= toolsections.CORE_MAX
     assert _names(shown)[-1] == META
     for must in ("read_file", "write_file", "edit_file", "run_code", "todo_update",
-                 "web_search", "ask_user", "memory"):
+                 "list_files", "search_codebase", "web", "ask_user", "memory"):
         assert must in _names(shown), must
+    # what 30 days of calls showed is rare waits in a section, not in the core
+    for later in ("send_message", "journal_update", "research", "web_search", "music_play",
+                  "media", "project", "agents", "system"):
+        assert later not in _names(shown), later
     # nothing a connected computer or browser adds reaches the core
     assert not any(n.startswith(("desk", "browser")) for n in _names(shown))
 
@@ -138,8 +143,8 @@ def test_unknown_name_is_refused_with_the_right_section(monkeypatch):
     v = View(_all_specs(monkeypatch), _hist("hi"))
     _, _, _, err = v.resolve("browser_clik", {})
     assert err.startswith("error:") and "Did you mean 'browser_click', in section 'browser'" in err
-    _, _, _, err = v.resolve("media", {})
-    assert 'tools(section="media")' in err
+    _, _, _, err = v.resolve("schedules", {})          # a section, not a tool
+    assert 'tools(section="schedules")' in err
 
 
 def test_loading_never_reveals_what_was_not_granted(monkeypatch):
@@ -177,7 +182,7 @@ def test_local_chat_autoloads_its_tools_within_the_budget(monkeypatch):
 def test_host_preload_marks(monkeypatch):
     specs = toolsections.mark_load(_all_specs(monkeypatch), {"media"})
     v = View(specs, _hist("hi"))
-    assert "media" in v.loaded and "music_play" in _names(v.wire())
+    assert "media" in v.loaded and "media" in _names(v.wire())
 
 
 def test_wire_order_is_stable_whatever_the_load_order(monkeypatch):
@@ -307,12 +312,15 @@ async def test_preload_sections_from_this_conversations_calls(tmp_env, monkeypat
     try:
         cid = (await db.execute("INSERT INTO conversations (summary) VALUES ('t')")).lastrowid
         for tool, args in (("music_play", {"query": "x"}), (META, {"section": "projector"}),
-                           ("read_file", {"path": "a"})):
+                           ("read_file", {"path": "a"}), ("todo_update", {"action": "list"}),
+                           ("ask_user", {"questions": []})):
             await db.execute("INSERT INTO tool_calls (conversation_id, tool, args, result) "
                              "VALUES (?, ?, ?, 'ok')", (cid, tool, json.dumps(args)))
         await db.commit()
         secs = await chat._preload_sections(db, cid, specs, None)
-        assert {"media", "projector", "files"} <= secs and "git" not in secs
+        assert {"media", "projector"} <= secs and "git" not in secs
+        # core tools were shown anyway: using them never pulls their section in
+        assert not {"files", "project", "system"} & secs
         monkeypatch.setattr(gitea, "enabled", lambda: True)
         assert "git" in await chat._preload_sections(db, cid, specs, "demo")
     finally:

@@ -13,6 +13,7 @@ Routers:
                  yet; throttled), whoami and revoke-self (device bearer).
 - `cli_router`   the CLI and its installer, as unauthenticated static files.
 """
+import hashlib
 import io
 import ipaddress
 import json
@@ -22,7 +23,7 @@ import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from . import devicetokens, lan, pastelogin, security
@@ -317,6 +318,40 @@ async def revoke_self(actor: dict = Depends(require_any_actor)):
 async def cli_file():
     return PlainTextResponse((CLI_DIR / "jav3").read_text(),
                              media_type="text/x-python")
+
+
+# What GET /cli/version says about the client file, kept until the file changes
+# (mtime or size): the check runs at every TUI start, the hash is read once.
+_cli_version_cache: dict = {"key": None, "body": None}
+# install.sh's library pins (HTTPX_SPEC, TUI_SPECS), which the client holds up
+# against the libraries it runs on before it swaps itself for a newer file
+_INSTALL_SPEC_RE = re.compile(r"^(?:HTTPX_SPEC|TUI_SPECS)='([^']+)'", re.M)
+
+
+def _cli_version() -> dict:
+    p = CLI_DIR / "jav3"
+    st = p.stat()
+    key = (st.st_mtime_ns, st.st_size)
+    if _cli_version_cache["key"] == key:
+        return _cli_version_cache["body"]
+    served = p.read_text().encode()           # exactly the bytes GET /cli/jav3 sends
+    try:
+        pins = " ".join(_INSTALL_SPEC_RE.findall((CLI_DIR / "install.sh").read_text())).split()
+    except OSError:
+        pins = []
+    body = {"sha256": hashlib.sha256(served).hexdigest(), "size": len(served),
+            "mtime": int(st.st_mtime), "requires": pins}
+    if p.stat().st_mtime_ns == st.st_mtime_ns:      # not rewritten while we read it
+        _cli_version_cache.update(key=key, body=body)
+    return body
+
+
+@cli_router.get("/version")
+async def cli_version():
+    """Which client file GET /cli/jav3 serves right now: its sha256 (of the served
+    bytes), size and mtime, plus the library pins install.sh would install.
+    Unauthenticated, like the file itself; `jav3` compares its own hash with this."""
+    return JSONResponse(_cli_version(), headers=_NO_STORE)
 
 
 @cli_router.get("/jav3-desk")

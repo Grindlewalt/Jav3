@@ -120,10 +120,26 @@ async def test_an_entry_cannot_carry_structure_into_project_md(tmp_env, entry):
 
 
 async def test_entry_is_capped(tmp_env):
+    # BUILD-12: a long entry is refused (project.md rides every prompt), not
+    # trimmed to something the model did not write
     await _project(BASE)
-    await _journal().run("A" * 5000)
-    line = [ln for ln in project_md_path("demo").read_text().splitlines() if "AAAA" in ln][0]
-    assert len(line) < 700
+    out = await _journal().run("A" * 5000)
+    assert out.startswith("error:") and "shorten" in out
+    assert "AAAA" not in project_md_path("demo").read_text()
+    assert await _journal().run("B" * 280) == "journal updated"
+
+
+@pytest.mark.parametrize("entry", [
+    "2026-09-29: built the parser", "- 2026-09-29: built the parser",
+    "2026-09-29 2026-09-29: built the parser", "built the parser"])
+async def test_an_entry_that_carries_its_own_date_is_dated_once(tmp_env, entry):
+    await _project(BASE)
+    await _journal().run(entry)
+    lines = [ln for ln in project_md_path("demo").read_text().splitlines()
+             if "built the parser" in ln]
+    assert len(lines) == 1
+    assert lines[0].count("2026-") == 1 and lines[0].endswith(": built the parser")
+    assert lines[0].startswith("- 20") and not lines[0].startswith("- 2026-09-29: 2026")
 
 
 async def test_entry_lands_in_the_journal_section_not_at_the_end_of_the_file(tmp_env):

@@ -133,7 +133,8 @@ def attribute(box=None, peer: tuple | None = None) -> dict:
     its own is attributed by its listener — nft pins interface, source and
     destination together, so a guest cannot reach another box's listener or
     forge its address — and only the shared box falls back to the turn
-    context stack (residual #7, unchanged for the shared box). The builder
+    context stack, and only when exactly one project has turns on it
+    (residual #7); with several it is unattributed and flagged "ambiguous". The builder
     box is attributed to IMAGE_BUILD_SLUG. Returns {project, op_id,
     conversation_id, box_id, service_id, kind, peer_ip, peer_port}."""
     peer_ip, peer_port = (peer[0], peer[1]) if peer and len(peer) >= 2 else (None, None)
@@ -141,9 +142,22 @@ def attribute(box=None, peer: tuple | None = None) -> dict:
            "service_id": None, "kind": "shared", "peer_ip": peer_ip,
            "peer_port": peer_port}
     if box is None or box.is_shared:
-        ctx = egress.current_context()
-        att.update(project=ctx["project"], op_id=ctx["op_id"],
-                   conversation_id=ctx["conversation_id"])
+        # The shared guest is one machine with one address: its connections
+        # carry no op tag, so they can only be tied to a turn when exactly one
+        # project has turns on it (a spawn_agent child shares its parent's).
+        # With two or more the newest turn is NOT a safe guess (WEBA-07: one
+        # project's pip install queued approvals, then an auto allow, under
+        # another's name): refuse to pick, unattributed = the Default profile,
+        # no project allowlist, no secrets, no auto mode.
+        live = egress.contexts_matching(
+            lambda e: boxes.op_box(e["op_id"]) in (None, boxes.SHARED_ID))
+        projects = {e["project"] for e in live}
+        if len(projects) == 1:
+            e = live[0]
+            att.update(project=e["project"], op_id=e["op_id"],
+                       conversation_id=e["conversation_id"])
+        elif projects:
+            att["ambiguous"] = sorted(p for p in projects if p)
         if boxes.enabled():
             att["box_id"] = boxes.SHARED_ID
         return att
@@ -177,6 +191,9 @@ def attribute(box=None, peer: tuple | None = None) -> dict:
 
 IMAGE_BUILD_SLUG = egress.IMAGE_BUILD
 
+AMBIGUOUS_NOTE = ("shared box (ambiguous): turns of more than one project were running, "
+                  "so this cannot be pinned to one; pick the project when you decide")
+
 
 def _service_id(att: dict, host: str) -> int | None:
     """The service a service-box connection belongs to. A per_service box has
@@ -193,6 +210,10 @@ async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None 
     att = att or attribute()
     slug = att["project"]
     service_id = _service_id(att, host)
+    queued = (verdict == "deny" and reason == egress.NOT_LISTED
+              and att["kind"] not in ("service", "builder"))
+    if queued and "ambiguous" in att:
+        reason = f"{reason}; {AMBIGUOUS_NOTE}"
     db = await get_db()
     try:
         await egress.record_event(db, slug=slug, host=host, method=method,
@@ -205,34 +226,39 @@ async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None 
         # Only an UNDECIDED host is queued: one on a project/profile deny list,
         # an offline profile, a cut or the SSRF floor already has its answer
         # (e2e BUG-5: explicitly denied hosts showed up in pending)
-        if (verdict == "deny" and reason == egress.NOT_LISTED
-                and att["kind"] not in ("service", "builder")):
+        if queued:
             await egress.note_denied(db, slug or egress.GENERAL, host,
                                      box_id=att["box_id"])
-        if verdict == "allow":
+        if verdict == "allow" and not egress.in_uncut_grace(slug, host):
             a = await anomaly.check_host(db, slug, host)
             if a:
                 egress.mark_cut(slug, host)
-                await _nft_drop(host)
+                ips = await _nft_drop(host)
+                # the run the traffic belongs to comes from the connection's own
+                # attribution (None when the shared box was ambiguous: never a guess)
                 await security.raise_event(db, kind="egress_anomaly", severity="critical",
                                            project=slug, summary=a["summary"],
-                                           detail=a["detail"])
+                                           detail={**a["detail"], "dropped_ips": ips or []},
+                                           conversation_id=att["conversation_id"],
+                                           box_id=att["box_id"])
                 await egress.record_event(db, slug=slug, host=host, verdict="cut",
                                           reason=f"auto-cut: {a['kind']}", op_id=att["op_id"],
+                                          conversation_id=att["conversation_id"],
                                           peer_ip=att["peer_ip"], peer_port=att["peer_port"],
                                           box_id=att["box_id"], service_id=service_id)
     finally:
         await db.close()
 
 
-async def _nft_drop(host: str) -> None:
+async def _nft_drop(host: str) -> list[str]:
     """Best-effort hard cut: drop the host's resolved IPs at nftables (Pi-side).
-    A no-op where nft/sudo isn't available (dev laptop)."""
+    A no-op where nft/sudo isn't available (dev laptop). Returns the IPs it
+    resolved: the event keeps them, and Un-cut host takes exactly those back."""
     try:
         infos = await asyncio.get_running_loop().getaddrinfo(host, None)
-        ips = {i[4][0] for i in infos}
+        ips = sorted({i[4][0] for i in infos})
     except OSError:
-        return
+        return []
     for ip in ips:
         try:
             p = await asyncio.create_subprocess_exec(
@@ -241,7 +267,36 @@ async def _nft_drop(host: str) -> None:
                 stderr=asyncio.subprocess.DEVNULL)
             await p.wait()
         except (FileNotFoundError, OSError):
-            return
+            return ips
+    return ips
+
+
+async def nft_undrop(host: str, ips: list | None = None) -> list[str]:
+    """The undo of _nft_drop: take the cut host's IPs (the ones the cut recorded,
+    plus whatever the name resolves to now) out of the drop set. Best effort, a
+    no-op without nft/sudo. Returns the IPs it tried."""
+    import ipaddress
+    want: set[str] = set()
+    for ip in ips or ():
+        try:
+            want.add(str(ipaddress.ip_address(str(ip))))
+        except ValueError:
+            continue
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(host, None)
+        want |= {i[4][0] for i in infos}
+    except OSError:
+        pass
+    for ip in sorted(want):
+        try:
+            p = await asyncio.create_subprocess_exec(
+                "sudo", "-n", "nft", "delete", "element", "inet", boxnet.nft_table(),
+                "cut_hosts", "{", ip, "}", stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL)
+            await p.wait()
+        except (FileNotFoundError, OSError):
+            break
+    return sorted(want)
 
 
 async def _authorize(host: str, port: str | None = None,

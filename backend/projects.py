@@ -267,13 +267,15 @@ async def set_persist(slug: str, body: SetPersist, user: dict = Depends(require_
                 db, kind="persist_approved", severity="warn", project=slug,
                 summary=f"{who} approved a persistent /persist disk in the guest "
                         f"VM for '{slug}'",
-                detail={"by": who, "cap_bytes": persist.cap_bytes()})
+                detail={"by": who, "cap_bytes": persist.cap_bytes()},
+                actor=security.OPERATOR)
         else:
             await security.raise_event(
                 db, kind="persist_revoked", severity="info", project=slug,
                 summary=f"{who} revoked /persist for '{slug}'"
                         + (" and deleted its disk" if deleted else ""),
-                detail={"by": who, "deleted": deleted, "delete_error": delete_error})
+                detail={"by": who, "deleted": deleted, "delete_error": delete_error},
+                actor=security.OPERATOR)
     finally:
         await db.close()
     view = await _persist_view(slug)
@@ -299,7 +301,7 @@ async def import_persist(slug: str, body: ImportPersist,
         raise HTTPException(status_code=400, detail="import requires confirm=true")
     try:
         out = await services.import_persist(
-            slug, by=user.get("username") or "operator")
+            slug, by=user.get("username") or "operator", by_operator=True)
     except services.ServiceError as e:
         raise HTTPException(status_code=e.status, detail=str(e)) from None
     return {**(await _persist_view(slug)), **out}

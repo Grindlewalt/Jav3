@@ -15,6 +15,7 @@ import {
 import { AuthContext } from './auth.jsx'
 import Menu from './components/Menu.jsx'
 import Notices, { PendingCountContext, useNotices } from './Notices.jsx'
+import DndMark from './DndMark.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
 import { followBoxes, listBoxes } from './boxes/api/vms.js'
 import { navState } from './boxes/logic.js'
@@ -329,6 +330,7 @@ export default function App() {
               <span className="brand">Jav3</span>
               <div className="nav-links">{navLinks}</div>
               <div className="nav-status">
+                <DndMark dnd={notices.dnd} />
                 <ThemeToggle theme={theme} onToggle={toggleTheme} />
               </div>
               <button className="nav-toggle"
@@ -343,6 +345,7 @@ export default function App() {
             <>
               <div className="rail-links">{navLinks}</div>
               <span className="grow" />
+              <DndMark dnd={notices.dnd} />
               <ThemeToggle theme={theme} onToggle={toggleTheme} />
             </>, navSlot)}
 

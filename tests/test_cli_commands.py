@@ -32,7 +32,7 @@ async def type_line(pilot, text: str) -> None:
 
 @pytest.mark.parametrize("typed, title", [
     ("/models", "Models"), ("/mod", "Models"), ("/orchestration", "Orchestrate which project?"),
-    ("/project", "Projects"), ("/agents", "Agents"), ("/sessions", "Sessions"),
+    ("/project", "Projects"), ("/persona", "Agent presets"), ("/sessions", "Sessions"),
     ("/themes", "Themes")])
 async def test_enter_on_a_bare_command_runs_its_picker(typed, title):
     srv, app = await boot(projects=["alpha", "beta"])
@@ -135,7 +135,6 @@ async def test_the_pickers_typed_name_is_checked_the_same_way():
         await pilot.pause(0.3)
         app.dispatch("/project")
         assert await wait_for(lambda: top(app) == "Picker")
-        await pilot.press("t")
         await pilot.press(*"brandnew")
         await pilot.press("enter")
         assert await wait_for(lambda: any("no project named" in n for n in notes(app)))

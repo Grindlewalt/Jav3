@@ -81,7 +81,8 @@ async def approve(sid: int, body: Approve, user: dict = Depends(require_user)):
                 for e in body.expose_ports if e.bind != "none"]
     try:
         row = await services.approve(
-            sid, placement=body.placement, expose_ports=exposure, by=_who(user))
+            sid, placement=body.placement, expose_ports=exposure, by=_who(user),
+            by_operator=True)
     except services.ServiceError as e:
         raise _http(e) from None
     return services.row_json(row)
@@ -94,7 +95,8 @@ class Reject(BaseModel):
 @router.post("/{sid}/reject")
 async def reject(sid: int, body: Reject, user: dict = Depends(require_user)):
     try:
-        return services.row_json(await services.reject(sid, body.reason, _who(user)))
+        return services.row_json(await services.reject(sid, body.reason, _who(user),
+                                                         by_operator=True))
     except services.ServiceError as e:
         raise _http(e) from None
 
@@ -125,7 +127,8 @@ async def revoke(sid: int, body: Revoke, user: dict = Depends(require_user)):
     if not body.confirm:
         raise HTTPException(status_code=400, detail="revoke requires confirm=true")
     try:
-        row = await services.revoke(sid, delete_data=body.delete_data, by=_who(user))
+        row = await services.revoke(sid, delete_data=body.delete_data, by=_who(user),
+                                    by_operator=True)
     except services.ServiceError as e:
         raise _http(e) from None
     return {**services.row_json(row), "data_deleted": row.get("data_deleted")}

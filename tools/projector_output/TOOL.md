@@ -4,6 +4,7 @@ description: Open or close the projector output window — the borderless window
 when_to_use: When the operator wants the projection started or stopped, or wants the alignment guides on to aim something.
 enabled: true
 section: projector
+action: output
 requires_settings: [mcp_projector_url, mcp_projector_token]
 parameters:
   type: object

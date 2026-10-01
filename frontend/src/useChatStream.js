@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, chatStream, tailStream } from './api.js'
-import { makeTurnFolder, newTurn } from './turnEvents.js'
+import { makeTurnFolder, newTurn, seedParts } from './turnEvents.js'
 
 // One chat turn, wherever a chat is rendered: the transcript, the busy flag,
 // and the resume-tail's AbortController.
@@ -53,7 +53,7 @@ export function useChatStream() {
     setMessages(r.messages)
     if (!r.running) return r
     setBusy(true)
-    const seed = (r.pending_activity || []).map((a) => ({ kind: 'tool', ...a }))
+    const seed = seedParts(r)
     setMessages((m) => [...m, { role: 'assistant', content: '', streaming: true,
                                 parts: seed, t0: Date.now() }])
     const ctl = new AbortController()

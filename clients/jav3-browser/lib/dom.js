@@ -8,7 +8,7 @@
 // injection) and as an ES module (import). It installs globalThis.__jav3Dom
 // once per realm; the IIFE keeps re-injection free of redeclaration errors.
 (function () {
-  const V = 5;
+  const V = 6;   // bump when this file changes: a frame that already has an older copy must take the new one
   if (globalThis.__jav3Dom && globalThis.__jav3Dom.v === V) return;
 
   const ATTR = 'data-jav3-id';
@@ -221,6 +221,17 @@
       M('mouseup', { detail: 1 }),
       M('click', { detail: 1 }),
     ];
+  }
+
+  // Where a real click on `r` (a getBoundingClientRect-like box) lands: the
+  // centre of the part of it inside a vw x vh viewport, so an element that
+  // sticks out of the window is clicked on its visible half. null when none of
+  // it is visible (hidden, zero-size, scrolled out of its own container).
+  function clickPoint(r, vw, vh) {
+    const l = Math.max(r.left, 0), t = Math.max(r.top, 0);
+    const rt = Math.min(r.left + r.width, vw), b = Math.min(r.top + r.height, vh);
+    if (!(rt - l >= 1) || !(b - t >= 1)) return null;
+    return { x: Math.round(((l + rt) / 2) * 10) / 10, y: Math.round(((t + b) / 2) * 10) / 10 };
   }
 
   // elementFromPoint, descending into open shadow roots (overlay-aware: what
@@ -682,6 +693,6 @@
     accessibleName, labelsText, textWithout, orderInViewFirst, tabOrder, nextInOrder,
     selectOptions, pickOption, hashText, signature, normalizeCombo, keySpec, ComboError,
     CAND_CAP, isClickAttr, styleVisible, candidateReason, dedupeContained, leafish, insideAny,
-    collectCandidates, formState, implicitSubmit, clickSequence, deepPoint, realClick, isCovered, pointMoved, typeInto, submitOnce, describeEl,
+    collectCandidates, formState, implicitSubmit, clickSequence, clickPoint, deepPoint, realClick, isCovered, pointMoved, tagCover, typeInto, submitOnce, describeEl,
   };
 })();

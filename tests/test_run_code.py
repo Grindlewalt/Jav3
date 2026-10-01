@@ -2,6 +2,7 @@
 guest; here we simulate guest conditions (in_guest flag + task-local slug) and
 verify execution, capture, caps, and the host-side guards."""
 import asyncio
+import time
 
 from backend.agent.tools import registry, toolctx
 from backend.config import settings
@@ -145,3 +146,83 @@ async def test_sees_this_turns_pending_writes(tmp_env, monkeypatch, tmp_path):
     out = await registry.dispatch("run_code", {"command": "cat tests/new.txt old.txt"})
     assert "freshedited" in out
     assert "kept" not in out          # synced files are not the run's artifacts
+
+
+async def test_cache_trees_are_not_reported_as_kept(tmp_env, monkeypatch, tmp_path):
+    """BUILD-04: the host drops __pycache__/.pytest_cache at turn end, so run_code
+    must not say it kept them (agents burned calls cleaning up); no .pyc at all."""
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    _guest(monkeypatch, tmp_path)
+    out = await registry.dispatch("run_code", {"command": (
+        "mkdir -p pkg/__pycache__ .pytest_cache && echo x > pkg/__pycache__/a.pyc "
+        "&& echo x > .pytest_cache/CACHEDIR.TAG && echo real > real.txt "
+        "&& echo import-dont-write-bytecode: $PYTHONDONTWRITEBYTECODE")})
+    assert "kept 1 changed file(s): real.txt" in out
+    assert "import-dont-write-bytecode: 1" in out
+
+
+async def test_background_process_holding_pipes_does_not_hang(tmp_env, monkeypatch, tmp_path):
+    """PLANS-01: `cmd &` with the output not redirected leaves the background
+    process holding the pipes. The shell has exited, so the call must return
+    within seconds (not when the server dies) and say what is still running."""
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    _guest(monkeypatch, tmp_path)
+    t0 = time.monotonic()
+    out = await asyncio.wait_for(registry.dispatch("run_code", {
+        "command": "sleep 6 & echo started", "timeout_seconds": 3}), 12)
+    assert time.monotonic() - t0 < 8
+    assert "exit 0" in out and "started" in out
+    assert "still running" in out and "Redirect" in out
+
+
+async def test_timeout_kill_reaches_a_reaped_shell_group(tmp_env, monkeypatch, tmp_path):
+    """The timeout kill must not need the shell's pid to still be alive
+    (os.getpgid on a reaped pid raised ProcessLookupError and skipped the
+    kill): a shell that exits while its child keeps running is still killed."""
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    _guest(monkeypatch, tmp_path)
+    t0 = time.monotonic()
+    out = await asyncio.wait_for(registry.dispatch("run_code", {
+        "command": "(sleep 6; echo late) & sleep 0.2; echo shell-done; exit 0",
+        "timeout_seconds": 1}), 12)
+    assert time.monotonic() - t0 < 8
+    assert "shell-done" in out and "late" not in out
+
+
+async def test_pkill_f_of_the_commands_own_text_does_not_kill_the_shell(
+        tmp_env, monkeypatch, tmp_path):
+    """PLANS-10: with `sh -c <command>` the whole command sits in the shell's
+    cmdline, so `pkill -f <text from it>` killed the shell itself (exit -15, ten
+    times across three plan runs). The command now runs from a script file."""
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    _guest(monkeypatch, tmp_path)
+    out = await asyncio.wait_for(registry.dispatch("run_code", {
+        "command": "sleep 31.7 > /dev/null 2>&1 & pkill -f 'sleep 31.7'; echo survived"}), 12)
+    assert "exit 0" in out and "survived" in out
+    # procps' pkill -f (Linux) matches the shell's own cmdline; BSD's spares its
+    # parent, so also check directly that the command text is not in it
+    out = await registry.dispatch("run_code", {
+        "command": "echo cmdline-is: $(ps -o args= -p $$) MARKER-4471"})
+    assert "cmdline-is:" in out and out.count("MARKER-4471") == 1
+
+
+async def test_network_hint_does_not_need_a_failing_exit_code(tmp_env, monkeypatch, tmp_path):
+    """PLANS-06 / BUILD-05: `pip install ... | tail`, `cmd; echo done` and a
+    curl that only prints its tunnel error exit 0, and the model got no hint."""
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    monkeypatch.setenv("JARVIS_EGRESS_PROXY", "http://10.201.0.1:3128")
+    _guest(monkeypatch, tmp_path)
+    out = await registry.dispatch("run_code", {"command": (
+        "echo 'curl: (56) CONNECT tunnel failed, response 403 for https://pypi.org/x'; true")})
+    assert "exit 0" in out and "[network blocked: pypi.org" in out
+    # an exit-0 run that merely mentions a weak marker is left alone
+    out = await registry.dispatch("run_code", {"command": "echo 'connection refused test passed'"})
+    assert "network blocked" not in out
+    # and a failing run keeps the wider set
+    out = await registry.dispatch("run_code", {"command": "echo 'connection refused' >&2; exit 1"})
+    assert "network blocked" in out

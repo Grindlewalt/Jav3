@@ -325,6 +325,17 @@ def test_build_base_reads_main_recipe_and_is_valid_bash():
     assert "jav3-baseline" in script
 
 
+def test_pytest_is_in_both_base_images():
+    """BUILD-03: 'a Python CLI with pytest tests' must run its tests in the
+    guest; the KVM recipe and the Docker box image carry the same toolchain."""
+    recipe = {p["package"] for p in images.parse_recipe(
+        (ROOT / "vm" / "images" / "main.recipe").read_text())["packages"]}
+    df = (ROOT / "vm" / "docker" / "Dockerfile").read_text()
+    args = re.search(r'ARG JAV3_PACKAGES="([^"]+)"', df).group(1).split()
+    assert "python3-pytest" in recipe and "python3-pytest" in args
+    assert set(args) - {"tini"} <= recipe
+
+
 def test_build_base_baseline_parser(tmp_path):
     script = (ROOT / "vm" / "build_base.sh").read_text()
     code = re.search(r"# --- baseline-parse.*?# --- end baseline-parse ---", script, re.S).group(0)

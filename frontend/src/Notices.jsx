@@ -34,6 +34,13 @@ import { countsInBadge, isCrit, wantsPing } from './secPing.js'
 // with repeats coalesced and non-critical pings rate limited per kind. The
 // poll's approval cards (hosts, commits, shell asks, schedules) follow the same
 // level. A critical card is sticky: no drain, it stays until opened or closed.
+//
+// Do not disturb (Settings → Notifications) is the server's too: while it is on
+// a live event arrives with `ping: false` (a critical one still pings when the
+// operator lets it break through), and this file also holds back the poll's
+// approval cards, the first-snapshot summary and the agent-run cards. Nothing is
+// hidden from the queue or the badge: only the interruption is quiet. When it
+// ends the server sends one `dnd_summary`.
 
 let seq = 0
 
@@ -46,6 +53,8 @@ export function useNotices(enabled) {
   const [toasts, setToasts] = useState([])
   const [count, setCount] = useState(0)
   const [memoryPending, setMemoryPending] = useState(0)  // Memory nav badge, not in `count`
+  const [dnd, setDnd] = useState(null)   // {on, until, break_critical} while do-not-disturb is on
+  const dndRef = useRef(false)
   const prev = useRef(null)      // last /api/notifications snapshot
   const seen = useRef(new Set()) // security event ids already toasted
 
@@ -64,14 +73,18 @@ export function useNotices(enabled) {
       try { d = await api('/api/notifications') } catch { return }
       setCount(d.count || 0)
       setMemoryPending(d.memory_pending || 0)
+      const quiet = !!d.dnd?.on
+      dndRef.current = quiet
+      setDnd(quiet ? d.dnd : null)
       const p = prev.current
       prev.current = d
       if (!p) {
         // first snapshot: one summary instead of a card per backlog item, and
         // only of what pings at the operator's level. Unacknowledged critical
-        // alerts get their own red card that stays.
-        const crit = d.critical || 0
-        const rest = (d.ping_count ?? d.count ?? 0) - crit
+        // alerts get their own red card that stays (unless do-not-disturb is on
+        // and does not let them through).
+        const crit = quiet && !d.dnd.break_critical ? 0 : (d.critical || 0)
+        const rest = quiet ? 0 : (d.ping_count ?? d.count ?? 0) - (d.critical || 0)
         if (crit > 0) push({
           sev: 'crit', sticky: true,
           title: `${crit} critical security alert${crit === 1 ? '' : 's'} not yet acknowledged`,
@@ -83,8 +96,9 @@ export function useNotices(enabled) {
         })
         return
       }
-      // approvals ping unless the operator chose "critical only"
-      if (d.level === 'critical') return
+      // approvals ping unless the operator chose "critical only" or is not to
+      // be disturbed (the turn still waits; the item stays in the queue)
+      if (d.level === 'critical' || quiet) return
       const newEgress = (d.egress_pending || 0) - (p.egress_pending || 0)
       if (newEgress > 0) push({
         title: `${newEgress} new host approval${newEgress === 1 ? '' : 's'}`,
@@ -95,11 +109,11 @@ export function useNotices(enabled) {
         title: `commit request · ${g.project}`, body: g.message,
       }))
       // a turn is blocked on these for a minute at most: the card goes
-      // straight to the ask in Settings → Computer use
+      // straight to the ask in Settings → Access → Computer use
       const oldShell = new Set((p.desk_shell || []).map((s) => s.id))
       ;(d.desk_shell || []).filter((s) => !oldShell.has(s.id)).forEach((s) => push({
         title: `shell on ${s.name} · waiting for you`, body: s.command,
-        to: '/settings#desk', life: 60,
+        to: '/settings/access#desk', life: 60,
       }))
       const oldSched = new Set((p.schedules || []).map((s) => s.id))
       ;(d.schedules || []).filter((s) => !oldSched.has(s.id)).forEach((s) => push({
@@ -118,6 +132,16 @@ export function useNotices(enabled) {
   useEffect(() => {
     if (!enabled) return
     return subscribeSse('/api/security/stream', (ev) => {
+      if (ev.type === 'dnd_changed') {
+        dndRef.current = !!ev.on
+        setDnd(ev.on ? ev : null)
+        return
+      }
+      if (ev.type === 'dnd_summary') {
+        // the one thing said when do-not-disturb ends
+        push({ sev: 'warn', title: 'Do not disturb ended', body: ev.summary || '', life: 14 })
+        return
+      }
       if (ev.type !== 'security_event') return
       // a repeat carries its row's id: it pings again only when the server
       // says so (a critical repeat, once per window)
@@ -153,6 +177,7 @@ export function useNotices(enabled) {
       // the storage watch (backend/storage_watch.py): at most one a day, and
       // the card goes to the Logs tab where retention and delete live
       if (ev.type === 'storage_warning') {
+        if (dndRef.current) return
         push({ sev: 'warn', title: ev.title || 'Storage is filling up',
                body: ev.summary || '', to: ev.to || '/security/logs', life: 30 })
         return
@@ -162,12 +187,14 @@ export function useNotices(enabled) {
       if (ev.type === 'memory_pending') {
         setMemoryPending((n) => n + 1)   // the next poll re-syncs the real total
         window.dispatchEvent(new Event('jarvis-memory-arrived'))  // an open Memory page reloads
+        if (dndRef.current) return
         push({ sev: 'warn', title: ev.title || 'A note waits for your approval',
                body: ev.summary || '', to: ev.to || '/memory', life: 12 })
         return
       }
       if (ev.type !== 'agent_run_done') return
       if (isWatched(ev.conversation_id)) return   // they're looking right at it
+      if (dndRef.current) return                  // not to be disturbed
       push({
         sev: ev.ok ? 'ok' : 'crit',
         project: ev.project,
@@ -179,7 +206,7 @@ export function useNotices(enabled) {
     })
   }, [enabled, push])
 
-  return { toasts, count, memoryPending, dismiss, clear }
+  return { toasts, count, memoryPending, dnd, dismiss, clear }
 }
 
 // A queue card (not the app's own message, not an agent run's result) exists

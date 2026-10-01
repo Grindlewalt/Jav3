@@ -201,9 +201,44 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
         await apply_write(project, f"runs/{job_id}/{cid}-{kind}.md", rollup.encode())
         bus.publish(job_id, {"type": "node_done", "node_id": cid, "rollup": rollup})
         return {"cid": cid, "kind": kind, "output": output, "rollup": rollup}
+    except asyncio.CancelledError:
+        await _settle_rollup(cid, "stopped")        # a stop must not leave it "running"
+        raise
     except Exception as e:  # noqa: BLE001 — a node failure must not kill siblings
         bus.publish(job_id, {"type": "error", "node_id": cid, "message": str(e)})
+        await _settle_rollup(cid, f"error: {e}")
         return {"cid": cid, "kind": kind, "output": "", "rollup": f"error: {e}"}
+
+
+async def settle_lost_heads() -> int:
+    """At boot: no job can be live yet, so a head still without a rollup lost its
+    run to the restart (ROBUST-22). Say so, instead of leaving a Runs row and a
+    chat JobTree "running" for good. Returns how many it settled."""
+    db = await get_db()
+    try:
+        cur = await db.execute(
+            "UPDATE conversations SET rollup = ? WHERE kind = 'head' AND rollup IS NULL",
+            ("interrupted by a restart before it finished",))
+        await db.commit()
+        return cur.rowcount
+    finally:
+        await db.close()
+
+
+async def _settle_rollup(cid: int, rollup: str) -> None:
+    """A node that did not finish still ends with a rollup (ROBUST-22): the chat
+    reload marks a head `running` while its rollup is NULL. Best-effort, and
+    never over a rollup the node already wrote."""
+    try:
+        db = await get_db()
+        try:
+            await db.execute("UPDATE conversations SET rollup = ? WHERE id = ? "
+                             "AND rollup IS NULL", (rollup, cid))
+            await db.commit()
+        finally:
+            await db.close()
+    except Exception:  # noqa: BLE001 — teardown persistence is best-effort
+        pass
 
 
 @contextlib.asynccontextmanager
@@ -243,6 +278,33 @@ async def job_workspace(project: str | None, *, top_level: bool):
                 except Exception:  # noqa: BLE001 — reconcile is best-effort
                     pass
             guest_vm.release()
+
+
+async def flush_workspace(project: str | None, cid: int | None = None, *,
+                          timeout: float = 60) -> bool:
+    """Pull the shared guest write buffer home NOW (PLANS-02). A plan's items
+    write into the one guest copy, and the buffer only came home when the last
+    holder of the workspace let go, i.e. when the orchestrator's own turn ended:
+    until then git_status, the Workspace and Plan panels and the review flags saw
+    an empty project, and a guest crash or scrub lost every file. Idempotent (the
+    guest's pull does not clear the buffer, applying it again is a no-op), and a
+    no-op unless a guest workspace is held for the project. `cid` is the turn
+    the write flags should name (the item that just finished). Best-effort."""
+    if not project:
+        return False
+    from . import runtime
+    from .vm import guest_turn
+    if not guest_turn._ws_holds.get(project):
+        return False
+    token = runtime.conversation_id.set(cid) if cid else None
+    try:
+        await asyncio.wait_for(guest_turn.pull_writes(project), timeout=timeout)
+        return True
+    except Exception:  # noqa: BLE001 — the next flush, or the turn-end pack, retries
+        return False
+    finally:
+        if token is not None:
+            runtime.conversation_id.reset(token)
 
 
 async def run_job(job_id: str, brief: str, project: str, *,
