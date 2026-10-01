@@ -4415,6 +4415,9 @@ def build_tui(base: str, token: str, **kw):
             yield chat.log
             yield chat.new_hint
 
+        def on_mount(self) -> None:
+            self.chat.log.anchor()          # follow the bottom, whatever panel this is
+
         @property
         def page_title(self) -> str:
             return "Chat"
@@ -4541,11 +4544,6 @@ def build_tui(base: str, token: str, **kw):
         DEFAULT_CSS = """
         Panel { position: absolute; width: 100%; height: 100%; border: none;
                 background: $background; }
-        PanelArea.-multi Panel { border: round $panel-lighten-2;
-                                 border-title-color: $text; border-title-style: none; }
-        PanelArea.-multi Panel.-focused { border: double $primary;
-                                          border-title-color: $primary;
-                                          border-title-style: bold; }
         """
 
         def __init__(self, chat: ChatState, **kw) -> None:
@@ -4617,7 +4615,15 @@ def build_tui(base: str, token: str, **kw):
         panel keeps its transcript when the layout changes), sized in whole cells from
         `tree_rects`."""
 
-        DEFAULT_CSS = "PanelArea { width: 1fr; height: 1fr; overflow: hidden hidden; }"
+        # (the frame rules live here: a scoped rule must start with its own widget's name)
+        DEFAULT_CSS = """
+        PanelArea { width: 1fr; height: 1fr; overflow: hidden hidden; }
+        PanelArea.-multi Panel { border: round $foreground 55%;
+                                 border-title-color: $text; border-title-style: none; }
+        PanelArea.-multi Panel.-focused { border: double $primary;
+                                          border-title-color: $primary;
+                                          border-title-style: bold; }
+        """
 
         def compose(self) -> ComposeResult:
             for chat in self.app.chats.values():
@@ -8885,8 +8891,9 @@ def build_tui(base: str, token: str, **kw):
             n = self.chat.number
             if self.paged:
                 return f"panel {n} · / for a command · /work back to its chat"
-            return (f"ask #{self.cid}… or /page [args] [panel]" if self.cid
-                    else f"ask a new chat (panel {n})… or /page [args] [panel]")
+            tail = _esc("/page [args] [panel]")
+            return (f"ask #{self.cid}… or {tail}" if self.cid
+                    else f"ask a new chat (panel {n})… or {tail}")
 
         def _chrome(self) -> None:
             try:
