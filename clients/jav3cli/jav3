@@ -4101,6 +4101,15 @@ def build_tui(base: str, token: str, **kw):
         def action_leave(self) -> None:
             self.leave()
 
+        def on_key(self, event) -> None:
+            """`/` on a page types a command: the prompt line takes the focus, slash
+            first. (Here, not in the app: the page's queue is ordered, so the letters
+            typed after the slash find the focus already moved.)"""
+            if event.key == "slash" and self.SLASH_TO_PROMPT and self.page_visible:
+                event.stop()
+                event.prevent_default()
+                self.app.command_line("/")
+
         @staticmethod
         def of(widget) -> "Page | None":
             """The page a widget inside it belongs to."""
@@ -8295,6 +8304,13 @@ def build_tui(base: str, token: str, **kw):
             if kind == "error":
                 self.push_notice(text, "error")
 
+        async def say(self, text: str, kind: str = "info") -> None:
+            """A note in the chat, and a toast too while a page hides the chat (the
+            answer to a command typed over a page must be seen where it was typed)."""
+            await self.note(text, kind)
+            if self.paged and kind != "error":
+                self.notify(text, severity="warning" if kind == "warn" else "information")
+
         async def clear_log(self) -> None:
             await self.log_view.remove_children()
             # a new transcript starts at the bottom, following it, whatever the
@@ -9513,8 +9529,8 @@ def build_tui(base: str, token: str, **kw):
                 words, panel = parse_page_args(arg)
                 arg = " ".join(words)
                 if panel:
-                    await self.note(f"/{name}: panels arrive in the next step — opening "
-                                    "it in place")
+                    await self.say(f"/{name}: panels arrive in the next step — opening "
+                                   "it in place")
             try:
                 await cmd.fn(arg)
             except CliError as e:
@@ -9636,6 +9652,8 @@ def build_tui(base: str, token: str, **kw):
             pop = self.query_one("#popup", OptionList)
             if key == "escape":
                 self.hide_popup()
+                if self.paged:
+                    self._back_to_page()
             elif key == "up":
                 # at the top of the menu, ↑ keeps going: back into history
                 if not pop.option_count or (pop.highlighted or 0) == 0:
@@ -9711,22 +9729,25 @@ def build_tui(base: str, token: str, **kw):
             return True
 
         async def _on_key(self, event) -> None:
-            """Two keys that belong to the app whichever page has the focus: the key
-            after ctrl+x (a page's own letters must not catch it), and `/` on a page,
-            which goes to the prompt line with the slash typed."""
-            if isinstance(self.screen, ModalScreen):
-                return
-            if self.leader:
+            """The key after ctrl+x belongs to the leader table whichever page has the
+            focus (a page's own letters must not catch it)."""
+            if self.leader and not isinstance(self.screen, ModalScreen):
                 event.stop()
                 event.prevent_default()
                 self.run_leader(event.key)
-            elif event.key == "slash" and self.paged and isinstance(self.focused, Page) \
-                    and self.focused.SLASH_TO_PROMPT:
-                event.stop()
-                event.prevent_default()
-                self.editor.focus()
-                self.editor.text = "/"
-                self.editor.move_cursor(self.editor.document.end)
+
+        def command_line(self, text: str = "/") -> None:
+            """Over a page the prompt is a command line: focus it with `text` typed."""
+            self.editor.focus()
+            self.editor.text = text
+            self.editor.move_cursor(self.editor.document.end)
+
+        def _back_to_page(self) -> None:
+            """The prompt was a command line over a page: esc drops what was typed and
+            gives the keys back to the page."""
+            self.editor.text = ""
+            self.hide_popup()
+            self.page.focus_target().focus()
 
         def on_page_host_changed(self, message) -> None:
             """A page was shown or dropped: the prompt, status row and sidebar follow."""
@@ -9785,9 +9806,7 @@ def build_tui(base: str, token: str, **kw):
             elif self.popup_open():
                 self.hide_popup()
             elif self.paged:
-                # the prompt was a command line over a page: esc gives the keys back to it
-                self.editor.text = ""
-                self.page.focus_target().focus()
+                self._back_to_page()
             elif self.child_of is not None and not self.editor.text:
                 # someone else's agent: the habit from the other screens (esc back)
                 # must not stop it. ctrl+c or /stop does that.
@@ -10967,7 +10986,7 @@ def build_tui(base: str, token: str, **kw):
             spec = PAGES[name]
             args = (arg or "").split()
             if spec.kind == "web":
-                await self.note(not_in_terminal(name), "warn")
+                await self.say(not_in_terminal(name), "warn")
                 return
             self.hide_popup()
             if name == "sessions":
@@ -10991,6 +11010,8 @@ def build_tui(base: str, token: str, **kw):
         async def c_exit(self, arg: str = "") -> None:
             self.exit()
 
+    # for the next steps (panels host pages of their own) and for tests
+    Jav3App.Page, Jav3App.PageHost, Jav3App.ChatPage = Page, PageHost, ChatPage
     return Jav3App(base, token, **kw)
 
 

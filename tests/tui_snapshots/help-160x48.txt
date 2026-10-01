@@ -11,13 +11,15 @@
                            enter                 send (while a turn runs: the agent gets it at its next step)
                            shift+tab             permissions: yolo (the default: agents run in the VM without asking) → auto → ask;
                                                  /permissions picks
-                           ← (empty prompt)      agents screen: everything working, across projects
+                           ← (empty prompt)      agents page: everything working, across projects
+                           / (on a page)         type a /page command on the prompt line: /vms images, /security calls; esc goes
+                                                 back, /work or ctrl+c to the chat
                            /security (ctrl+x v)  queue · network · logs · secrets · persistent · profiles · rules · calls: tab → ←
-                                                 or 1-8 switch, esc back. Rules are the always-allow answers; Calls is how the
+                                                 or 1-8 switch, esc back. Rules are the always-allow answers; Calls is how the     ▁▁
                                                  model key is used
                            in /security          y approve · n reject (services: 1 2 3 placement, ↑↓ port, space expose) · a
                                                  acknowledge / add · e edit · p project · enter open · s stop · d delete / revoke
-                           /vms (ctrl+x c)       boxes · images · catalogue: s start/stop, d destroy, b build, y n packages        ▅▅
+                           /vms (ctrl+x c)       boxes · images · catalogue: s start/stop, d destroy, b build, y n packages
                            profile form          ↑↓ field · enter edit/toggle/pick · Save row or ctrl+s · runtime and placement
                                                  have no default
                            ctrl+j · \⏎           new line (shift+enter / alt+enter only where the terminal reports them)
@@ -40,8 +42,6 @@
                            pgup / pgdn           scroll the transcript
                            ↑ ↓                   prompt history
                            tab                   complete a /command, its argument or an @path
-                           !cmd                  run a command here; output goes with your next message
-                           @path                 attach a local file
   █
   █  Ask anything… "Fix the failing test in tests/"
   █
@@ -64,9 +64,9 @@
 12 0-24=254/233 25-26=-/235 27-48=254/235+b 49-130=254/235 131-132=23/235+r 133-134=-/235 135-159=254/233
 13 0-24=254/233 25-26=-/235 27-48=254/235+b 49-130=254/235 131-132=23/235+r 133-134=-/235 135-159=254/233
 14 0-24=254/233 25-26=-/235 27-48=254/235+b 49-130=254/235 131-132=23/235+r 133-134=-/235 135-159=254/233
-15 0-24=254/233 25-26=-/235 27-48=254/235+b 49-130=254/235 131-132=23/235+r 133-134=-/235 135-159=254/233
-16 0-24=254/233 25-26=-/235 27-48=254/235+b 49-130=254/235 131-132=23/235+r 133-134=-/235 135-159=254/233
-17 0-24=254/233 25-26=-/235 27-48=254/235+b 49-130=254/235 131-132=23/16+r 133-134=-/235 135-159=254/233
+15 0-24=254/233 25-26=-/235 27-48=254/235+b 49-130=254/235 131-132=23/16+r 133-134=-/235 135-159=254/233
+16 0-24=254/233 25-26=-/235 27-48=254/235+b 49-130=254/235 131-132=254/16 133-134=-/235 135-159=254/233
+17 0-24=254/233 25-26=-/235 27-48=254/235+b 49-130=254/235 131-132=254/16 133-134=-/235 135-159=254/233
 18 0-24=254/233 25-26=-/235 27-48=254/235+b 49-130=254/235 131-132=254/16 133-134=-/235 135-159=254/233
 19 0-24=254/233 25-26=-/235 27-48=254/235+b 49-130=254/235 131-132=254/16 133-134=-/235 135-159=254/233
 20 0-24=254/233 25-26=-/235 27-48=254/235+b 49-130=254/235 131-132=254/16 133-134=-/235 135-159=254/233

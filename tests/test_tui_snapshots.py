@@ -52,6 +52,14 @@ PAGES = {
     "help": ([], "type:/help|key:enter|waitfor:Keys"),
     # the left-arrow screen: the first root selected (and unfolded), then an agent inside
     # a plan (its failed item), then the Finished view
+    # pages by slash command with an argument (jav3.2 P0): the page, its tab, its chrome
+    "security-calls": ([], "type:/security calls|wait:0.4|key:enter|waitfor:CALL@10|wait:0.5"),
+    "vms-images": ([], "type:/vms images|wait:0.4|key:enter|waitfor:build a new version@10"
+                       "|wait:0.5"),
+    "agents-cmd-finished": ([], "type:/agents finished|wait:0.4|key:enter|waitfor:homelab@10"
+                                "|wait:0.5"),
+    # a page the web has and the terminal does not: the answer where it lives
+    "stub": ([], "type:/memory|wait:0.4|key:enter|waitfor:not in the terminal yet@10|wait:0.3"),
     "agents": ([], "key:left|waitfor:Agents@10|waitfor:morning quotes|wait:0.3"),
     "agents-in": ([], "key:left|waitfor:Agents@10|waitfor:morning quotes|key:right|key:down*2"
                       "|wait:0.3"),
@@ -71,7 +79,8 @@ def normalise(text: str) -> str:
 
 # Text under 3:1 contrast in the 256-colour palette is a bug (grey on the teal selection once
 # was). /help is left out: its backdrop is the page behind it, dimmed on purpose.
-CONTRAST_PAGES = ("home", "chat", "vms", "security", "agents", "agents-in", "agents-finished")
+CONTRAST_PAGES = ("home", "chat", "vms", "security", "agents", "agents-in", "agents-finished",
+                  "security-calls", "vms-images", "agents-cmd-finished", "stub")
 
 
 def capture(page: str, cols: int, rows: int) -> tuple[str, list[str]]:
