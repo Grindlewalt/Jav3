@@ -26,6 +26,20 @@ which always count. The Python pattern runs on Python files only: on a .mjs
 file it read `import test from 'node:test'` as a module named `test`. On the Pi
 (2026-09-27) 242 new_import flags were almost all relative, stdlib or builtin.
 
+A flag is not always a problem. `judge()` (pure, like `scan()`) says whether
+one is just normal work, from facts the caller gathers (writes.py): a removal
+in a file git HEAD does not hold, or one this run created, is a scratch file
+the agent threw away; an import the project already makes elsewhere is not new;
+anything written under a tool-output directory (`dist/`, `node_modules/`, a
+browser profile) is not the agent's code. writes.py still RECORDS such a flag,
+quietly (security.raise_event(rule=...)): the rule is the only thing that
+changes. On the Pi (2026-09-27..10-01) one chat run raised 111 write flags,
+109 of them removals in scratch files it had made and deleted itself.
+
+`network_call` does not read a bare `.connect(` as a network call: sqlite3's and
+WebAudio's are not. It does read a socket's (`s.connect(("host", 80))`,
+`net.connect`, `tls.connect`).
+
 `scan()` is pure and fully unit-testable.
 """
 import math
@@ -77,7 +91,8 @@ def _external_js(spec: str) -> bool:
 _NET = re.compile(
     r'socket\.socket|socket\.create_connection|create_connection|requests\.'
     r'(?:get|post|put|patch|delete|request|head)|httpx\.|aiohttp|urllib\.request|'
-    r'urlopen|\.connect\(|fetch\(|XMLHttpRequest|WebSocket|sendBeacon|EventSource|'
+    r'urlopen|\.connect\(\s*\(|\b(?:net|tls|http2|socket|sock)\.connect\(|\.connect_ex\(|'
+    r'fetch\(|XMLHttpRequest|WebSocket|sendBeacon|EventSource|'
     r'/dev/tcp/|\bcurl\b|\bwget\b|nc\s+-', re.I)
 _LOG = re.compile(
     r'logging\.|logger\.|\.getLogger|log\.(?:debug|info|warning|error|critical)|'
@@ -137,6 +152,39 @@ def _count(rx: re.Pattern, text: str) -> int:
     return len(rx.findall(text))
 
 
+def ext_of(path: str) -> str:
+    return "." + path.rsplit(".", 1)[-1].lower() if "." in path else ""
+
+
+def modules_of(text: str, path: str) -> set[str]:
+    """Every outside module a source file imports, named as the new_import flag
+    names them (a project's own baseline of imports is built from these)."""
+    ext = ext_of(path)
+    if ext not in _PY_EXT and ext not in _JS_EXT:
+        return set()
+    return set(_imports([(i, ln) for i, ln in enumerate(text.splitlines(), 1)], ext))
+
+
+def is_sensitive(module: str) -> bool:
+    """A module that reaches the network, runs programs or loads code by name:
+    adding it always counts, however many files already use it."""
+    name = module[5:] if module.startswith("node:") else module
+    return name.split(".")[0] in _PY_SENSITIVE or name in _NODE_SENSITIVE
+
+
+# Directories a tool writes (a build, a package install, a browser's profile,
+# a cache), not the agent's own code. A flag from a file under one is normal.
+TOOL_OUTPUT_DIRS = frozenset({"dist", "node_modules", ".cache"})
+_TOOL_OUTPUT_PATHS = (".config/chromium-headless/", ".config/chromium/",
+                      ".config/google-chrome/")
+
+
+def tool_output(path: str) -> bool:
+    p = "/" + path.replace("\\", "/").lstrip("/")
+    return (any(f"/{d}/" in p for d in TOOL_OUTPUT_DIRS)
+            or any(f"/{d}" in p for d in _TOOL_OUTPUT_PATHS))
+
+
 # a flag points at a bounded number of lines; the board shows a snippet per
 # line and a hundred of them is a wall, not evidence
 _MAX_LINES = 40
@@ -152,7 +200,7 @@ def _lines(groups) -> list[int]:
 def scan(old_text: str, new_text: str, path: str) -> list[dict]:
     """Deterministic flags for one file write's old->new diff. `old_text`
     is '' for a brand-new file. Returns [{trigger, detail}]."""
-    ext = "." + path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    ext = ext_of(path)
     if ext not in _CODE_EXT and not path.endswith("Dockerfile"):
         return []
     added = _added_lines(old_text, new_text)
@@ -190,6 +238,46 @@ def scan(old_text: str, new_text: str, path: str) -> list[dict]:
         flags.append({"trigger": "assertion_removed",
                       "detail": {"before": _count(_ASSERT, old_text), "after": _count(_ASSERT, new_text)}})
     return flags
+
+
+REMOVALS = ("assertion_removed", "logging_removed")
+
+
+def judge(flag: dict, path: str, *, in_head: bool | None = None,
+          created_here: bool = False, known_modules=frozenset()) -> tuple[str | None, dict]:
+    """(reason, flag): the reason this flag is normal work, or None when it
+    still needs the operator, and the flag to raise (a new_import with only
+    some known modules is narrowed to the ones that are new).
+
+    The caller gathers the facts: `in_head` is whether git HEAD holds `path`
+    (None = it could not tell, which never excuses anything), `created_here`
+    whether this run created the file, `known_modules` the outside modules the
+    project already imports.
+
+      removals        a file git HEAD does not hold, or one this run created,
+                      was never the operator's: throwing away its own scratch
+                      file is not test tampering. A tracked file still alerts.
+      new_import      every module already imported in the project and none
+                      sensitive (socket, subprocess, ctypes, http, ...).
+      anything        written under a tool-output directory.
+    """
+    trig, detail = flag["trigger"], flag.get("detail") or {}
+    if tool_output(path):
+        return "tool output: the file is under a build, package or browser-profile dir", flag
+    if trig in REMOVALS:
+        if created_here:
+            return "the file was created earlier in this run", flag
+        if in_head is False:
+            return "the file is not in git HEAD (never committed)", flag
+    elif trig == "new_import":
+        mods = [str(m) for m in detail.get("modules") or []]
+        fresh = [m for m in mods if is_sensitive(m) or m not in known_modules]
+        if mods and not fresh:
+            return "every module is already imported elsewhere in this project", flag
+        if fresh != mods:
+            flag = {**flag, "detail": {**detail, "modules": fresh,
+                                       "known_modules": [m for m in mods if m not in fresh]}}
+    return None, flag
 
 
 def locate(text: str, trigger: str, detail: dict) -> list[int]:
