@@ -781,6 +781,7 @@ async def init_db() -> None:
                              "from_operator INTEGER NOT NULL DEFAULT 0")
         await _migrate_boxes(db)
         await _migrate_secsettings(db)
+        await _migrate_secrules(db)
         await _migrate_peer_trust(db)
         await _migrate_narration(db)
         await _migrate_turnstats(db)
@@ -1004,6 +1005,16 @@ async def _migrate_secsettings(db: aiosqlite.Connection) -> None:
     await _add_columns(db, "security_events", (
         ("actor", "TEXT"),
         ("quiet", "TEXT"),
+    ))
+
+
+async def _migrate_secrules(db: aiosqlite.Connection) -> None:
+    """Why a rule judged a security event normal work (backend/security.py):
+    `rule` is the short reason ("file never committed", "imported elsewhere in
+    the project"), set only on rows filed already acknowledged with
+    quiet='rule'. NULL on every other row. Idempotent."""
+    await _add_columns(db, "security_events", (
+        ("rule", "TEXT"),
     ))
 
 

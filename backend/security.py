@@ -43,6 +43,17 @@ session_state next to the level:
     still recorded; when it ends, one `dnd_summary` goes out. Approvals that
     hold a turn open (ask_user, permission asks, egress hosts) are not touched:
     the turn still waits and the item stays in the queue, only its ping is quiet.
+
+Normal work, by rule (not the operator's setting: the code's). A raise site, or
+the raise path itself, may judge an event routine: a scratch file the run itself
+made deleted again, an import the project already uses, a known device's
+connect/disconnect, a process the agent's own run_code started. `raise_event(
+rule="why")` still RECORDS it, filed already acknowledged with quiet='rule' and
+the reason in `rule`: no ping, not in the badge, not in the Queue, found in the
+History under "filtered as normal work". Nothing is dropped. A critical row
+ignores a rule (an anomaly cut is never routine). `_judge` holds the rules that
+need the log itself (sessions per device per day, a standing fact once per box
+allocation); the rest are judged where the event is raised.
 """
 import asyncio
 import json
@@ -118,7 +129,7 @@ ALWAYS_KINDS = frozenset({"egress_anomaly", "host_cut", "secret_leak",
 
 _COLUMNS = ("id, kind, severity, project_slug, summary, detail, acknowledged, "
             "created_at, acknowledged_at, triage_verdict, triage_reason, "
-            "count, last_seen, cause, actor, quiet")
+            "count, last_seen, cause, actor, quiet, rule")
 
 
 def tier(kind: str | None, severity: str | None) -> str:
@@ -458,16 +469,20 @@ async def _coalesce_target(db: aiosqlite.Connection, kind: str, severity: str,
 
 
 def _decide(kind: str, severity: str, actor: str | None, level: str, prefs: dict,
-            dnd_on: bool) -> dict:
+            dnd_on: bool, rule: str | None = None) -> dict:
     """Everything the operator's settings say about one new event: its tier,
-    whether it is filed already acknowledged (`quiet`: 'operator' or 'kind'),
-    whether it pings, and whether do-not-disturb held a ping back."""
+    whether it is filed already acknowledged (`quiet`: 'operator', 'rule' or
+    'kind'), whether it pings, and whether do-not-disturb held a ping back. A
+    rule's verdict ("normal work") beats a kind's mode: the operator who set a
+    kind to Ping wants its real events, not the routine ones."""
     t = tier(kind, severity)
     mode, chosen = mode_for(kind, severity, level, prefs)
     quiet = None
     if t != "critical":
         if actor == OPERATOR and prefs["self_quiet"]:
             quiet = "operator"
+        elif rule:
+            quiet = "rule"
         elif chosen and mode == "record":
             quiet = "kind"
     ping = quiet is None and mode == "ping"
@@ -478,12 +493,13 @@ def _decide(kind: str, severity: str, actor: str | None, level: str, prefs: dict
 
 
 async def decide(db: aiosqlite.Connection, kind: str, severity: str,
-                 actor: str | None) -> dict:
+                 actor: str | None, rule: str | None = None) -> dict:
     try:
         dnd_on = (await dnd_status(db))["on"]
     except Exception:                           # noqa: BLE001 — fail toward pinging, not silence
         dnd_on = False
-    return _decide(kind, severity, actor, await notify_level(db), await get_prefs(db), dnd_on)
+    return _decide(kind, severity, actor, await notify_level(db), await get_prefs(db), dnd_on,
+                   rule)
 
 
 def decide_sync(con, kind: str, severity: str, actor: str | None = None) -> dict:
@@ -503,10 +519,88 @@ def decide_sync(con, kind: str, severity: str, actor: str | None = None) -> dict
                    _clean_prefs(_parse_json(get(PREFS_KEY))), on)
 
 
+# --- rules that need the log itself ------------------------------------------
+# Judged by kind in the raise path, so the raise sites (browser.py, desk.py,
+# docker_runtime.py) stay as they are.
+
+SESSION_KINDS = frozenset({"browser_session", "desk_session"})
+SESSION_RULE = "known device: its connects and disconnects are filed once a day"
+# a standing fact is true until the thing it describes is rebuilt: once per
+# allocation of the box, however often the box starts
+STANDING_KINDS = frozenset({"docker_weak_isolation"})
+
+
+def _live_turn() -> bool:
+    """Is any agent loop running right now? Unknown reads as yes: an error here
+    must make an event more visible, never less."""
+    try:
+        from . import chat
+        return bool(chat._running_loops())
+    except Exception:                           # noqa: BLE001
+        return True
+
+
+async def _device_seen(db: aiosqlite.Connection, kind: str, device) -> bool:
+    try:
+        async with db.execute(
+                "SELECT 1 FROM security_events WHERE kind = ? "
+                "AND json_extract(detail, '$.device_id') = ? LIMIT 1",
+                (kind, device)) as cur:
+            return await cur.fetchone() is not None
+    except Exception:                           # noqa: BLE001 — no JSON1: raise it
+        return False
+
+
+async def _judge(db: aiosqlite.Connection, kind: str, detail: dict | None) -> dict | None:
+    """The rule for a kind that is judged here, if any: {"rule": reason,
+    "cause": key} files it quiet onto a steadier row, {"cause": key} alone names
+    the row of its own, {"standing": key} counts it onto the row that already
+    states the fact, None leaves it alone.
+
+    browser_session / desk_session (a device connected or disconnected): one row
+    per device per day. Raised in full only for a device this log has never
+    seen, or one that went silent while a turn was running (that turn may be
+    stuck on it). The other 280 a week are the same browser reconnecting.
+    docker_weak_isolation: the box's isolation is a fact about its allocation,
+    not an event of each start."""
+    d = detail if isinstance(detail, dict) else {}
+    if kind in SESSION_KINDS:
+        device = d.get("device_id")
+        if device is None:
+            return None
+        if not await _device_seen(db, kind, device):
+            return {"cause": f"{kind}:{device}:first"}
+        if d.get("why") == "went silent" and _live_turn():
+            return None
+        return {"rule": SESSION_RULE, "cause": f"{kind}:{device}:{_utcnow()[:10]}"}
+    if kind in STANDING_KINDS:
+        box = d.get("box")
+        if not box:
+            return None
+        return {"standing": f"{kind}:{box}@{d.get('allocation') or _utcnow()[:10]}"}
+    return None
+
+
+async def _count_repeat(db: aiosqlite.Connection, twin: dict, *, kind: str, severity: str,
+                        project: str | None, detail: dict | None, t: str, ping: bool,
+                        quiet: str | None, actor: str | None) -> int:
+    """Count a repeat onto the row that already says it."""
+    await db.execute("UPDATE security_events SET count = count + 1, "
+                     "last_seen = ? WHERE id = ?", (_utcnow(), twin["id"]))
+    await db.commit()
+    bus.publish(SECURITY_CHAN, {"type": "security_event", "id": twin["id"],
+                                "kind": kind, "severity": severity, "project": project,
+                                "summary": twin["summary"], "detail": detail,
+                                "count": twin["count"] + 1, "repeat": True,
+                                "tier": t, "ping": ping, "acknowledged": bool(quiet),
+                                "actor": actor})
+    return twin["id"]
+
+
 async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
                       severity: str = "warn", project: str | None = None,
                       detail: dict | None = None, cause: str | None = None,
-                      actor: str | None = None) -> int:
+                      actor: str | None = None, rule: str | None = None) -> int:
     """Record one event (or count a repeat onto its twin) and publish it with
     the ping decision. `cause` is the coalescing key; the summary unless the
     raise site names something steadier. Returns the row id: a repeat returns
@@ -514,10 +608,29 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
 
     `actor="operator"` says the operator's own click caused it. Only an
     operator-facing route may pass it (see the module doc); nothing is inferred.
+
+    `rule` is a short reason the raise site judged this event normal work (see
+    the module doc): it is filed acknowledged, quiet='rule', no ping. Ignored
+    for a critical event.
     """
     cause = (cause or summary)[:500]
     actor = OPERATOR if actor == OPERATOR else None
-    d = await decide(db, kind, severity, actor)
+    rule = (rule or "").strip()[:200] or None
+    j = await _judge(db, kind, detail)
+    if j and j.get("standing"):
+        cause = j["standing"][:500]
+        async with db.execute("SELECT id, count, summary FROM security_events "
+                              "WHERE kind = ? AND cause = ? ORDER BY id DESC LIMIT 1",
+                              (kind, cause)) as cur:
+            row = await cur.fetchone()
+        if row is not None:
+            d = await decide(db, kind, severity, actor)
+            return await _count_repeat(db, dict(row), kind=kind, severity=severity,
+                                       project=project, detail=detail, t=d["tier"],
+                                       ping=False, quiet=d["quiet"], actor=actor)
+    elif j:
+        rule, cause = rule or j.get("rule"), j["cause"][:500]
+    d = await decide(db, kind, severity, actor, rule)
     t, quiet = d["tier"], d["quiet"]
     # their own action is one row each time; a Record-only kind's repeats pile
     # onto one quiet row; everything else onto its waiting twin
@@ -525,28 +638,21 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
             else await _coalesce_target(db, kind, severity, project, cause,
                                         actor=actor, quiet=quiet))
     if twin is not None:
-        await db.execute("UPDATE security_events SET count = count + 1, "
-                         "last_seen = ? WHERE id = ?", (_utcnow(), twin["id"]))
-        await db.commit()
         # already in the queue: only a critical repeat interrupts again, and
         # at most once per ping window
         ping = (t == "critical" and (not d["held"] or d["breaks"])
                 and _rate_ok(f"#{twin['id']}", 1))
-        bus.publish(SECURITY_CHAN, {"type": "security_event", "id": twin["id"],
-                                    "kind": kind, "severity": severity, "project": project,
-                                    "summary": twin["summary"], "detail": detail,
-                                    "count": twin["count"] + 1, "repeat": True,
-                                    "tier": t, "ping": ping, "acknowledged": bool(quiet),
-                                    "actor": actor})
-        return twin["id"]
+        return await _count_repeat(db, twin, kind=kind, severity=severity, project=project,
+                                   detail=detail, t=t, ping=ping, quiet=quiet, actor=actor)
     ping = d["ping"] and (t == "critical" or _rate_ok(kind, settings.security_ping_per_kind))
     cur = await db.execute(
         "INSERT INTO security_events(kind, severity, project_slug, summary, detail, "
-        "cause, last_seen, actor, quiet, acknowledged, acknowledged_at) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        "cause, last_seen, actor, quiet, rule, acknowledged, acknowledged_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         (kind, severity, project, summary,
          json.dumps(detail) if detail is not None else None, cause, _utcnow(),
-         actor, quiet, 1 if quiet else 0, _utcnow() if quiet else None))
+         actor, quiet, rule if quiet == "rule" else None,
+         1 if quiet else 0, _utcnow() if quiet else None))
     await db.commit()
     if t == "critical":
         _rate_ok(f"#{cur.lastrowid}", 1)        # its repeats stay quiet for a window
@@ -556,7 +662,8 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
                                 "kind": kind, "severity": severity, "project": project,
                                 "summary": summary, "detail": detail,
                                 "count": 1, "repeat": False, "tier": t, "ping": ping,
-                                "acknowledged": bool(quiet), "actor": actor})
+                                "acknowledged": bool(quiet), "actor": actor,
+                                "quiet": quiet, "rule": rule if quiet == "rule" else None})
     return cur.lastrowid
 
 
