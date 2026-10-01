@@ -697,6 +697,19 @@ a watched, policy-gated, cuttable pipe to the internet.
       `web_read`, `web_search`, `read_and_summarize`, `research`, `desk_*`,
       `browser_*`, `local_*`, `service_logs`, `projector_*` (MCP results);
       also an imported skill's body, a peer's message, a remote screenshot.
+      A peer's message taints the receiver when it is delivered, with one
+      exception (2026-09-30): between the items of one plan run, and for the
+      plan head's fixed-text stall nudge, the message carries the SENDER's own
+      state. A sender whose turn has read nothing untrusted passes no taint (so
+      a plan item's journal entry is no longer quarantined for having been told
+      "the API is on port 8100" by a clean sibling); a sender that has read the
+      web still taints, so taint cannot be washed through a sibling. The bit is
+      stamped at send time (`agent_messages.trusted_peer`, from the broker
+      ledger) and defaults to untrusted: a chat, an agent of another project, a
+      slug-addressed message and any caller that does not say are plain peers.
+      What this accepts: a clean sender is only as clean as the ledger's
+      coverage (the misses below), the same assumption `plan_report` summaries
+      already ride when they flow to dependants.
       A child agent's taint passes up to the turn that delegated to it when
       the child ends, and a child starts as tainted as its parent. Reading a
       note that carries a taint stamp (or whose frontmatter is unreadable), or

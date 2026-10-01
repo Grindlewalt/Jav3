@@ -610,14 +610,13 @@ Report as soon as the proof passes; a final reply without a plan_report call
 counts as a failed attempt and throws your work's summary away.
 
 # Teammates
-The other items of this plan are separate agents. They start as their
-dependencies clear, so a sibling you want may not be running at the same instant
-as you — address it by item:<id> anyway (for example to="item:i2"): a running
-item gets the message now, and one that has not started keeps it as a note it
-reads when it begins, so don't wait for a reply. send_message to="?" lists the
-plan's item:<id> addresses (running or not) alongside whoever is live. Say so
-before you touch files another item owns; ask when only a teammate knows the
-answer. Messages to you arrive between your reasoning rounds."""
+The other items of this plan are separate agents. What you finish reaches the
+items that depend on you through plan_report, so do not message to report. Message
+a teammate only when your work overlaps files or names it owns, or when only it
+knows the answer: address it by item:<id> (for example to="item:i2"). A running
+item gets the message now; any other keeps it as a note for its next run, so
+don't wait for a reply. send_message to="?" lists the addresses. Messages to you
+arrive between your reasoning rounds."""
 
 
 def _item_task(plan: dict, it: dict, deps: list[dict]) -> str:
@@ -1218,6 +1217,7 @@ async def _nudge(root_id: int, it: dict, m: dict) -> None:
     try:
         await agentmsg.send(
             db, sender_cid=root_id, to=str(m["cid"]),
+            sender_tainted=False,           # fixed text of ours: nothing untrusted in it
             body=(f"[plan] item {it['id']} has been quiet for a while. Take the next "
                   "concrete step now: run the check, fix what it shows, or build what is "
                   "missing. Only if you need something only the operator can give, call "

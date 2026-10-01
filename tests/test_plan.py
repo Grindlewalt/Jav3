@@ -928,3 +928,62 @@ async def test_notes_reach_blocked_and_failed_items_and_a_question_mark_keeps_th
         assert "needs a message" in out["error"], out
     finally:
         await db.close()
+
+
+async def test_peer_messages_inside_a_plan_run_taint_only_from_a_tainted_sender(client):
+    """PLANS-11: any peer message tainted the receiver, so a plan item that was
+    told something by its sibling had its journal entries quarantined as
+    [unverified]. Between items of one plan run (and the head's own nudge) the
+    message now carries the sender's taint instead: a sender that has read
+    nothing untrusted does not taint; one that has, still does. A sender outside
+    the run is a plain peer, and so is a recipient outside it."""
+    from backend.agent import budget as budget_mod
+    from backend.db import open_conversation
+    await _put(client, [{"title": "a", "brief": "a"}, {"title": "b", "brief": "b"}])
+    db = await get_db()
+    try:
+        i1, i2, outsider, head = [
+            await open_conversation(db, project=SLUG, title=t, kind=k)
+            for t, k in (("i1", "agent"), ("i2", "agent"), ("o", "chat"), ("h", "head"))]
+    finally:
+        await db.close()
+    async with plan_mod.edit(SLUG) as plan:
+        plan["root_id"] = head
+    plan_mod._live_items[i1] = {"project": SLUG, "item_id": "i1", "title": "a"}
+    plan_mod._live_items[i2] = {"project": SLUG, "item_id": "i2", "title": "b"}
+    n = 0
+
+    async def drained_taint(cid) -> bool:
+        nonlocal n
+        n += 1
+        op = f"op-{cid}-{n}"
+        t1, t2 = runtime.conversation_id.set(cid), budget_mod.active_op_id.set(op)
+        try:
+            text = await agentmsg.fetch_tool()
+        finally:
+            runtime.conversation_id.reset(t1)
+            budget_mod.active_op_id.reset(t2)
+        assert text, "nothing was delivered"
+        return broker.op_tainted(op)
+
+    async def send(frm, to, **kw):
+        db = await get_db()
+        try:
+            out = await agentmsg.send(db, sender_cid=frm, to=to, body="hello", **kw)
+        finally:
+            await db.close()
+        assert not out.get("error"), out
+
+    await send(i1, "item:i2", sender_tainted=False)
+    assert await drained_taint(i2) is False, "a clean sibling's message tainted the item"
+    await send(i1, "item:i2", sender_tainted=True)
+    assert await drained_taint(i2) is True, "a tainted sender's message must still taint"
+    await send(i1, "item:i2")                          # unknown: fails closed
+    assert await drained_taint(i2) is True
+    await send(outsider, "item:i2", sender_tainted=False)
+    assert await drained_taint(i2) is True, "a sender outside the plan run is a plain peer"
+    await send(i1, str(outsider), sender_tainted=False)
+    assert await drained_taint(outsider) is True, "a recipient outside the run is a plain peer"
+    # the head's stall nudge is fixed plan text, not model output
+    await plan_mod._nudge(head, {"id": "i2"}, {"cid": i2})
+    assert await drained_taint(i2) is False, "the plan head's own nudge tainted the item"
