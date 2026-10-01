@@ -133,7 +133,8 @@ def attribute(box=None, peer: tuple | None = None) -> dict:
     its own is attributed by its listener — nft pins interface, source and
     destination together, so a guest cannot reach another box's listener or
     forge its address — and only the shared box falls back to the turn
-    context stack (residual #7, unchanged for the shared box). The builder
+    context stack, and only when exactly one project has turns on it
+    (residual #7); with several it is unattributed and flagged "ambiguous". The builder
     box is attributed to IMAGE_BUILD_SLUG. Returns {project, op_id,
     conversation_id, box_id, service_id, kind, peer_ip, peer_port}."""
     peer_ip, peer_port = (peer[0], peer[1]) if peer and len(peer) >= 2 else (None, None)
@@ -141,9 +142,22 @@ def attribute(box=None, peer: tuple | None = None) -> dict:
            "service_id": None, "kind": "shared", "peer_ip": peer_ip,
            "peer_port": peer_port}
     if box is None or box.is_shared:
-        ctx = egress.current_context()
-        att.update(project=ctx["project"], op_id=ctx["op_id"],
-                   conversation_id=ctx["conversation_id"])
+        # The shared guest is one machine with one address: its connections
+        # carry no op tag, so they can only be tied to a turn when exactly one
+        # project has turns on it (a spawn_agent child shares its parent's).
+        # With two or more the newest turn is NOT a safe guess (WEBA-07: one
+        # project's pip install queued approvals, then an auto allow, under
+        # another's name): refuse to pick, unattributed = the Default profile,
+        # no project allowlist, no secrets, no auto mode.
+        live = egress.contexts_matching(
+            lambda e: boxes.op_box(e["op_id"]) in (None, boxes.SHARED_ID))
+        projects = {e["project"] for e in live}
+        if len(projects) == 1:
+            e = live[0]
+            att.update(project=e["project"], op_id=e["op_id"],
+                       conversation_id=e["conversation_id"])
+        elif projects:
+            att["ambiguous"] = sorted(p for p in projects if p)
         if boxes.enabled():
             att["box_id"] = boxes.SHARED_ID
         return att
@@ -177,6 +191,9 @@ def attribute(box=None, peer: tuple | None = None) -> dict:
 
 IMAGE_BUILD_SLUG = egress.IMAGE_BUILD
 
+AMBIGUOUS_NOTE = ("shared box (ambiguous): turns of more than one project were running, "
+                  "so this cannot be pinned to one; pick the project when you decide")
+
 
 def _service_id(att: dict, host: str) -> int | None:
     """The service a service-box connection belongs to. A per_service box has
@@ -193,6 +210,10 @@ async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None 
     att = att or attribute()
     slug = att["project"]
     service_id = _service_id(att, host)
+    queued = (verdict == "deny" and reason == egress.NOT_LISTED
+              and att["kind"] not in ("service", "builder"))
+    if queued and "ambiguous" in att:
+        reason = f"{reason}; {AMBIGUOUS_NOTE}"
     db = await get_db()
     try:
         await egress.record_event(db, slug=slug, host=host, method=method,
@@ -205,8 +226,7 @@ async def _record(host, method, path, bo, bi, verdict, reason, att: dict | None 
         # Only an UNDECIDED host is queued: one on a project/profile deny list,
         # an offline profile, a cut or the SSRF floor already has its answer
         # (e2e BUG-5: explicitly denied hosts showed up in pending)
-        if (verdict == "deny" and reason == egress.NOT_LISTED
-                and att["kind"] not in ("service", "builder")):
+        if queued:
             await egress.note_denied(db, slug or egress.GENERAL, host,
                                      box_id=att["box_id"])
         if verdict == "allow":
