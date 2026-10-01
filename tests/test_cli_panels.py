@@ -131,7 +131,7 @@ async def test_new_panel_splits_the_focused_one_with_a_new_chat_and_takes_the_fo
         r1, r2 = app.chats[1].panel.region, app.chats[2].panel.region
         assert r1.width + r2.width == app.panel_area.size.width and r1.x == 0 and r2.x == r1.width
         assert "ask a new chat (panel 2)" in app.editor.placeholder
-        assert "/page [args] [panel]" in app.editor.placeholder
+        assert "/page" in app.editor.placeholder and "panel]" in app.editor.placeholder   # (markup-escaped)
         t = titles(app)
         assert t[1].startswith("1 chat #512") and t[2].startswith("2 chat (new)")
         # the sidebar gives way while there are several panels; so does the title row
@@ -186,6 +186,7 @@ async def test_the_prompt_types_into_the_focused_panels_chat_and_two_chats_strea
         srv.feeds[1].put({"type": "final", "content": "done two", "conversation_id": 5})
         srv.feeds[1].close()
         assert await wait_for(lambda: not app.chats[2].busy)
+        await pilot.pause(0.4)
 
 
 async def test_a_page_opens_in_a_new_panel_with_the_trailing_word_panel():
@@ -347,6 +348,7 @@ async def test_a_dialog_for_an_unfocused_panels_turn_opens_over_everything_with_
         srv.feeds[0].put({"type": "final", "content": "ok", "conversation_id": 4})
         srv.feeds[0].close()
         assert await wait_for(lambda: not app.chats[1].busy)
+        await pilot.pause(0.4)                                  # the turn's last /info read
 
 
 async def test_a_page_in_another_panel_does_not_steal_the_keyboard():
@@ -413,3 +415,69 @@ async def test_a_page_in_a_panel_opens_chats_in_its_own_panel_and_p_opens_a_new_
         assert app.focus_no == 2
         await app.open_node({"id": 7, "title": "chat seven"}, new_panel=True)
         assert sorted(app.chats) == [1, 2, 3] and app.chats[3].cid == 7 and app.focus_no == 3
+
+
+async def test_a_click_in_a_panel_focuses_it_and_the_prompt_follows():
+    srv, app = make()
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        await split(pilot, app, "/new-panel", want=2)
+        assert app.focus_no == 2
+        await pilot.click(app.chats[1].log, offset=(3, 3))
+        await pilot.pause(0.2)
+        assert app.focus_no == 1 and app.focused is app.editor
+        assert "panel" in app.editor.placeholder and "(panel 1)" in app.editor.placeholder
+
+
+async def test_ctrl_c_interrupts_only_the_focused_panels_turn():
+    srv, app = make()
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        await send(pilot, app, "job one")
+        assert await wait_for(lambda: len(srv.feeds) == 1)
+        srv.feeds[0].put({"type": "start", "conversation_id": 4})
+        assert await wait_for(lambda: app.chats[1].cid == 4)
+        await split(pilot, app, "/new-panel", want=2)
+        await send(pilot, app, "job two")
+        assert await wait_for(lambda: len(srv.feeds) == 2)
+        srv.feeds[1].put({"type": "start", "conversation_id": 5})
+        assert await wait_for(lambda: app.chats[2].cid == 5)
+        await pilot.press("ctrl+c")                       # panel 2 has the focus
+        assert await wait_for(lambda: srv.stops == ["/api/chat/5/stop"])
+        assert app.chats[1].busy and not app.chats[1].stop_requested
+        assert app.chats[2].stop_requested
+        for i, cid in enumerate((5, 4)):
+            srv.feeds[1 - i].put({"type": "final", "content": "ok", "conversation_id": cid})
+            srv.feeds[1 - i].close()
+        assert await wait_for(lambda: not app.chats[1].busy and not app.chats[2].busy)
+        await pilot.pause(0.4)
+
+
+async def test_new_chat_and_other_commands_act_on_the_focused_panel_only():
+    srv, app = make()
+    srv.conv_messages[7] = {"messages": [{"id": 1, "role": "user", "content": "chat seven",
+                                          "created_at": "t"}], "running": False,
+                            "pending_activity": [], "agent_slug": None}
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        await app.open_conversation(7)
+        await split(pilot, app, "/new-panel", want=2)
+        await app.open_conversation(7)
+        app.chats[2].model = "deepseek/deepseek-flash"
+        assert app.chats[1].model is None                   # /model is per panel
+        app.focus_panel(1)
+        app.dispatch("/new")
+        assert await wait_for(lambda: app.chats[1].cid is None)
+        assert app.chats[2].cid == 7
+        assert list(app.chats[2].log.query("UserMsg")) and not list(app.chats[1].log.query("UserMsg"))
+
+
+async def test_tab_from_the_prompt_picks_rows_in_the_focused_panels_transcript():
+    srv, app = make()
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause(0.3)
+        await split(pilot, app, "/new-panel", want=2)
+        await pilot.press("tab")
+        assert app.focused is app.chats[2].log
+        await pilot.press("escape")
+        assert app.focused is app.editor and app.focus_no == 2

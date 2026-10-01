@@ -9182,9 +9182,9 @@ def build_tui(base: str, token: str, **kw):
                         with self.in_chat(chat):
                             self.run_worker(self._poll_cost(t), group=f"cost-{chat.number}",
                                             exclusive=True)
-                self._refresh_status()
+                self._refresh_titles()            # first: they sit on the base screen, a dialog
+                self._refresh_status()            # over it makes the queries below miss
                 self._refresh_new_hint()
-                self._refresh_titles()
             except NoMatches:
                 pass          # shutting down, or a screen without the status row
 
@@ -9857,6 +9857,7 @@ def build_tui(base: str, token: str, **kw):
             self._ask_recount()
             chat = self.chat
             chat.asks += 1                  # the panel's title bar says "needs input"
+            self._refresh_titles()
             lock = self.__dict__.setdefault("_ask_lock", asyncio.Lock())
             settled = False
             try:
@@ -9886,6 +9887,7 @@ def build_tui(base: str, token: str, **kw):
                         await self.note(f"answer not delivered: {e}", "error")
             finally:
                 chat.asks = max(0, chat.asks - 1)
+                self._refresh_titles()
                 asks.pop(aid, None)
                 if settled:
                     self._asks_done()[aid] = time.monotonic()
@@ -9914,11 +9916,13 @@ def build_tui(base: str, token: str, **kw):
             """yes / always / no (None: closed with ctrl+c) from the operator."""
             chat = self.chat
             chat.asks += 1
+            self._refresh_titles()
             try:
                 return await self.push_screen_wait(
                     LocalApprove(kind, summary, panel=self._panel_label()))
             finally:
                 chat.asks = max(0, chat.asks - 1)
+                self._refresh_titles()
 
         def _panel_label(self) -> int | None:
             """The number a dialog names the chat it is about by: the chat in context's
@@ -11663,6 +11667,8 @@ def build_tui(base: str, token: str, **kw):
             page wants it to (the prompt for a chat). False if there is no such panel."""
             if number not in self.chats:
                 return False
+            if number == self.focus_no and not refocus:
+                return True                 # a page inside the focused panel took the focus
             self.focus_no = number
             self.panel_area.relayout()
             if refocus:
@@ -11814,7 +11820,8 @@ def build_tui(base: str, token: str, **kw):
             cls = self.page_classes[name]
             if type(self.page) is cls:
                 self.page.set_args(args)
-                self.page.focus_target().focus()
+                if self.chat is self.focused_chat:      # not into a panel the focus is not in
+                    self.page.focus_target().focus()
                 return
             await self.host.push(cls.build(self, args))
 
@@ -12474,7 +12481,7 @@ def cmd_tui(args) -> int:
                     model=getattr(args, "model", None), resume=getattr(args, "resume", None),
                     cont=getattr(args, "cont", False), prompt=prompt)
     app.run()
-    for chat in app.chats.values():
+    for chat in list(getattr(app, "chats", {}).values()) or [app]:      # one per panel
         if chat.busy and chat.cid:
             print(f"the turn keeps running on the server — `jav3 -r {chat.cid}` re-attaches")
     if getattr(app, "return_code", 0):
