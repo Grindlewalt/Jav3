@@ -8579,6 +8579,9 @@ def build_tui(base: str, token: str, **kw):
                 turn.failed = True
                 self._stop_rows(turn, "no result: the turn failed")
                 await self.note(ev.get("message") or "error", "error")
+                if turn.sent is not None and not self.ephemeral and not ev.get("node_id"):
+                    # the server saved the failure with the steps it got through
+                    await self.note("/resume picks it up from its last step")
                 await self._turn_footer(turn)
                 if ev.get("undelivered"):
                     # back to the prompt: the operator decides whether they still
@@ -9392,6 +9395,8 @@ def build_tui(base: str, token: str, **kw):
                 "star": Command(self.c_star, "star or unstar this chat"),
                 "delete": Command(self.c_delete, "delete this chat (asks first)"),
                 "retry": Command(self.c_retry, "send your last message again"),
+                "resume": Command(self.c_resume, "continue a turn that died, from its last "
+                                  "step; otherwise like /sessions", "[id]", takes_arg=True),
                 "stop": Command(self.c_stop, "stop the running turn", busy_ok=True),
                 "stop-all": Command(self.c_stop_all, "stop every running turn you may stop "
                                     "(asks first)", busy_ok=True),
@@ -9440,7 +9445,7 @@ def build_tui(base: str, token: str, **kw):
                 "exit": Command(self.c_exit, "quit (a running turn keeps going)",
                                 busy_ok=True, leader="q"),
             }
-            for alias, name in (("quit", "exit"), ("resume", "sessions"),
+            for alias, name in (("quit", "exit"),
                                 ("history", "sessions"), ("model", "models"),
                                 ("agent", "persona"), ("agents", "persona"),
                                 ("theme", "themes"),
@@ -9890,6 +9895,27 @@ def build_tui(base: str, token: str, **kw):
             if not self.last_user:
                 raise CliError("nothing to retry")
             self.send(self.last_user)
+
+        async def c_resume(self, arg: str) -> None:
+            """Continue the turn that died (a dropped guest, a lost connection, a
+            provider error), but only when this chat's last message IS that
+            failure: the server then hands the model the dead turn's tool calls,
+            so it picks up from the last step. The same words as the web's Resume
+            button (backend/chat.py RESUME_MESSAGE). /resume was already the
+            sessions picker (Claude Code's habit) and stays that when there is
+            nothing to continue, or when it is given a chat."""
+            if arg or self.cid is None:
+                await self.c_sessions(arg)
+                return
+            r = await self.api("GET", f"/api/conversations/{self.cid}/messages")
+            rows = [m for m in r.get("messages", []) if m.get("role") in ("user", "assistant")]
+            last = rows[-1] if rows else {}
+            if r.get("running") or last.get("role") != "assistant" or not (
+                    last.get("content") or "").lstrip().startswith(
+                        ("(turn failed:", "(guest loop error:")):
+                await self.c_sessions("")
+                return
+            self.send("Continue from where the previous turn stopped.")
 
         async def c_stop(self, arg: str) -> None:
             if not self.busy:

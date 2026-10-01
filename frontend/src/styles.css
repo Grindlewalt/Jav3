@@ -4359,3 +4359,13 @@ a:has(> .nav-dot) { position: relative; }
   .sbd-table.stack td.stack-note { white-space: normal; flex-wrap: wrap; }
   .sbd-table.stack td.stack-note:empty { display: none; }
 }
+
+/* resume a failed turn */
+.resume-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: -6px 0 22px 43px; font-size: 13px; }
+.resume-bar button { margin: 0; }
+.resume-bar.compact { margin: -2px 0 10px 0; }
+@media (max-width: 768px) {
+  .resume-bar { margin-left: 0; }
+}
+.msg.error + .resume-bar { justify-content: center; margin-left: 0; }

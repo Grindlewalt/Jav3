@@ -10,6 +10,8 @@ import { MessageBody } from '../ToolActivity.jsx'
 import { activityMark, makeTurnFolder, newTurn, seedParts } from '../turnEvents.js'
 import { useDockHeight, useFollow } from '../useFollow.js'
 import TurnStatus from '../TurnStatus.jsx'
+import ResumeBar from '../ResumeBar.jsx'
+import { RESUME_TEXT, resumable, resumeUrl } from '../resume.js'
 import { useAsk } from '../ask.jsx'
 import ModelPicker from '../ModelPicker.jsx'
 import { AskPanel, PermissionModeSelect, useOperatorAsks, usePermissionMode } from '../AskUser.jsx'
@@ -553,7 +555,9 @@ export default function Chat({
     asks.settle()   // the turn's open question is void now; do not leave a dead card
   }
 
-  async function send(resend = null) {
+  // `url` sends somewhere other than /api/chat: the resume endpoint, which
+  // refuses (409) unless the chat's last turn really died
+  async function send(resend = null, url = undefined) {
     const text = (resend ?? input).trim()
     if (!text || busy) return
     // the orb is on screen only while the chat is empty — grab where it is
@@ -581,6 +585,7 @@ export default function Chat({
           if (ev.type === 'final' || ev.type === 'error') settled = true
           handleTurnEvent(ev, mine)
         },
+        url,
       )
     } catch (err) {
       if (mine !== gen.current) return   // the reader moved on; the turn runs regardless
@@ -591,7 +596,7 @@ export default function Chat({
       } else {
         // refused before anything streamed: drop the two optimistic messages
         setMessages((m) => m.slice(0, -2))
-        setInput(text)
+        if (!url) setInput(text)   // a resume has no draft to give back
         setMessages((m) => [...m, { role: 'error',
           content: err.status === 409 && err.detail === 'turn_in_progress'
             ? 'a turn is still running in this chat — wait for it to finish'
@@ -619,6 +624,12 @@ export default function Chat({
       api(`/api/conversations/${done}/messages`)
         .then((r) => setChatJobs(r.jobs || [])).catch(() => {})
     }
+  }
+
+  // the last turn died and the server saved it: send it on from its last step
+  function resume() {
+    if (conversationId && !busy && !temporary)
+      send(RESUME_TEXT, resumeUrl(conversationId))
   }
 
   // Swipe in from the left edge to open the chat list on a phone — the quick
@@ -803,6 +814,9 @@ export default function Chat({
                 ? <Fragment key={i}>{row}<div className="chat-approvals">
                     {approvalRows(approvalsAfter.get(i))}</div></Fragment>
                 : row))}
+              {conversationId && !busy && !temporary && resumable(messages) && (
+                <ResumeBar onResume={resume} />
+              )}
               {approvalsTail.length > 0 && (
                 <div className="chat-approvals">{approvalRows(approvalsTail)}</div>
               )}

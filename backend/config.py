@@ -565,6 +565,13 @@ class Settings(BaseSettings):
     # re-feed the payload — a couple of lines is the whole signal, and the
     # window is 16k. 0 disables the replay.
     voice_local_tool_trace_chars: int = 200
+    # When the turn right before a new message died (guest crash, lost
+    # connection, provider error), the model gets that turn's tool calls back
+    # in its history so "continue" can pick up from the last step instead of
+    # rediscovering everything. Each replayed result, and each long string in
+    # a call's arguments, is cut to this many characters; the last 30 calls
+    # are kept (compaction.FAILED_TURN_TRACE_CALLS). 0 turns the replay off.
+    failed_turn_trace_chars: int = 600
     # Sampling for the local tier only (never sent to DeepSeek). A 4B with a
     # prose-heavy history loops on its own last phrasing; a small presence
     # penalty is the cheap half of the fix. The token cap is a runaway guard —
