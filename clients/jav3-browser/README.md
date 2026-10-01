@@ -44,6 +44,18 @@ size/position and an in-view flag), `click`, `type`, `select` (a native
   reports whether it changed; an id whose element has disappeared is reported
   as such instead of clicking something else. `lib/dom.js` holds the shared
   helpers and is injected into a frame before each page function.
+- **Real clicks (0.6.0).** `click` attaches Chrome's debugger to that one tab,
+  waits for the page to hold still (the "started debugging this browser" bar
+  pushes the page down), measures the element, sends a mouse move, press and
+  release at its centre (through the iframe offsets when it is in an iframe),
+  checks which element the mouse landed on, and detaches. The bar shows only
+  for that: roughly half a second, and the click result reports the exact
+  time. Only mouse events go through it, only to tabs Jav3 opened, and
+  **Cancel** on the bar stops the action and pauses Jav3 like the
+  notification's Cancel. If the debugger cannot attach (the permission is
+  missing, or you switched **Click with real mouse input** off in Options) the
+  click is the old script-event sequence, and the result says so and why.
+  Typing, hover and keys are still script events.
 - **Keys are synthetic.** They carry `isTrusted: false`, so the extension does
   the default action itself when the page does not cancel it (Enter submits
   the form, Tab moves focus, Escape closes a dialog/details). Browser
@@ -101,7 +113,16 @@ else: chat, the desk socket and every Settings route refuse it. See
 
 Reload the extension after an update (`chrome://extensions` → Reload); Settings
 shows a reload hint while the browser reports an older build than the server
-ships (currently **0.5.0**).
+ships (currently **0.6.0**).
+
+- **0.6.0** — a click is real mouse input, sent through `chrome.debugger`
+  (mouse moved, pressed, released at the element's centre), so a sign-in
+  button that opens a popup, or any control that needs user activation or
+  checks `isTrusted`, works, in cross-origin iframes too; a click by screenshot
+  coordinates may now land inside an iframe. Needs the new `debugger`
+  permission: reloading an unpacked extension takes it without a prompt. See
+  **Real clicks** below. An older build still clicks (with script events, and
+  the result says to reload).
 
 - **0.5.0** — a click no longer activates a button through a cookie or consent
   overlay (the covering element is named, with its id); `changed` also sees

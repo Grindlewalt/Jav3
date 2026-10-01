@@ -84,14 +84,27 @@ Install and pairing steps are in `clients/jav3-browser/README.md`. Then grant it
 per project under **Settings → Browser use**: **Read**, and **Act** to click and
 type. It works only in its own window, asks you before it first uses each site,
 and shows a notification with **Cancel** for each action. The agent can click by
-element id, or by x, y on a `browser_screenshot_tab` image; it never types into
-password fields.
+element id, or by x, y on a `browser_screenshot_tab` image (also inside an
+iframe); it never types into password fields.
+
+A click is real mouse input (extension 0.6.0+), so a sign-in button that opens
+a popup, like "Sign in with Google", works. To send it the extension attaches
+Chrome's debugger to that one tab for the click and detaches right after:
+Chrome shows **"Jav3 Browser started debugging this browser"** above Jav3's tab
+for about half a second each time, and the result of every click reports how
+long. Press **Cancel** on that bar and the action stops and Jav3 pauses.
+Untick **Click with real mouse input** in the extension's Options to avoid the
+bar; clicks are then script events, which many third-party sign-in buttons
+ignore. Typing, hover and keys are still script events.
 
 **After updating Jav3, reload the extension.** It does not update itself. Open
 `chrome://extensions` (Brave: `brave://extensions`), turn on Developer mode,
 press **Reload** on Jav3. Settings shows each browser's extension version and
 warns when it is older than the build your server ships; an action that needs
-a newer build fails with the same instructions.
+a newer build fails with the same instructions. A build older than 0.6.0 still
+clicks, with script events: the agent is told to ask you to reload it when such
+a click changed nothing, and a click by coordinates into an iframe is refused
+with the same instruction.
 
 ## When the screen is locked
 
