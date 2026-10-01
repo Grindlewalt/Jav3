@@ -276,6 +276,13 @@ async def serve() -> None:
         asyncio.ensure_future(shell.serve())
     except Exception as e:  # noqa: BLE001
         print(f"GUEST-SHELL-SERVER: not started ({e})", flush=True)
+    # the live desktop listener (display.py): same best-effort rule, and it only
+    # starts Xvnc when a viewer asks, so a box nobody watches pays nothing
+    try:
+        from . import display
+        asyncio.ensure_future(display.serve())
+    except Exception as e:  # noqa: BLE001
+        print(f"GUEST-DISPLAY-SERVER: not started ({e})", flush=True)
     while True:
         conn, _ = await loop.sock_accept(s)
         conn.setblocking(False)
