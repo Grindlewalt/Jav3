@@ -20,7 +20,7 @@
 │                                                                              │║        ██    ██    ██      ██    ██  █│                                      │
 │                                                                              │║          ████      ██      ██      ██ │                                      │
 │                                                                              │║                                       │                                      │
-│                                                                              │║        operator @ http://127.0.0.1:553│                                      │
+│                                                                              │║        operator @ http://127.0.0.1:NNN│                                      │
 │                                                                              │║        files and chats go to ⌂ homelab│                                      │
 │  █                                                                           │║                                       │                                      │
 │  █  tests/test_sync.py::test_retry fails about one run in five. Find out     │║        /help       commands and keys  │                                      │

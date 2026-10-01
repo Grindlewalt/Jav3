@@ -93,7 +93,8 @@ PAGES = {
 def normalise(text: str) -> str:
     """What differs per run, at the same width: the fake's free port (the home page shows
     it), the throw-away config dir (/help shows where themes go) and the spinner frame."""
-    text = re.sub(r"127\.0\.0\.1:\d{5}", "127.0.0.1:NNNNN", text)
+    # (a drawer or a panel's edge can cut the port short: as many Ns as digits are shown)
+    text = re.sub(r"(127\.0\.0\.1:)(\d{1,5})", lambda m: m.group(1) + "N" * len(m.group(2)), text)
     # a spinner frame depends on when the screen was read: every frame reads as the first
     text = re.sub("[\u2800-\u28ff]", "\u280b", text)
     return re.sub(r"/tmp/tui-\w{8}/", "/tmp/tui-XXXXXXXX/", text)
