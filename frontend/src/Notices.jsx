@@ -109,11 +109,11 @@ export function useNotices(enabled) {
         title: `commit request · ${g.project}`, body: g.message,
       }))
       // a turn is blocked on these for a minute at most: the card goes
-      // straight to the ask in Settings → Computer use
+      // straight to the ask in Settings → Access → Computer use
       const oldShell = new Set((p.desk_shell || []).map((s) => s.id))
       ;(d.desk_shell || []).filter((s) => !oldShell.has(s.id)).forEach((s) => push({
         title: `shell on ${s.name} · waiting for you`, body: s.command,
-        to: '/settings#desk', life: 60,
+        to: '/settings/access#desk', life: 60,
       }))
       const oldSched = new Set((p.schedules || []).map((s) => s.id))
       ;(d.schedules || []).filter((s) => !oldSched.has(s.id)).forEach((s) => push({

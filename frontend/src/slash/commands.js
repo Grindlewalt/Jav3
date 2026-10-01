@@ -50,6 +50,13 @@ const SECURITY_TABS = [
   ['secrets', 'secrets and key grants'],
 ]
 
+const SETTINGS_TABS = [
+  ['models', 'API providers and models'],
+  ['alerts', 'notifications and do not disturb'],
+  ['access', 'devices, computer use, browser use, permission rules'],
+  ['system', 'backup, music server, log out'],
+]
+
 const VMS_TABS = [
   ['boxes', 'running and reserved boxes'],
   ['images', 'variants and versions'],
@@ -199,12 +206,8 @@ export const COMMANDS = [
   {
     name: 'provider', aliases: ['providers'], busyOk: true,
     help: 'add a provider’s API key / base URL (Settings)',
-    run: (_, env) => {
-      env.navigate('/settings')
-      // the Settings page's provider card carries id="providers"
-      setTimeout(() => document.getElementById('providers')
-        ?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 120)
-    },
+    // the provider card carries id="providers"; the Settings page scrolls to it
+    run: (_, env) => { env.navigate('/settings#providers') },
   },
   {
     name: 'agent', usage: '[slug]',
@@ -424,9 +427,14 @@ export const COMMANDS = [
     },
   },
   {
-    name: 'settings', busyOk: true,
-    help: 'the Settings page',
-    run: (_, env) => { env.navigate('/settings') },
+    name: 'settings', usage: '[models|alerts|access|system]', busyOk: true,
+    help: 'the Settings page, or one of its tabs',
+    args: () => SETTINGS_TABS.map(([value, meta]) => ({ value, label: value, meta })),
+    run: (arg, env) => {
+      const tab = (arg || 'models').toLowerCase()
+      need(SETTINGS_TABS.some(([t]) => t === tab), `no Settings tab “${arg}”`)
+      env.navigate(tab === 'models' ? '/settings' : `/settings/${tab}`)
+    },
   },
   {
     name: 'memory', busyOk: true,
