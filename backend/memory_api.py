@@ -157,7 +157,7 @@ async def delete_note(name: str):
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="no such note") from None
     await audit("memory_deleted", "info", f"memory note '{name}' deleted by the operator",
-                {"note": name, "by": "operator", "trash_id": tid})
+                {"note": name, "by": "operator", "trash_id": tid}, by_operator=True)
     return {"ok": True, "name": name, "trash_id": tid}
 
 
@@ -202,7 +202,7 @@ async def approve(name: str, body: Approve | None = None):
             detail="the note was edited after this proposal began; the approval would "
                    "overwrite that edit. Reject it, or approve with force") from None
     await audit("memory_approved", "info", f"proposed change to note '{name}' approved",
-                {"note": name, "by": "operator"})
+                {"note": name, "by": "operator"}, by_operator=True)
     return {"ok": True, "name": name}
 
 
@@ -229,7 +229,8 @@ async def held_files(project: str | None = None):
 async def approve_held(slug: str, item_id: str, body: Approve | None = None):
     body = body or Approve()
     try:
-        path = await alwaysloaded.approve(slug, item_id, sha256=body.sha256, force=body.force)
+        path = await alwaysloaded.approve(slug, item_id, sha256=body.sha256, force=body.force,
+                                          by_operator=True)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="no held change with that id") from None
     except alwaysloaded.HeldChanged:
@@ -252,7 +253,7 @@ async def approve_held(slug: str, item_id: str, body: Approve | None = None):
 
 @router.post("/held-files/{slug}/{item_id}/reject")
 async def reject_held(slug: str, item_id: str):
-    path = await alwaysloaded.reject(slug, item_id)
+    path = await alwaysloaded.reject(slug, item_id, by_operator=True)
     if path is None:
         raise HTTPException(status_code=404, detail="no held change with that id")
     return {"ok": True, "project": slug, "path": path}

@@ -267,13 +267,15 @@ async def set_persist(slug: str, body: SetPersist, user: dict = Depends(require_
                 db, kind="persist_approved", severity="warn", project=slug,
                 summary=f"{who} approved a persistent /persist disk in the guest "
                         f"VM for '{slug}'",
-                detail={"by": who, "cap_bytes": persist.cap_bytes()})
+                detail={"by": who, "cap_bytes": persist.cap_bytes()},
+                actor=security.OPERATOR)
         else:
             await security.raise_event(
                 db, kind="persist_revoked", severity="info", project=slug,
                 summary=f"{who} revoked /persist for '{slug}'"
                         + (" and deleted its disk" if deleted else ""),
-                detail={"by": who, "deleted": deleted, "delete_error": delete_error})
+                detail={"by": who, "deleted": deleted, "delete_error": delete_error},
+                actor=security.OPERATOR)
     finally:
         await db.close()
     view = await _persist_view(slug)

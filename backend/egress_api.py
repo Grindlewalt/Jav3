@@ -196,14 +196,16 @@ class RevokeBody(BaseModel):
 
 
 @router.post("/allowlist/revoke")
-async def revoke(body: RevokeBody):
+async def revoke(body: RevokeBody, user: dict = Depends(require_user)):
     db = await get_db()
     try:
         if body.id is not None:
             res = await egress.revoke_auto(db, body.id)
         else:
             res = await egress.remove_host(db, body.project, body.host,
-                                           which="deny" if body.list == "deny" else "allow")
+                                           which="deny" if body.list == "deny" else "allow",
+                                           actor=str(user.get("username") or "operator"),
+                                           by_operator=True)
     finally:
         await db.close()
     if not res.get("ok"):
@@ -271,13 +273,15 @@ async def get_policy(slug: str):
 
 
 @router.put("/policy/{slug}")
-async def put_policy(slug: str, body: PolicyBody):
+async def put_policy(slug: str, body: PolicyBody, user: dict = Depends(require_user)):
     db = await get_db()
     try:
         if body.allow is None and body.deny is None and body.mode is not None:
             res = await egress.set_policy(db, slug, mode=body.mode,
                                           inherit_general=body.inherit_general,
-                                          hosts=body.hosts or [])
+                                          hosts=body.hosts or [],
+                                          actor=str(user.get("username") or "operator"),
+                                          by_operator=True)
         else:
             res = await egress.set_lists(db, slug, allow=body.allow, deny=body.deny)
     finally:
@@ -302,7 +306,7 @@ async def promote_to_profile(slug: str, body: PromoteBody, user: dict = Depends(
         res = await egress.promote_to_profile(
             db, slug, body.host, body.profile_id,
             which="deny" if body.list == "deny" else "allow",
-            actor=str(user.get("username") or "operator"))
+            actor=str(user.get("username") or "operator"), by_operator=True)
     finally:
         await db.close()
     if not res.get("ok"):
@@ -336,7 +340,8 @@ async def put_lan(slug: str, body: LanBody, user: dict = Depends(require_user)):
     db = await get_db()
     try:
         res = await lanaccess.set_(db, slug, enabled=body.enabled, allow=body.allow,
-                                   actor=str(user.get("username") or "operator"))
+                                   actor=str(user.get("username") or "operator"),
+                                   by_operator=True)
     finally:
         await db.close()
     if not res.get("ok"):
@@ -456,7 +461,7 @@ async def allow_process(eid: int, body: BaselineBody,
             db, kind="proc_baseline_changed", severity="info",
             summary=f"You allowed {what} in every box's process baseline",
             detail={"scope": body.scope, "exe": entry["exe"], "unit": unit,
-                    "from_event": eid, "acknowledged": n})
+                    "from_event": eid, "acknowledged": n}, actor=security.OPERATOR)
         await security.acknowledge(db, audit)
         return {"ok": True, **entry, "acknowledged": n}
     finally:
@@ -492,7 +497,8 @@ async def remove_operator_baseline(body: BaselineRemoveBody):
         audit = await security.raise_event(
             db, kind="proc_baseline_changed", severity="info",
             summary=f"You took {what} off the allowed-process list",
-            detail={"scope": "remove", "exe": body.exe, "unit": body.unit})
+            detail={"scope": "remove", "exe": body.exe, "unit": body.unit},
+            actor=security.OPERATOR)
         await security.acknowledge(db, audit)
         return {"ok": True}
     finally:

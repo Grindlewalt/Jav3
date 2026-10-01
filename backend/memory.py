@@ -404,7 +404,8 @@ def notify_pending(name: str, proposal: bool = False) -> None:
         pass
 
 
-async def audit(kind: str, severity: str, summary: str, detail: dict | None = None) -> None:
+async def audit(kind: str, severity: str, summary: str, detail: dict | None = None,
+                *, by_operator: bool = False) -> None:
     """One security event for something an agent (or the operator) did to memory.
     Best-effort: the action stands even if the alert cannot be written. Skipped
     in an incognito turn, where the notes dir is a throwaway. Names the run that
@@ -419,7 +420,8 @@ async def audit(kind: str, severity: str, summary: str, detail: dict | None = No
         try:
             await security.raise_event(
                 db, kind=kind, severity=severity, summary=summary,
-                detail={**(detail or {}), "conversation_id": runtime.conversation_id.get()})
+                detail={**(detail or {}), "conversation_id": runtime.conversation_id.get()},
+                actor=security.OPERATOR if by_operator else None)
         finally:
             await db.close()
     except Exception:  # noqa: BLE001 — never fail the memory action over its alert

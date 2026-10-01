@@ -243,7 +243,8 @@ def shell_offered() -> bool:
 # --- security events ---------------------------------------------------------------
 
 async def _event(kind: str, summary: str, *, severity: str = "warn",
-                 detail: dict | None = None, dedup: tuple | None = None) -> None:
+                 detail: dict | None = None, dedup: tuple | None = None,
+                 by_operator: bool = False) -> None:
     """One security event. `dedup` names a burst: the same key inside
     EVENT_DEDUP_S raises nothing (a click storm must not bury the queue)."""
     if dedup is not None:
@@ -256,7 +257,8 @@ async def _event(kind: str, summary: str, *, severity: str = "warn",
         db = await get_db()
         try:
             await security.raise_event(db, kind=kind, severity=severity,
-                                       summary=summary, detail=detail)
+                                       summary=summary, detail=detail,
+                                       actor=security.OPERATOR if by_operator else None)
         finally:
             await db.close()
     except Exception:  # noqa: BLE001 — an alert must never break the action path
@@ -530,14 +532,15 @@ async def disconnect(device_id: int, reason: str = "stopped") -> int:
     return sum(chat._stop(cid) for cid, at in d.turns.items() if now - at < 300)
 
 
-async def stop(device_id: int, by: str = "") -> dict:
+async def stop(device_id: int, by: str = "", by_operator: bool = False) -> dict:
     """Settings' Stop button: every grant off (so a reconnecting client can do
     nothing until the operator turns them back on), then kill."""
     await set_grants(device_id, screen=False, input=False, shell="off")
     name = _desks[device_id].name if device_id in _desks else str(device_id)
     stopped = await disconnect(device_id, "stopped from Settings")
     await _event("desk_killed", f"computer use on '{name}' stopped by {by or 'operator'}",
-                 detail={"device_id": device_id, "stopped_turns": stopped, "by": by})
+                 detail={"device_id": device_id, "stopped_turns": stopped, "by": by},
+                 by_operator=by_operator)
     return {"ok": True, "stopped_turns": stopped}
 
 
