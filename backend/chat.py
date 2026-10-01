@@ -1938,8 +1938,14 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
 RESUME_MESSAGE = "Continue from where the previous turn stopped."
 
 
+class ResumeRequest(BaseModel):
+    # which browser tab is asking, as on ChatRequest; anything else is ignored
+    tab: str | None = None
+
+
 @router.post("/chat/{conversation_id}/resume")
-async def resume_chat(conversation_id: int, actor: dict = Depends(require_actor)):
+async def resume_chat(conversation_id: int, body: ResumeRequest | None = None,
+                      actor: dict = Depends(require_actor)):
     """Pick up a chat whose last turn died (guest crash, lost connection,
     provider error): sends RESUME_MESSAGE as the next message and streams the
     turn like POST /api/chat. The model's history carries the dead turn's tool
@@ -1970,7 +1976,8 @@ async def resume_chat(conversation_id: int, actor: dict = Depends(require_actor)
                 status_code=409,
                 detail="the last turn did not fail, so there is nothing to resume")
         return await _post_chat(
-            ChatRequest(message=RESUME_MESSAGE, conversation_id=conversation_id), actor)
+            ChatRequest(message=RESUME_MESSAGE, conversation_id=conversation_id,
+                        tab=body.tab if body else None), actor)
     finally:
         _posting.discard(conversation_id)
 

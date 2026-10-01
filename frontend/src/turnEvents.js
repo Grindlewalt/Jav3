@@ -134,7 +134,7 @@ export function stepCount(parts = []) {
 // every row of a long run with it.
 export function failTurn(messages, message, now = Date.now()) {
   const i = streamingIndex(messages)
-  const err = { role: 'error', content: message }
+  const err = { role: 'error', content: message, failed: true }   // failed: resume.js
   if (i === -1) return [...messages, err]
   const m = messages[i]
   const parts = m.parts || []

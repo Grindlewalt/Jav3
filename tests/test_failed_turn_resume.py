@@ -389,7 +389,9 @@ async def test_resume_sends_the_fixed_message_and_the_model_sees_the_steps(clien
     seen = []
     monkeypatch.setattr(chat_mod, "guest_turn", _guest(seen, text="picked it up"))
 
-    r = await client.post(f"/api/chat/{cid}/resume")
+    # the web posts its usual chat body (and its tab id); the endpoint reads only the tab
+    r = await client.post(f"/api/chat/{cid}/resume", json={
+        "message": "ignored", "conversation_id": cid, "ephemeral": False, "tab": "t1"})
     await _settle(cid)
 
     assert r.status_code == 200
