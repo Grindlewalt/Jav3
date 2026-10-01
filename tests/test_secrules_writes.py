@@ -23,7 +23,6 @@ from backend.config import settings
 @pytest.fixture
 async def db(tmp_env):
     await db_mod.init_db()
-    writes._created.clear()
     writes._mods.clear()
     writes._seen_mods.clear()
     security._pings.clear()
@@ -154,11 +153,43 @@ async def test_a_committed_file_this_run_created_is_still_its_own_scratch(db, ru
     assert rows["u.mjs"][2] == 0 and rows["u.mjs"][3] is None
 
 
-async def test_the_log_remembers_a_file_a_restart_forgot(db, run7):
-    await writes.apply_write("proj", "m.py", b"import socket\n")   # a new_file flag
-    writes._created.clear()                                        # a restart
+async def test_a_file_a_run_made_is_remembered_across_restarts(db, run7):
+    """Noted in the database, flag or no flag: a run swept away scratch files it
+    made days (and a restart) earlier."""
+    await writes.apply_write("proj", "plain.mjs", b"let x = 1\n")      # no flag at all
+    await writes.apply_write("proj", "m.py", b"import socket\n")       # a new_file flag
+    assert await writes._created_here("proj", "plain.mjs") is True
     assert await writes._created_here("proj", "m.py") is True
     assert await writes._created_here("proj", "other.py") is False
+    # an overwrite of a file that was already there is not a creation
+    (settings.projects_dir / "proj" / "old.mjs").write_text("let y = 1\n")
+    await writes.apply_write("proj", "old.mjs", b"let y = 2\n")
+    assert await writes._created_here("proj", "old.mjs") is False
+    # another conversation did not make it
+    tok = runtime.conversation_id.set(8)
+    try:
+        assert await writes._created_here("proj", "plain.mjs") is False
+    finally:
+        runtime.conversation_id.reset(tok)
+    # a flag from before the table existed still counts
+    await db.execute("DELETE FROM write_created")
+    await db.commit()
+    assert await writes._created_here("proj", "m.py") is True
+    assert await writes._created_here("proj", "plain.mjs") is False
+
+
+async def test_a_scratch_file_with_no_flag_of_its_own_is_still_this_runs(db, run7):
+    """The Pi's case: a scratch file that tripped nothing when it was written
+    (no flag, so no new_file mark), committed by a later sweep, removed by the
+    same conversation days later."""
+    _git("init", "-q")
+    (settings.projects_dir / "proj" / "keep.txt").write_text("x\n")
+    _commit_all()
+    await writes.apply_write("proj", "tests/_i14diag.mjs", ASSERTS.encode())
+    _commit_all("a sweep that took the scratch file along")
+    await writes.apply_delete("proj", "tests/_i14diag.mjs")
+    [row] = await _flags(db, "assertion_removed")
+    assert row[2:4] == (1, "rule") and "this run" in row[4]
 
 
 async def test_when_git_cannot_answer_a_removal_alerts(db, monkeypatch):
@@ -230,6 +261,21 @@ async def test_a_module_the_project_already_imports_is_normal(db):
     assert [(r[0], r[2], r[3]) for r in rows] == [("routes.py", 1, "rule"),
                                                   ("web/scene.js", 1, "rule")]
     assert "already imported elsewhere" in rows[0][4]
+
+
+async def test_a_module_the_project_itself_defines_is_not_outside_code(db):
+    root = settings.projects_dir / "proj"
+    (root / "csv2md.py").write_text("def convert(x):\n    return x\n")
+    (root / "server").mkdir()
+    (root / "server" / "app.py").write_text("x = 1\n")
+    await writes.apply_write("proj", "test_csv2md.py", b"import csv2md\nimport pytest\n")
+    await writes.apply_write("proj", "tests/test_app.py", b"import server\n")
+    await writes.apply_write("proj", "m2.py", b"x = 1\n")                # defined by a write
+    await writes.apply_write("proj", "tests/test_m2.py", b"import m2\n")
+    rows = await _flags(db, "new_import")
+    # pytest is the first outside module: it alerts; the project's own names do not
+    assert [(r[0], r[2]) for r in rows] == [("test_csv2md.py", 0), ("tests/test_app.py", 1),
+                                            ("tests/test_m2.py", 1)]
 
 
 async def test_the_first_import_of_a_module_alerts_and_the_next_file_is_normal(db):

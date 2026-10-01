@@ -45,11 +45,10 @@ PROTECTED = {".staging", ".git", ".context.json"}
 
 # --- what diffgate.judge needs to know -----------------------------------------
 # Files this run created: the removal of a file the run itself made is its own
-# scratch work. Kept per (project, conversation); a restart forgets, and the log
-# (a new_file flag from the same conversation) remembers what it can.
-_CREATED_RUNS = 200
-_CREATED_PER_RUN = 5000
-_created: dict[tuple[str, int], set[str]] = {}
+# scratch work, whenever it clears it away (on the Pi a run swept up scratch
+# files it had made four days earlier, after a restart). Each file a write
+# creates is noted per (project, conversation) in `write_created` (db.py,
+# _migrate_secrules); the log's new_file flags remember what predates it.
 
 
 def _pkey(slug: str) -> str:
@@ -58,17 +57,22 @@ def _pkey(slug: str) -> str:
     return str(settings.projects_dir / slug)
 
 
-def _note_created(slug: str, rel: str) -> None:
+async def _note_created(slug: str, rel: str) -> None:
     cid = runtime.conversation_id.get()
     if cid is None:
         return
-    files = _created.get((_pkey(slug), cid))
-    if files is None:
-        if len(_created) >= _CREATED_RUNS:
-            _created.pop(next(iter(_created)))
-        files = _created[(_pkey(slug), cid)] = set()
-    if len(files) < _CREATED_PER_RUN:
-        files.add(rel)
+    try:
+        from .db import get_db
+        db = await get_db()
+        try:
+            await db.execute("INSERT OR IGNORE INTO write_created"
+                             "(project_slug, conversation_id, path) VALUES (?,?,?)",
+                             (slug, cid, rel))
+            await db.commit()
+        finally:
+            await db.close()
+    except Exception:  # noqa: BLE001 — a note is never worth failing a write
+        pass
 
 
 async def _created_here(slug: str, rel: str) -> bool:
@@ -76,12 +80,15 @@ async def _created_here(slug: str, rel: str) -> bool:
     cid = runtime.conversation_id.get()
     if cid is None:
         return False
-    if rel in _created.get((_pkey(slug), cid), ()):
-        return True
     try:
         from .db import get_db
         db = await get_db()
         try:
+            async with db.execute(
+                    "SELECT 1 FROM write_created WHERE project_slug = ? "
+                    "AND conversation_id = ? AND path = ?", (slug, cid, rel)) as cur:
+                if await cur.fetchone():
+                    return True
             async with db.execute(
                     "SELECT 1 FROM security_events WHERE kind = 'write_flag' "
                     "AND project_slug = ? AND json_extract(detail, '$.path') = ? "
@@ -115,7 +122,9 @@ async def _in_head(slug: str, rel: str) -> bool | None:
 
 # the outside modules a project already imports, from its own files (rescanned at
 # most every _MODS_TTL seconds) plus every one a write has shown since this
-# process started: "already imported elsewhere in the project" is not new
+# process started: "already imported elsewhere in the project" is not new. The
+# names the project itself defines (csv2md.py, a package dir) count as known too:
+# a test importing its own module is not a new dependency.
 _MODS_TTL = 30.0
 _MODS_FILES = 4000
 _MODS_FILE_BYTES = 512 * 1024
@@ -131,9 +140,11 @@ def _scan_project_modules(slug: str) -> set[str]:
     n = 0
     for dirpath, dirnames, filenames in os.walk(settings.projects_dir / slug):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        out.update(dirnames)                 # a package the project itself holds
         for fn in filenames:
             if diffgate.ext_of(fn) not in _SRC_EXT:
                 continue
+            out.add(fn.rsplit(".", 1)[0])    # a module it defines: not outside code
             n += 1
             if n > _MODS_FILES:
                 return out
@@ -157,6 +168,8 @@ async def _known_modules(slug: str) -> set[str]:
 
 def _note_modules(slug: str, rel: str, text: str) -> None:
     mods = diffgate.modules_of(text, rel)
+    if diffgate.ext_of(rel) in _SRC_EXT:
+        mods.add(Path(rel).stem)             # a module this project now defines
     if mods:
         _seen_mods.setdefault(_pkey(slug), set()).update(mods)
         if len(_seen_mods) > 500:
@@ -260,7 +273,7 @@ async def apply_write(slug: str, rel: str, content: bytes) -> list[str]:
     dest.write_bytes(content)
     dest.chmod(0o644)  # agent-written bytes never carry exec bits
     if not existed:
-        _note_created(slug, rel)
+        await _note_created(slug, rel)
     _note_modules(slug, rel, new_text)
 
     for reason, f in verdicts:

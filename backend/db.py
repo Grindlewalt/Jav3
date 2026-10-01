@@ -1016,6 +1016,16 @@ async def _migrate_secrules(db: aiosqlite.Connection) -> None:
     await _add_columns(db, "security_events", (
         ("rule", "TEXT"),
     ))
+    # the files each conversation created (backend/writes.py): removing one of
+    # those is the run clearing its own scratch work. Notes older than a month go.
+    await db.execute(
+        "CREATE TABLE IF NOT EXISTS write_created ("
+        " project_slug TEXT NOT NULL,"
+        " conversation_id INTEGER NOT NULL,"
+        " path TEXT NOT NULL,"
+        " created_at TEXT NOT NULL DEFAULT (datetime('now')),"
+        " PRIMARY KEY (project_slug, conversation_id, path))")
+    await db.execute("DELETE FROM write_created WHERE created_at < datetime('now', '-30 days')")
 
 
 async def _migrate_boxlog(db: aiosqlite.Connection) -> None:
