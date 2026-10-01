@@ -85,6 +85,10 @@ baseline_b64=$(base64 -w0 <<'SH'
 emit() { printf 'JAV3-BASELINE %s %s\n' "$1" "$(base64 -w0)" > /dev/console; }
 dpkg-query -W -f '${Package}\t${Version}\n' | emit dpkg
 systemctl list-unit-files --state=enabled --no-legend 2>/dev/null | awk '{print $1}' | emit units_enabled
+# every .service the distribution ships (timer-started ones like apt-listchanges,
+# fstrim and man-db are never "enabled"): processes in those units are the OS
+find /usr/lib/systemd/system /lib/systemd/system -maxdepth 1 \( -type f -o -type l \) \
+  -name '*.service' -printf '%f\n' 2>/dev/null | sort -u | emit units_vendor
 find / -xdev -perm -4000 -type f 2>/dev/null | emit setuid
 ps -eo comm= | sort -u | emit processes
 { ss -ltnupH 2>/dev/null || true; } | emit listening
@@ -240,7 +244,7 @@ for raw in open(src, "rb").read().decode("utf-8", "replace").splitlines():
         ended = True
         continue
     parts = line.split(" ", 2)
-    if len(parts) != 3 or parts[1] not in ("dpkg", "units_enabled", "setuid",
+    if len(parts) != 3 or parts[1] not in ("dpkg", "units_enabled", "units_vendor", "setuid",
                                            "processes", "listening"):
         continue
     try:

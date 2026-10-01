@@ -847,10 +847,11 @@ def _sanitize_baseline(bl) -> dict:
         if isinstance(d, dict):
             out[key] = {_s(k, 120): _s(v, 80) for k, v in list(d.items())[:5000]
                         if _s(k, 120)}
-    for key in ("units_enabled", "setuid", "listening", "processes"):
+    for key in ("units_enabled", "units_vendor", "setuid", "listening", "processes"):
         d = bl.get(key)
         if isinstance(d, list):
-            out[key] = [x for x in (_s(v, 300) for v in d[:2000]) if x]
+            out[key] = [x for x in (_s(v, 300) for v in d[:4000 if key == "units_vendor"
+                                                            else 2000]) if x]
     out["captured_at"] = _s(bl.get("captured_at"), 40)
     return out
 
