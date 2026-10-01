@@ -3,7 +3,7 @@
 A box on the `desktop` image can show its screen in the web app: a Work window
 (`+` menu, `/desktop`, or `/window desktop`) that watches it live. Three steps:
 P1 **watch only** (the window), P2 **the agent drives it** with the desk tool
-(below), P3 lets the operator click in to take over and hand back (not built yet).
+(below), P3 **the operator clicks in to take over and hands back** (below).
 
 KVM only. The desktop is an image layer (`vm/images/desktop.recipe`); there is no
 Docker image of it, and a Docker box says so.
@@ -33,13 +33,16 @@ Docker image of it, and a Docker box says so.
   1280x800 on purpose: the agent's own screenshots are that size. Every process
   runs under `memguard.confine`, so when memory runs out the desktop dies, not the
   run-turn server. The tmux session `desk` outlives the screen.
-- **Watch-only is enforced on the server.** Every client byte goes through
-  `display_api.RfbInputFilter`, which parses the RFB stream and drops KeyEvent,
-  PointerEvent, ClientCutText, QEMU extended key events, SetDesktopSize and xvp;
-  an unknown message type ends the session. Xvnc also has the clipboard off both
-  ways and ignores resize requests.
+- **A window is a view until it takes control, and that is enforced on the server.**
+  Every client byte goes through `display_api.RfbInputFilter`, which parses the RFB
+  stream and drops KeyEvent, PointerEvent, ClientCutText, QEMU extended key events,
+  SetDesktopSize and xvp unless the `allow` callback says yes (key and pointer for the
+  holder of control only, see "The operator takes over"; never the clipboard, resize
+  or xvp); an unknown message type ends the session. Xvnc also has the clipboard off
+  both ways and ignores resize requests.
 - State goes through the shared stream (topic `vm-boxes`): `{"type":"display",
-  "box_id", "viewers"|"state"}`. The window never opens its own EventSource.
+  "box_id", "viewers"|"state"|"control"|"agent"}`. The window never opens its own
+  EventSource.
 
 ## Guest protocol (port 5559)
 
@@ -127,24 +130,59 @@ project), both baked into the desktop image's `/opt/jav3/py` venv (`httpx`, `tex
 The fake serves seeded chats, a running turn, boxes and security rows; `jav3 --server
 127.0.0.1:8099` names it too. The screenshot shows the TUI; `tmux capture-pane` reads it.
 
-### For P3
+## The operator takes over (P3)
 
-- Control must pause the agent: the agent's input and the operator's must not interleave.
-  The lever that exists is `desk.set_grants(device_id, input=False)` (pushed live to the
-  seat, and `desk.act` refuses at once with "input is off for 'sandbox'"); the
-  device id is `boxdesk.state(box_id)["device_id"]` (also in the display status as
-  `desk`). Turn it back on at hand-back. `desk.stop(device_id)` is the Settings Stop
-  (all grants off, seat dropped, in-flight turns stopped).
-- `RfbInputFilter(allow)` takes a callback per message kind (`key`, `pointer`,
-  `cut_text`); `display_api.splice(ws, box, allow)` passes it through. Give it one
-  that answers for whoever holds control. `resize` and `xvp` are never allowed.
-  Xvnc's own `-AcceptKeyEvents` / `-AcceptPointerEvents` are on, so nothing in the
-  guest changes.
-- The guest status now carries `desks` (agent connections) and `status()["desk"]` is
-  `{connected, device_id, error}`; a watching operator holds the display through
-  `viewer_up`, so P3 needs no new hold.
-- The agent's `desk_actions` rows are per device, so the take-over's own input can be
-  audited as one more actor without a new table.
+Control is a field on the box's desktop: `agent` (the default) or `operator`. The state
+lives in `backend/vm/boxdesk.py` (`take`, `hand_back`, `admit`, `control_state`); the
+routes and the socket live in `backend/vm/display_api.py`.
+
+    window header:  ● agent driving  |  YOU have control: agent paused 00:41  |  watching
+    above the screen:  Agent is driving · click the screen to take over   [Stop]
+    below the screen:  YOU have control: agent paused 00:41               [Hand back]
+
+- **Taking.** The first click (or key) on the screen calls
+  `POST /api/vm/boxes/{id}/display/control {"holder":"operator","viewer":<id>}`. The click
+  is consumed (it is not sent to the box). `viewer` is the id the window gave its own
+  noVNC session (`?viewer=` on the WebSocket, random per window); the server refuses an id
+  that is not connected (409), and a second window while one holds control (409, "another
+  window holds control"). A viewer that names no id can watch and never take.
+- **Handing back.** `POST .../display/control {"holder":"agent"}` (the [Hand back] button),
+  or the holder's window staying gone for `boxdesk.GRACE_S` (10 s; reconnecting the same
+  window inside it keeps control). There is no idle hand-back: an operator who stops
+  typing still holds the desktop (decision 2026-10-01).
+- **Three locks** (each tested alone, tests/test_desktop_control.py):
+  1. `desk.act` refuses every input verb while `Desk.operator_since` is set: "the operator
+     has taken control of the sandbox desktop; stop and wait" (audited, no security event).
+     Screenshots stay allowed so the agent can watch.
+  2. The guest seat is told `input: false` (`desk.hold_for_operator`; every later grants
+     push, a Settings change included, keeps saying off while held; a seat that registers
+     during a hold starts paused). The `desk_grants` row is NOT rewritten, so a host restart
+     in the middle cannot leave the agent locked out, and a Settings Stop made during the
+     take-over (everything off) is not undone by the hand back.
+  3. The RFB filter admits key and pointer only from the holder's socket (`boxdesk.admit`);
+     the clipboard is never admitted, resize and xvp never asked.
+- **Hand back** also: lets go of keys and buttons the filter passed as pressed (the filter
+  remembers them: `RfbInputFilter.release_bytes`), restores the seat's real grants, sets
+  `Desk.frame = None` (the screen changed under the agent, so input needs a new
+  screenshot) and puts one line on the agent's next desk result: "the operator used this
+  desktop for N s: the screen has changed under you, ..." (first line of a normal result,
+  second line of an `error:` so the loop still reads the error; summed across take-overs).
+- **Audit.** `desk_actions` rows on the box's device, verb `operator_control`: `start`
+  `{phase, box, by}` and `end` `{phase, box, by, why, seconds, keys, pointers}`: COUNTS of
+  RFB key and pointer messages (every mouse move is one), never content, since passwords get
+  typed. `approver` is the operator's name. One quiet security event for the take-over
+  (`desk_operator_control`, info, `by_operator=True`, so it is filed acknowledged as "by you").
+- **Shared stream.** `{"type":"display","box_id","control":{holder,viewer,by,held_s}}` on
+  take and hand back; `{"type":"display","box_id","agent":{active_age_s,turns}}` (at most
+  every 3 s) when the agent acts, so the window can say "agent driving" for 30 s after its
+  last action without polling. The same two objects are in `GET .../display` as `control`
+  and `agent`. [Stop] posts the ordinary `/api/chat/{id}/stop` for each conversation in
+  `agent.turns` (those that acted in the last 2 minutes), after a confirm.
+- The guest needs nothing new: Xvnc already accepts key and pointer events.
+- Not covered (docs: SECURITY-RESIDUAL-RISK.md #24): the operator's keystrokes go into a box
+  the agent can read; guest RFB bytes reach noVNC in the operator's origin; the pause governs
+  the desk tool, not the box's shell (`xdotool` through `run_code`); an action in flight at
+  the moment of take-over finishes.
 
 ## Agents can already use it
 
@@ -172,3 +210,9 @@ Then restart the desktop box: one that booted before the deploy has no listener 
 (node-tested). `@novnc/novnc` is pinned and imported lazily (its own chunk, about
 180 kB, loaded when a screen is first shown). Its top-level await needs the build
 target in `vite.config.js` (es2022).
+
+The window starts with noVNC `viewOnly` and flips it off only while this window's id is the
+holder (`viewOf(ctl, viewerId, active)` in logic.js: `you` | `other` | `agent` |
+`watching`). A transparent layer over the screen takes the first click or key; the
+header badge, the bars and [Stop] read the same state. A window whose socket dropped while it
+held control shows the bar and `reconnect`; reconnecting inside the grace keeps control.

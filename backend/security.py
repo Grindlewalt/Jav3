@@ -119,7 +119,7 @@ KNOWN_KINDS = {
     "memory_deleted": "info", "memory_approved": "info", "memory_refused": "warn",
     "memory_proposed": "warn", "journal_unverified": "info",
     "desk_session": "info", "desk_killed": "warn", "desk_shell": "info",
-    "desk_refused": "warn", "desk_shell_refused": "warn",
+    "desk_refused": "warn", "desk_shell_refused": "warn", "desk_operator_control": "info",
     "browser_session": "info", "browser_killed": "warn", "browser_refused": "warn",
     "browser_paused": "warn", "browser_resumed": "info", "browser_blind": "warn",
     "browser_cancelled": "warn", "browser_site_allowed": "info",

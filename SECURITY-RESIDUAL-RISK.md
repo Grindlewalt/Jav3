@@ -743,6 +743,50 @@ a watched, policy-gated, cuttable pipe to the internet.
       proposal raises `memory_approved`. A proposal is rejected with one call; a tagged journal
       line is approved by editing the tag out, or deleted like any line.
 
+24. **The live desktop of a box: the operator can take it over (2026-10-01).**
+    A `desktop`-image box shows its screen in a Work window (noVNC) and the
+    agent drives the same screen with the `desk` tool (`computer="sandbox"`,
+    docs/desktop.md). The operator clicks the screen to take it over and hands
+    it back with a button; the agent is paused meanwhile. What holds: the
+    window is a view until control is taken, and the host parses every client
+    byte (`RfbInputFilter`) so only the socket of the window that holds control
+    gets key and pointer messages through, never the clipboard, never a resize
+    or power message; the agent's `desk` input verbs are refused by `act()`
+    and the guest seat is told input is off (screenshots stay allowed); the
+    seat's grants row is not rewritten, so a host restart cannot lock the
+    agent out; a take-over and its end are `desk_actions` rows with COUNTS of
+    key and pointer messages only, plus a quiet `by_operator` security event
+    (`desk_operator_control`); only `Hand back`, or the window staying gone
+    for 10 s, returns control (no idle timeout, by the operator's decision);
+    held keys and buttons are let go on the way out. What is not mitigated:
+    - **The operator's keystrokes go into a box the agent can read.** What is
+      typed in the desktop appears on a screen the agent screenshots and in an
+      xterm whose text it reads exactly (`tmux capture-pane -t desk`), and a
+      password typed there is in the model's context from its next look. The
+      window says "don't sign in to anything or type anything private here";
+      nothing enforces it, and the audit keeps counts, so the log itself is not
+      the leak. A secret the operator does type reaches whatever the agent then
+      does with the box, inside the egress policy.
+    - **Guest-to-browser RFB bytes are spliced opaque into noVNC, in the
+      operator's origin.** The host filters only the client half. A guest whose
+      display listener the agent controls can send the browser any server
+      message, so a parser bug in `@novnc/novnc` (pinned at 1.7.0, lazy-loaded)
+      or in the browser's image decoders is reachable from agent-controlled
+      bytes, in the page that holds the operator's session. The clipboard is
+      off both ways and the page uses no server-sent text, which narrows it, not
+      closes it.
+    - **The pause governs the `desk` tool, not the box's shell.** The agent's
+      `run_code` can still run `xdotool` or `tmux send-keys -t desk` against
+      `DISPLAY=:100` while the operator holds control, and type into their
+      terminal. An action in flight at the moment of take-over finishes.
+    - **A held desktop stays held.** The agent stays paused for as long as the
+      window is open, however idle; the operator can leave and return to a
+      stuck agent. The window id that names the holder is not a secret (any
+      logged-in session could name one): control is guarded by the cookie, the
+      same-origin gate and "one holder at a time", not by that id.
+    - **The counts are RFB messages, not clicks.** Every mouse move is a
+      pointer message, so the number says "was used", not how much.
+
 ## Residual-risk register (Certiv artifact)
 
 | Threat | Impact | Residual | After-controls posture |
@@ -774,6 +818,7 @@ a watched, policy-gated, cuttable pipe to the internet.
 | Browser use (`jav3-browser`) | Critical | **Medium** | Browser-scoped token (first-frame, socket only), per-browser per-project Read/Act grants (none by default), own unfocused window and own tabs only, per-site consent in the extension, action notification with Cancel, Pause, closed verb list checked both sides, read-before-act, secret-value and Jav3-host refusals (also for clicks by x, y and typing into the focused element, under the same per-site and cross-origin-frame consent), taint like web_read, audit. Residual = acting with the operator's sessions on allowed sites outside the egress proxy, page prompt injection steering granted Act, host-level (not page-level) consent., a page moving its layout after the screenshot a coordinate click uses, and page text that imitates element-list lines in `read_page`. |
 | Screenshots sent to a grounding model provider | High | **Medium** | Only when `desk_click(target=…)` is not settled by an element label, only to a model the operator enabled and pinned or ranked in Settings → Grounding, only after grant / ceiling / fresh-frame / unlocked checks; via the model gateway (host-side key, budgeted, metered); the model finder uses synthetic screens; the agent cannot choose the model, provider or request fields; the desk audit row keeps target, model and confidence. Residual = the whole screenshot, unredacted, reaches a third-party provider (automatic mode picks by hit rate, price and latency, not by trust), no per-image audit row, no re-check that the ranked model is still one the operator wants. |
 | Description-based clicking (`desk_click target=`) | High | **Medium** | Same gates as any coordinate click; label match first, unique only; "could not find" instead of a guess; the result says how the point was chosen and returns the after-screenshot; taint. Residual = on-screen text can steer the grounding model to a look-alike element; confidence is shown, never a threshold; label matching is by unique substring; the grounded point is not cross-checked against the accessibility tree; the screen may change between frame and click. |
+| Live desktop of a box, operator take-over (#24) | High | **Medium** | KVM `desktop` box only, started by the operator's click (RAM-budgeted). A window is a view until it takes control; the host parses client RFB and admits key / pointer only from the holder's socket, never clipboard, resize or power; the agent's `desk` input is refused while the operator holds it and the seat is told input is off (grants row untouched); `operator_control` audit rows with key / pointer counts only, a quiet `by_operator` event; hand back only by button or by the window staying gone 10 s; held keys released. Residual = the operator's keystrokes land in a box the agent reads, guest-controlled RFB bytes reach noVNC in the operator's origin, the pause does not cover the box's own shell (`xdotool` through `run_code`), and a held desktop stays held while the window is open. |
 | Wider `desk_open` app list | Medium | Low–Medium | Server accepts only client-reported names and http(s) URLs; client drops terminals and script runners by name and terminal-flagged `.desktop` entries; shell has its own grants. Residual = the exclusion is by name (IDEs with terminals, Emacs, IDLE, System Settings are offered), a keystroke reaches a terminal anyway with Input, and `desk-apps.json` entries are taken unfiltered. |
 | Captured model context (`backend/ctxstore.py`, on by default) | High | **Medium** | Host-side only; read route, switch and retention are cookie-session only; blobs age out after 7 days by default (1-30 chosen in Logs); images redacted. Residual: an unscrubbed, compressed second copy of everything the model saw (system prompt, memory, tool results) that outlives its chat (chat delete leaves it) and rides in the unencrypted DB backup (#22); incognito turns are excluded. |
 | `/local` chats (agent file + shell tools on the `jav3` client's machine) | Critical | **Medium** | Opt-in per chat at the client; the server can only ask over the turn's stream, the client executes. Writes, edits and commands wait for y / a (always, per kind, this session) / n at that keyboard; reads never ask and may reach any path the operator's user can. Only the actor that opened the chat may answer a call; unanswered calls time out (15 min) and die with stop; args carrying a stored secret are refused; results are capped, secret-scrubbed and taint the turn. Residual = a prompt-injected turn reading local files the operator never meant to share (they go to the model provider), and "always" for shell turning every later command in that session into an unattended one. |

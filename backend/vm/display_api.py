@@ -1,11 +1,16 @@
-"""The live desktop of a box, in the web app (P1: watch only).
+"""The live desktop of a box, in the web app (P1 watch, P3 take over).
 
   GET  /api/vm/boxes/{id}/display      status: can this box show a desktop, is it
-                                       up, what would starting it cost
+                                       up, what would starting it cost, who holds it
   POST /api/vm/boxes/{id}/display      the operator's explicit start: boots the box
                                        if it is stopped (RAM budget permitting) and
                                        starts the display in the guest
-  WS   /api/vm/boxes/{id}/display/ws   a noVNC session (subprotocol `binary`):
+  POST /api/vm/boxes/{id}/display/control
+                                       {"holder":"operator","viewer":<id>} takes the
+                                       desktop (pauses the agent); {"holder":"agent"}
+                                       hands it back
+  WS   /api/vm/boxes/{id}/display/ws?viewer=<id>
+                                       a noVNC session (subprotocol `binary`):
                                        cookie-authed, same-origin gated, pins the
                                        box for as long as it is open
 
@@ -13,21 +18,25 @@ Nothing here starts a box by itself: GET only reads and the WebSocket refuses a
 stopped box. The guest side is guest/backend/display.py (vsock :5559, the same
 newline-JSON hello, then raw RFB bytes); this module splices the browser to it.
 
-Watch-only is enforced HERE, not trusted to the browser: every client byte goes
-through RfbInputFilter, which drops key, pointer and clipboard messages unless the
-`allow` callback says yes. P1 never does. P3 passes a callback that answers for
-whoever holds control; nothing else in this file changes.
+Watching is the default and is enforced HERE, not trusted to the browser: every
+client byte goes through RfbInputFilter, which drops key, pointer and clipboard
+messages unless the `allow` callback says yes. The callback splice() builds asks
+boxdesk.admit: yes only for the socket of the window that holds control, and never
+the clipboard. Control itself (and the pause of the agent) lives in boxdesk.
 
 The desktop is a KVM layer: there is no Docker image of it (docs/docker-runtime.md),
 so a Docker box says so instead of failing later.
 """
 import asyncio
 import json
+import re
+import secrets
 import struct
 from collections import Counter
-from typing import Callable
+from typing import Callable, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket
+from pydantic import BaseModel
 
 from .. import bus
 from ..auth import COOKIE_NAME, require_user, user_from_token
@@ -44,6 +53,9 @@ CLOSE_UNAUTH, CLOSE_REFUSED, CLOSE_PROTOCOL, CLOSE_GUEST = 4401, 4409, 4400, 450
 
 # box id -> viewers connected now (for the panel's "2 watching" and the events)
 _viewers: dict[str, int] = {}
+# the id a window gives its own noVNC session (?viewer= on the WebSocket), so the
+# control route can name which socket holds control
+_VIEWER_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
 # --- the RFB client->guest filter ---------------------------------------------------
@@ -84,9 +96,31 @@ class RfbInputFilter:
     def __init__(self, allow: Callable[[str], bool] = watch_only):
         self.allow = allow
         self.dropped: Counter = Counter()
+        self.held_keys: set[int] = set()       # keysyms the guest was told are down
+        self.held_buttons = 0                  # the pointer button mask it was last told
+        self._pointer_at = (0, 0)
         self._buf = bytearray()
         self._stage = "version"
         self._skip = 0
+
+    def release_bytes(self) -> bytes:
+        """What lets go of every key and button this filter passed as pressed:
+        a hand back or a closed window must not leave Shift down in the box."""
+        out = b"".join(struct.pack(">BBHI", 4, 0, 0, k) for k in sorted(self.held_keys))
+        if self.held_buttons:
+            out += struct.pack(">BBHH", 5, 0, *self._pointer_at)
+        self.held_keys.clear()
+        self.held_buttons = 0
+        return out
+
+    def _track(self, kind: str, m: bytes) -> None:
+        if kind == KEY:
+            down, sym = ((m[1], struct.unpack(">I", m[4:8])[0]) if m[0] == 4
+                         else (struct.unpack(">H", m[2:4])[0], struct.unpack(">I", m[4:8])[0]))
+            (self.held_keys.add if down else self.held_keys.discard)(sym)
+        elif kind == POINTER:
+            self.held_buttons = m[1] & 0x7F
+            self._pointer_at = struct.unpack(">HH", m[2:6])
 
     # -- handshake ------------------------------------------------------------
     def _handshake(self) -> bytes:
@@ -194,6 +228,8 @@ class RfbInputFilter:
             if not drop:
                 if len(self._buf) < total:
                     break                              # a passing message arrives whole
+                if kind in (KEY, POINTER):             # an admitted key / pointer message
+                    self._track(kind, bytes(self._buf[:total]))
                 out += self._buf[:total]
                 del self._buf[:total]
                 continue
@@ -301,7 +337,8 @@ async def status(box, *, ask_guest: bool = True) -> dict:
            "state": "running" if running else "stopped",
            "session": "off" if running else "stopped",
            "viewers": _viewers.get(box.id, 0), "need_mb": need, "free_mb": free,
-           "fits": need <= free, "geometry": GEOMETRY, "watch_only": True,
+           "fits": need <= free, "geometry": GEOMETRY,
+           "control": boxdesk.control_state(box.id), "agent": boxdesk.agent_state(box.id),
            "guest": None, "note": None, "desk": boxdesk.state(box.id)}
     if why is None and running and ask_guest:
         try:
@@ -316,6 +353,7 @@ async def status(box, *, ask_guest: bool = True) -> dict:
                 if g.get("running"):
                     boxdesk.sync(box)          # the agent's seat (P2), if it has none yet
                     out["desk"] = boxdesk.state(box.id)
+                    out["agent"] = boxdesk.agent_state(box.id)
         except ConnectionError:
             out["session"] = "unavailable"
             out["note"] = ("the box does not answer on the desktop port: it was started "
@@ -369,6 +407,28 @@ async def display_start(box_id: str, user: dict = Depends(require_user)):
     return await status(box)
 
 
+class ControlBody(BaseModel):
+    holder: Literal["agent", "operator"]
+    viewer: str | None = None        # the window taking control (its ?viewer= id)
+
+
+@router.post("/{box_id}/display/control")
+async def display_control(box_id: str, body: ControlBody, user: dict = Depends(require_user)):
+    """The operator takes the desktop (the first click in the viewer) or hands it
+    back ([Hand back]). Taking pauses the agent's input; the viewer socket that
+    named itself is the only one whose key and pointer messages reach the box."""
+    box = _box_or_404(box_id)
+    who = user.get("username") or "operator"
+    if body.holder == "operator":
+        try:
+            await boxdesk.take(box, body.viewer or "", who)
+        except boxdesk.ControlError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+    else:
+        await boxdesk.hand_back(box.id, "the operator pressed Hand back")
+    return {"control": boxdesk.control_state(box.id)}
+
+
 # --- the WebSocket splice ----------------------------------------------------------
 
 def _publish_viewers(box_id: str) -> None:
@@ -402,13 +462,24 @@ async def display_ws(ws: WebSocket, box_id: str):
     if not _running(box):                      # never boot a box from a viewer
         await _refuse(ws, CLOSE_REFUSED, "the box is stopped: start the desktop first")
         return
-    await splice(ws, box)
+    vid = ws.query_params.get("viewer") or ""
+    if not _VIEWER_ID.match(vid):
+        vid = secrets.token_hex(8)             # a viewer that names none can watch, never take
+    await splice(ws, box, viewer=vid)
 
 
-async def splice(ws: WebSocket, box, allow: Callable[[str], bool] = watch_only) -> None:
+async def splice(ws: WebSocket, box, allow: Callable[[str], bool] | None = None,
+                 viewer: str | None = None) -> None:
     """Pin the box, dial its display listener, ask for an RFB session and relay
-    bytes: guest -> browser untouched, browser -> guest through RfbInputFilter."""
+    bytes: guest -> browser untouched, browser -> guest through RfbInputFilter.
+    Input passes only while THIS window (`viewer`) holds control of the box's
+    desktop (boxdesk.admit); `allow` replaces that policy (tests)."""
     loop = asyncio.get_running_loop()
+    if allow is None:
+        vid = viewer or secrets.token_hex(8)
+        allow = lambda kind: boxdesk.admit(box.id, vid, kind)   # noqa: E731
+    else:
+        vid = None
     ctl = boxes.controller(box)
     try:
         await ctl.acquire()                    # already running: this only pins it
@@ -417,6 +488,15 @@ async def splice(ws: WebSocket, box, allow: Callable[[str], bool] = watch_only) 
         return
     sock = None
     counted = False
+    wlock = asyncio.Lock()                     # one writer at a time on the guest socket
+    flt = RfbInputFilter(allow)
+
+    async def release() -> None:
+        """Let go of what this window's input left pressed (hand back, hang up)."""
+        data = flt.release_bytes()
+        if data and sock is not None:
+            async with wlock:
+                await loop.sock_sendall(sock, data)
     try:
         try:
             sock = await asyncio.wait_for(box.transport.connect(boxes.PORT_DISPLAY), 8)
@@ -435,8 +515,13 @@ async def splice(ws: WebSocket, box, allow: Callable[[str], bool] = watch_only) 
         _viewers[box.id] = _viewers.get(box.id, 0) + 1
         counted = True
         _publish_viewers(box.id)
-        flt = RfbInputFilter(allow)
-        reason = await _relay(ws, loop, sock, rest, flt)
+        if vid:
+            boxdesk.viewer_up(box.id, vid, release)
+        reason = await _relay(ws, loop, sock, rest, flt, wlock)
+        try:
+            await release()
+        except OSError:
+            pass                               # the guest is gone: nothing left held
         try:
             await ws.close(code=1000 if reason is None else CLOSE_PROTOCOL,
                            reason=(reason or "")[:120])
@@ -444,6 +529,8 @@ async def splice(ws: WebSocket, box, allow: Callable[[str], bool] = watch_only) 
             pass                               # already closed by the browser
     finally:
         if counted:
+            if vid:
+                boxdesk.viewer_down(box.id, vid, release)    # the grace clock, if it held control
             _viewers[box.id] = max(0, _viewers.get(box.id, 1) - 1)
             if not _viewers[box.id]:
                 _viewers.pop(box.id, None)
@@ -453,8 +540,10 @@ async def splice(ws: WebSocket, box, allow: Callable[[str], bool] = watch_only) 
         ctl.release()
 
 
-async def _relay(ws: WebSocket, loop, sock, first: bytes, flt: RfbInputFilter) -> str | None:
+async def _relay(ws: WebSocket, loop, sock, first: bytes, flt: RfbInputFilter,
+                 wlock: asyncio.Lock | None = None) -> str | None:
     """Until either side hangs up. None for a normal end, else why it stopped."""
+    wlock = wlock or asyncio.Lock()
     async def to_browser():
         if first:
             await ws.send_bytes(first)
@@ -477,7 +566,8 @@ async def _relay(ws: WebSocket, loop, sock, first: bytes, flt: RfbInputFilter) -
             except RfbViolation as e:
                 return f"protocol error: {e}"
             if out:
-                await loop.sock_sendall(sock, out)
+                async with wlock:
+                    await loop.sock_sendall(sock, out)
 
     tasks = {asyncio.ensure_future(to_browser()), asyncio.ensure_future(to_guest())}
     try:
