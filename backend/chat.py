@@ -1689,8 +1689,33 @@ async def stop_project_turns(body: ProjectStop, actor: dict = Depends(require_ac
                       tree=None if actor.get("is_device") else ids)
 
 
+# Conversations a POST /api/chat has claimed and not yet started a turn on.
+# The 409 check used to sit ahead of several awaits (db open, conversation
+# lookup, the user-message insert) and `_active_turns` is only set at the end,
+# so a double submit (Enter twice, two tabs) passed both checks and started two
+# turns that shared one op_id and invalidated each other (ROBUST-07). The claim
+# is taken and checked in one synchronous step.
+_posting: set[int] = set()
+
+
 @router.post("/chat")
 async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
+    claimed = body.conversation_id
+    if claimed is not None:
+        # _running_loops, not just _active_turns: an agent run or plan item
+        # whose own loop is live must not take a chat turn on top of it
+        if claimed in _posting or claimed in _running_loops():
+            raise HTTPException(status_code=409, detail="turn_in_progress")
+        _posting.add(claimed)
+    try:
+        return await _post_chat(body, actor)
+    finally:
+        # start_turn registers the turn in _active_turns before this returns
+        if claimed is not None:
+            _posting.discard(claimed)
+
+
+async def _post_chat(body: ChatRequest, actor: dict):
     # the router already depends on require_actor; FastAPI caches it per
     # request, so this is the same resolved actor, not a second token lookup
     device_id = actor.get("device_id") if actor.get("is_device") else None
@@ -1708,9 +1733,7 @@ async def chat(body: ChatRequest, actor: dict = Depends(require_actor)):
             raise HTTPException(status_code=400, detail=str(e)) from None
     db = await get_db()
     try:
-        conversation_id = body.conversation_id
-        if conversation_id is not None and conversation_id in _active_turns:
-            raise HTTPException(status_code=409, detail="turn_in_progress")
+        conversation_id = body.conversation_id     # busy ones were refused in chat()
         if conversation_id is None:
             # identity is validated here, not in the detached turn: a typo'd
             # slug is a 404 on the POST the operator can see, not an error
