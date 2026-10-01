@@ -34,7 +34,7 @@ import secrets
 import socket
 import time
 
-from .. import desk
+from .. import bus, desk
 from ..db import get_db
 from . import boxes
 
@@ -146,6 +146,23 @@ _failed: dict[str, tuple[float, str]] = {}   # box id -> (monotonic, why)
 _syncing: set[str] = set()
 
 
+class _Control:
+    """The operator holds a box's desktop (live desktop P3). The counts are all
+    that is ever kept of what they did: what was typed may be a password."""
+
+    def __init__(self, viewer: str, by: str):
+        self.viewer, self.by = viewer, by
+        self.since = time.monotonic()
+        self.keys = self.pointers = 0
+        self.grace: asyncio.Task | None = None      # runs while the holder's window is gone
+
+
+_control: dict[str, _Control] = {}                  # box id -> who holds it (absent = the agent)
+# (box id, viewer id) -> a "let go of held keys" coroutine function per live socket
+_socks: dict[tuple[str, str], list] = {}
+_last_pub: dict[str, float] = {}
+
+
 def reset_for_tests() -> None:
     for _, task in _live.values():
         task.cancel()
@@ -153,6 +170,12 @@ def reset_for_tests() -> None:
     _locks.clear()
     _failed.clear()
     _syncing.clear()
+    for c in _control.values():
+        if c.grace is not None:
+            c.grace.cancel()
+    _control.clear()
+    _socks.clear()
+    _last_pub.clear()
 
 
 def live(box_id: str):
@@ -236,7 +259,9 @@ async def ensure(box) -> desk.Desk:
             _failed[box.id] = (time.monotonic(), str(e))
             raise
         _failed.pop(box.id, None)
-        d = await desk.attach(did, name_for(box.id), BoxWS(sock), hello, "", box_id=box.id)
+        held = _control.get(box.id)        # a seat that registers while the operator is at the screen
+        d = await desk.attach(did, name_for(box.id), BoxWS(sock), hello, "", box_id=box.id,
+                              operator_since=held.since if held else None)
         _live[box.id] = (d, asyncio.ensure_future(_read(box.id, d, lines)))
         return d
 
@@ -308,3 +333,188 @@ def sync(box) -> None:
             _syncing.discard(box.id)
 
     asyncio.ensure_future(go())
+
+
+# --- the operator takes the desktop, then hands it back (live desktop P3) --------------
+#
+# Control is `agent` (the default) or `operator`. The first click in the viewer
+# takes it (display_api's POST .../display/control, naming its own viewer id);
+# [Hand back], or that window staying gone for GRACE_S, returns it. There is no idle
+# hand-back: the operator decided that only those two end a take-over.
+#
+# Three locks, so a bug in one does not put two pairs of hands on the screen:
+#   1. desk.act refuses input verbs while Desk.operator_since is set (screenshots
+#      stay allowed, so the agent can watch);
+#   2. the guest seat is told input is off (desk.hold_for_operator), WITHOUT writing
+#      the grants row: a host restart in the middle leaves the agent's grants as the
+#      operator set them, not locked out;
+#   3. display_api's RFB filter admits key and pointer only from the socket of the
+#      holder (admit(), below), and never the clipboard.
+
+GRACE_S = 10                # the holder's window may come back inside this and keep control
+ACTIVITY_GAP_S = 3          # the window hears "the agent just acted" at most this often
+TURNS_FRESH_S = 120         # a conversation that acted this recently is driving
+
+
+class ControlError(Exception):
+    """The take-over cannot happen; the message says why (the route's 409)."""
+
+
+def control_state(box_id: str) -> dict:
+    """What the window shows: who holds the desktop and, for the operator, which
+    window (the viewer id its own noVNC session announced) and for how long."""
+    c = _control.get(box_id)
+    if c is None:
+        return {"holder": "agent", "viewer": None, "by": None, "held_s": 0}
+    return {"holder": "operator", "viewer": c.viewer, "by": c.by,
+            "held_s": int(time.monotonic() - c.since)}
+
+
+def _publish_control(box_id: str) -> None:
+    bus.publish(boxes.BUS_CHAN, {"type": "display", "box_id": box_id,
+                                 "control": control_state(box_id)})
+
+
+def viewer_up(box_id: str, viewer: str, release) -> None:
+    """A viewer socket opened. `release` is an async callable that lets go of
+    whatever keys / buttons it holds on the guest. A holder whose window comes
+    back inside the grace keeps control."""
+    _socks.setdefault((box_id, viewer), []).append(release)
+    c = _control.get(box_id)
+    if c is not None and c.viewer == viewer and c.grace is not None:
+        c.grace.cancel()
+        c.grace = None
+
+
+def viewer_down(box_id: str, viewer: str, release) -> None:
+    """A viewer socket closed. When it was the holder's last one the grace
+    clock starts; nothing else about control changes."""
+    socks = _socks.get((box_id, viewer), [])
+    if release in socks:
+        socks.remove(release)
+    if not socks:
+        _socks.pop((box_id, viewer), None)
+    c = _control.get(box_id)
+    if c is not None and c.viewer == viewer and (box_id, viewer) not in _socks \
+            and c.grace is None:
+        c.grace = asyncio.ensure_future(_grace(box_id, c))
+
+
+async def _grace(box_id: str, c: _Control) -> None:
+    await asyncio.sleep(GRACE_S)
+    if _control.get(box_id) is c:
+        await hand_back(box_id, "the window disconnected")
+
+
+def admit(box_id: str, viewer: str, kind: str) -> bool:
+    """The RFB filter's question for a key or pointer message from `viewer`'s
+    socket: yes only while that window holds control. Counts what it admits;
+    the clipboard is never admitted, by anyone."""
+    c = _control.get(box_id)
+    if c is None or c.viewer != viewer:
+        return False
+    if kind == "key":
+        c.keys += 1
+    elif kind == "pointer":
+        c.pointers += 1
+    else:
+        return False
+    return True
+
+
+async def _audit_control(box_id: str, params: dict, by: str) -> None:
+    """A desk_actions row on the box's device: verb operator_control, counts only."""
+    try:
+        did = await device_id(box_id)
+        db = await get_db()
+        try:
+            await db.execute(
+                "INSERT INTO desk_actions (device_id, verb, params, ok, approver) "
+                "VALUES (?,?,?,1,?)",
+                (did, "operator_control", json.dumps(params)[:4000], (by or "operator")[:80]))
+            await db.commit()
+        finally:
+            await db.close()
+    except Exception:  # noqa: BLE001 — auditing never breaks the take-over
+        pass
+
+
+async def take(box, viewer: str, by: str = "") -> dict:
+    """The operator clicked into the viewer named `viewer`. Idempotent for the
+    holder's own window; another window must wait for a hand back."""
+    if not viewer or (box.id, viewer) not in _socks:
+        raise ControlError("that window is not connected to the desktop: reload it")
+    c = _control.get(box.id)
+    if c is not None:
+        if c.viewer == viewer:
+            return control_state(box.id)
+        raise ControlError("another window holds control of this desktop: hand it back there first")
+    c = _control[box.id] = _Control(viewer, by or "operator")
+    d = live(box.id)
+    if d is not None:
+        await desk.hold_for_operator(d, c.since)
+    await _audit_control(box.id, {"phase": "start", "box": box.id, "by": c.by}, c.by)
+    await desk._event("desk_operator_control",
+                      f"{c.by} took control of the desktop of box {box.id} (the agent is paused)",
+                      severity="info", by_operator=True,
+                      detail={"box_id": box.id, "device_id": d.device_id if d else None,
+                              "phase": "start"})
+    _publish_control(box.id)
+    return control_state(box.id)
+
+
+async def hand_back(box_id: str, why: str = "handed back") -> dict:
+    """Control returns to the agent: held keys are let go, the seat hears its
+    real grants, the agent's frame is dropped and its next result says how long
+    the operator used the desktop. A no-op when the agent already has it."""
+    c = _control.pop(box_id, None)
+    if c is None:
+        return control_state(box_id)
+    if c.grace is not None and c.grace is not asyncio.current_task():
+        c.grace.cancel()
+    secs = time.monotonic() - c.since
+    for release in list(_socks.get((box_id, c.viewer), ())):
+        try:
+            await release()
+        except Exception:  # noqa: BLE001 — best effort: the socket may be gone
+            pass
+    d = live(box_id)
+    if d is not None and d.operator_since is not None:
+        await desk.release_to_agent(d, secs)
+    await _audit_control(box_id, {"phase": "end", "box": box_id, "by": c.by, "why": why,
+                                  "seconds": round(secs), "keys": c.keys,
+                                  "pointers": c.pointers}, c.by)
+    _publish_control(box_id)
+    return control_state(box_id)
+
+
+# --- "the agent is driving" ---------------------------------------------------------------
+
+def _turns(d: desk.Desk) -> list[int]:
+    now = time.monotonic()
+    return sorted(cid for cid, at in d.turns.items() if now - at < TURNS_FRESH_S)
+
+
+def agent_state(box_id: str) -> dict:
+    """How long ago the agent last acted on this desktop (None: never since the
+    seat registered) and the conversations driving it, for the window's label
+    and its Stop button."""
+    d = live(box_id)
+    if d is None:
+        return {"active_age_s": None, "turns": []}
+    age = None if d.last_action_at is None else max(0, int(time.time() - d.last_action_at))
+    return {"active_age_s": age, "turns": _turns(d)}
+
+
+def _on_activity(d: desk.Desk) -> None:
+    """desk.act just let the agent act on a box desktop: tell the window (it
+    flips its own label back after a quiet spell, so nothing polls)."""
+    now = time.monotonic()
+    if now - _last_pub.get(d.box_id, -1e9) < ACTIVITY_GAP_S:
+        return
+    _last_pub[d.box_id] = now
+    bus.publish(boxes.BUS_CHAN, {"type": "display", "box_id": d.box_id,
+                                 "agent": {"active_age_s": 0, "turns": _turns(d)}})
+
+
+desk.activity_hook = _on_activity

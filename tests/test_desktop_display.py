@@ -574,7 +574,8 @@ def test_status_says_what_starting_would_cost(host):
     cost = 1280 + settings.vm_kvm_box_overhead_mb
     assert j["supported"] and j["state"] == "stopped" and j["session"] == "stopped"
     assert j["need_mb"] == cost and j["free_mb"] == 4096 and j["fits"] is True
-    assert j["geometry"] == {"width": 1280, "height": 800} and j["watch_only"] is True
+    assert j["geometry"] == {"width": 1280, "height": 800}
+    assert j["control"]["holder"] == "agent" and j["agent"] == {"active_age_s": None, "turns": []}
     assert host.get("/api/vm/boxes/p-none/display").status_code == 404
     anon = TestClient(host.app)
     assert anon.get(f"/api/vm/boxes/{b.id}/display").status_code in (401, 403)
