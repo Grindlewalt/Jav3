@@ -96,11 +96,13 @@ def test_a_docker_boxs_tini_is_the_os():
     raw = _raw([_p(1, 0, "/usr/bin/tini", "/usr/bin/tini -- python3 -I bootstrap.py"),
                 _p(10, 1, "/usr/bin/python3", "python3 -I bootstrap.py")])
     assert _eval(raw)[1] == []
-    # not PID 1 (an init layer in front of it): still the OS
+    # a tini that is not PID 1 is no longer "the box's init": it reads as the
+    # run_code orphan it is (test_secnotify keeps the unexpected reading with no
+    # guest server in the box)
     raw = _raw([_p(1, 0, "/usr/bin/docker-init", "docker-init -- x"),
-                _p(5, 1, "/usr/bin/tini", "/usr/bin/tini -- python3 -I bootstrap.py"),
-                _p(10, 5, "/usr/bin/python3", "python3 -I bootstrap.py")])
-    assert _eval(raw)[1] == []
+                _p(10, 1, "/usr/bin/python3", "python3 -I bootstrap.py"),
+                _p(57, 1, "/usr/bin/tini", "/usr/bin/tini -- sleep 1")])
+    assert [bool(a.get("rule")) for a in _eval(raw)[1]] == [True]
 
 
 # --- started by the agent -----------------------------------------------------------------

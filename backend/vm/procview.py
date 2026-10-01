@@ -124,9 +124,6 @@ BUILTIN_BASELINE: tuple[tuple[str, str], ...] = (
     ("*", "dpkg-db-backup.service"),
     ("*", "e2scrub_all.service"),
     ("*", "e2scrub_reap.service"),
-    # a Docker box's init (the image entrypoint). PID 1 is skipped in classify
-    # whatever it is; this covers a tini that is not PID 1 (a --init layer).
-    ("/usr/bin/tini", ""),
 )
 
 

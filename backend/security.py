@@ -582,9 +582,10 @@ async def _judge(db: aiosqlite.Connection, kind: str, detail: dict | None) -> di
 
 
 async def _count_repeat(db: aiosqlite.Connection, twin: dict, *, kind: str, severity: str,
-                        project: str | None, detail: dict | None, t: str, ping: bool,
-                        quiet: str | None, actor: str | None) -> int:
-    """Count a repeat onto the row that already says it."""
+                        project: str | None, detail: dict | None, d: dict, ping: bool,
+                        acked: bool, actor: str | None) -> int:
+    """Count a repeat onto the row that already says it. `acked` is that row's
+    state, `d` the decision for the repeat (its tier and mode ride the event)."""
     await db.execute("UPDATE security_events SET count = count + 1, "
                      "last_seen = ? WHERE id = ?", (_utcnow(), twin["id"]))
     await db.commit()
@@ -592,8 +593,8 @@ async def _count_repeat(db: aiosqlite.Connection, twin: dict, *, kind: str, seve
                                 "kind": kind, "severity": severity, "project": project,
                                 "summary": twin["summary"], "detail": detail,
                                 "count": twin["count"] + 1, "repeat": True,
-                                "tier": t, "ping": ping, "acknowledged": bool(quiet),
-                                "actor": actor})
+                                "tier": d["tier"], "mode": d["mode"], "ping": ping,
+                                "acknowledged": acked, "actor": actor})
     return twin["id"]
 
 
@@ -619,15 +620,15 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
     j = await _judge(db, kind, detail)
     if j and j.get("standing"):
         cause = j["standing"][:500]
-        async with db.execute("SELECT id, count, summary FROM security_events "
+        async with db.execute("SELECT id, count, summary, acknowledged FROM security_events "
                               "WHERE kind = ? AND cause = ? ORDER BY id DESC LIMIT 1",
                               (kind, cause)) as cur:
             row = await cur.fetchone()
         if row is not None:
-            d = await decide(db, kind, severity, actor)
             return await _count_repeat(db, dict(row), kind=kind, severity=severity,
-                                       project=project, detail=detail, t=d["tier"],
-                                       ping=False, quiet=d["quiet"], actor=actor)
+                                       project=project, detail=detail,
+                                       d=await decide(db, kind, severity, actor), ping=False,
+                                       acked=bool(row["acknowledged"]), actor=actor)
     elif j:
         rule, cause = rule or j.get("rule"), j["cause"][:500]
     d = await decide(db, kind, severity, actor, rule)
@@ -643,7 +644,8 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
         ping = (t == "critical" and (not d["held"] or d["breaks"])
                 and _rate_ok(f"#{twin['id']}", 1))
         return await _count_repeat(db, twin, kind=kind, severity=severity, project=project,
-                                   detail=detail, t=t, ping=ping, quiet=quiet, actor=actor)
+                                   detail=detail, d=d, ping=ping, acked=bool(quiet),
+                                   actor=actor)
     ping = d["ping"] and (t == "critical" or _rate_ok(kind, settings.security_ping_per_kind))
     cur = await db.execute(
         "INSERT INTO security_events(kind, severity, project_slug, summary, detail, "
@@ -663,7 +665,8 @@ async def raise_event(db: aiosqlite.Connection, *, kind: str, summary: str,
                                 "summary": summary, "detail": detail,
                                 "count": 1, "repeat": False, "tier": t, "ping": ping,
                                 "acknowledged": bool(quiet), "actor": actor,
-                                "quiet": quiet, "rule": rule if quiet == "rule" else None})
+                                "quiet": quiet, "rule": rule if quiet == "rule" else None,
+                                "mode": d["mode"]})
     return cur.lastrowid
 
 
@@ -701,14 +704,49 @@ def raise_sync(con, *, kind: str, summary: str, severity: str = "warn",
     return cur.lastrowid
 
 
+def effective_tier(kind: str, severity: str | None, level: str, prefs: dict) -> str:
+    """The tier a WAITING row counts as for this operator (tier_counts reads it
+    the same way): their per-kind choice moves an info kind up to alert (Badge
+    or Ping) and a warn kind down to record (Record only). Critical stays."""
+    t = tier(kind, severity)
+    if t == "critical":
+        return t
+    mode, _ = mode_for(kind, severity, level, prefs)
+    return "record" if mode == "record" else t if t == "approval" else "alert"
+
+
+# a kind of its own section in the Queue, whatever its tier
+QUEUE_KEEPS = frozenset({"harness_fault"})
+
+
 async def list_events(db: aiosqlite.Connection, *, unacknowledged_only: bool = False,
-                      limit: int = 100) -> list[dict]:
-    q = f"SELECT {_COLUMNS} FROM security_events"
+                      limit: int = 100, queue_only: bool = False) -> list[dict]:
+    """Newest first. `unacknowledged_only` lists what is waiting, each row's
+    `tier` as THIS operator's choices read it; `queue_only` is the Queue: those
+    rows without the record tier (an audit line, nothing to do: it stays in the
+    history). Cut in SQL, so the limit counts rows that belong in the Queue."""
+    unacknowledged_only = unacknowledged_only or queue_only
+    q, args = f"SELECT {_COLUMNS} FROM security_events", []
     if unacknowledged_only:
         q += " WHERE acknowledged = 0"
+        level, prefs = await notify_level(db), await get_prefs(db)
+        if queue_only:
+            async with db.execute("SELECT DISTINCT kind, severity FROM security_events "
+                                  "WHERE acknowledged = 0") as cur:
+                hide = [(r["kind"], r["severity"]) for r in await cur.fetchall()
+                        if r["kind"] not in QUEUE_KEEPS
+                        and effective_tier(r["kind"], r["severity"], level, prefs) == "record"]
+            if hide:
+                q += " AND (kind, COALESCE(severity, '')) NOT IN (VALUES " + ",".join(
+                    "(?, ?)" for _ in hide) + ")"
+                args += [x for k, v in hide for x in (k, v or "")]
     q += " ORDER BY id DESC LIMIT ?"
-    async with db.execute(q, (limit,)) as cur:
-        return [_row(r) for r in await cur.fetchall()]
+    async with db.execute(q, (*args, limit)) as cur:
+        rows = [_row(r) for r in await cur.fetchall()]
+    if unacknowledged_only:
+        for r in rows:
+            r["tier"] = effective_tier(r["kind"], r["severity"], level, prefs)
+    return rows
 
 
 async def get_event(db: aiosqlite.Connection, event_id: int) -> dict | None:
@@ -764,10 +802,8 @@ async def tier_counts(db: aiosqlite.Connection) -> tuple[dict[str, int], dict[st
             "SELECT kind, severity, COUNT(*) AS n FROM security_events "
             "WHERE acknowledged = 0 GROUP BY kind, severity") as cur:
         for r in await cur.fetchall():
-            t = tier(r["kind"], r["severity"])
+            t = effective_tier(r["kind"], r["severity"], level, prefs)
             mode, _ = mode_for(r["kind"], r["severity"], level, prefs)
-            if t != "critical":
-                t = "record" if mode == "record" else t if t == "approval" else "alert"
             out[t] += r["n"]
             if mode == "ping":
                 pinging[t] += r["n"]
