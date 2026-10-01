@@ -992,8 +992,12 @@ async def _drive(slug: str, job_id: str, root_id: int, budget=None) -> str:
                         need_flush, flush_cid = True, m_done.get("cid")
                         if await _settle(plan, idx[iid], t, m_done, job_id) and not pausing:
                             pausing = True
-                            plan["paused_reason"] = ("the token budget ran out mid-item "
-                                                     f"({iid} is back to todo, no attempt spent)")
+                            from . import provider_balance
+                            plan["paused_reason"] = (
+                                f"{provider_balance.reason()} ({iid} is back to todo, no attempt spent)"
+                                if provider_balance.is_empty() else
+                                "the token budget ran out mid-item "
+                                f"({iid} is back to todo, no attempt spent)")
                             bus.publish(job_id, {"type": "node_status", "node_id": root_id,
                                                  "status": "pausing"})
                 # after settling, so a dependency that just failed for the last
@@ -1196,6 +1200,13 @@ async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -
     result = (t.result() or {}) if exc is None else {}
     if isinstance(exc, BudgetExceeded) or result.get("stop") == "budget":
         _budget_stop(it, plan, result.get("final") or "", cid, job_id)
+        return True
+    from . import provider_balance
+    if provider_balance.is_empty() and (it.get("report") or {}).get("status") != "done":
+        # the provider refused for money (402): not the item's fault and not a
+        # spent attempt; retrying would only burn attempts until it is topped up
+        _budget_stop(it, plan, result.get("final") or "", cid, job_id)
+        it["last_error"] = provider_balance.reason() or "the model provider's balance is empty"
         return True
     rep = it.get("report") or {}
     final = ""

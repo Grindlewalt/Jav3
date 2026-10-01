@@ -55,6 +55,32 @@ async def test_budget_stop_pauses_the_run_instead_of_burning_attempts(
     assert i1["history"][-1]["outcome"] == "budget"
 
 
+async def test_an_empty_provider_balance_pauses_the_run_too(client, tmp_env, monkeypatch):
+    """PLANS-14: a 402 (balance empty) failed every item and retried them into
+    the same wall. Now it is handed back like a budget stop and the run pauses
+    with the provider's own message."""
+    from backend import provider_balance
+    await _put(client, [{"title": "a", "brief": "a"}, {"title": "b", "brief": "b"}],
+               attempts_max=3, max_concurrent=1)
+    seen: dict = {}
+
+    async def broke(cid, attempt, text):
+        return "(the DeepSeek balance is empty)"
+
+    monkeypatch.setattr(agents_run, "run_agent_turn", _scripted({"i1": broke}, seen))
+    monkeypatch.setattr(plan_mod, "complete_text", _no_synth)
+    monkeypatch.setattr(provider_balance, "is_empty", lambda provider=None: True)
+    monkeypatch.setattr(provider_balance, "reason",
+                        lambda: "DeepSeek balance is empty: top up at platform.deepseek.com")
+    r = await client.post(f"/api/projects/{SLUG}/plan/run", json={"confirm_peak": True})
+    assert r.status_code == 200, r.text
+    await _wait_run()
+    p = plan_mod.load(SLUG)
+    i1 = _by_id(p)["i1"]
+    assert len(seen["i1"]) == 1 and i1["attempts"] == 0 and i1["status"] == "todo"
+    assert p["status"] == "paused" and "balance is empty" in p["paused_reason"]
+
+
 # --- RUNS-07 ---------------------------------------------------------------
 
 async def test_accept_closes_a_verified_item_without_a_dispatch(client, tmp_env, monkeypatch):
