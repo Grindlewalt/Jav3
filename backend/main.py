@@ -88,6 +88,7 @@ async def lifespan(app: FastAPI):
     require_single_process()
     ensure_dirs()
     await init_db()
+    await chat.sweep_ephemeral()     # incognito rows a crash left behind (ROBUST-19)
     await profiles_api.profiles.migrate_at_startup()  # WP2: one-time profiles migration
     ensure_memory_seeds()
     await providers.migrate_legacy_override()   # the old nav switch slot -> default
