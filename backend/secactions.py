@@ -266,16 +266,23 @@ async def stop(db: aiosqlite.Connection, ev: dict, scope: str, *, confirm: bool 
         return out
     from . import agents_run, chat
     from .vm import broker as vm_broker
+    acted = 0                       # what actually had something to cancel
     for c in ids:
-        chat._stop(c)
+        acted += bool(chat._stop(c))
         t = agents_run._active_runs.get(c)
         if t is not None and not t.done():
             t.cancel()
+            acted += 1
     for s in plans:
-        plan_mod.stop_run(s)
-    vm_broker.cancel_conversations(set(ids))
+        acted += bool(plan_mod.stop_run(s))
+    acted += vm_broker.cancel_conversations(set(ids)) or 0
     from . import operator_ask
     operator_ask.cancel_tree(set(ids))
+    if not acted:
+        out["message"] = ("Nothing could be cancelled: this agent is not a chat turn or an "
+                          "interactive run." + (" Stop the whole run instead." if scope == "agent"
+                                                else ""))
+        return out
     out["stopped"] = True
     out["message"] = (f"Stopped {len(ids)} agent{'s' * (len(ids) != 1)}"
                       + (f" and the plan of {', '.join(plans)}" if plans else "") + ".")

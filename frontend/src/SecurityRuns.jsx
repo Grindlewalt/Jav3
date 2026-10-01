@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api } from './api.js'
 import { useAsk } from './ask.jsx'
@@ -36,6 +36,8 @@ function RunCard({ run, onChanged, onOpenBoard, inProject }) {
   const [busy, setBusy] = useState(false)
   const [filtered, setFiltered] = useState(null)     // the rows rules filed, once shown
   const [showFiltered, setShowFiltered] = useState(false)
+  // the card carries each kind's newest event; "show more" asks for all of them
+  const [full, setFull] = useState(null)
   const sev = sevClass(run.severity)
   const state = runState(run)
   const events = run.events || []
@@ -50,6 +52,13 @@ function RunCard({ run, onChanged, onOpenBoard, inProject }) {
     window.dispatchEvent(new Event('jarvis-files-changed'))
     onChanged()
   }
+
+  async function loadAll() {
+    try { setFull((await api(`/api/security/runs/${key}`)).events || []) }
+    catch { setFull(events) }
+  }
+  // the card changed while its events were open: read them again
+  useEffect(() => { if (full !== null) loadAll() }, [run.newest_id, run.counts.need]) // eslint-disable-line
 
   async function toggleFiltered() {
     const next = !showFiltered
@@ -118,7 +127,8 @@ function RunCard({ run, onChanged, onOpenBoard, inProject }) {
       {showFiltered && <FilteredRows rows={filtered} onOpen={onOpenBoard} />}
       {lines.map((line) => (
         <KindLine key={line.kind} line={line} run={run}
-                  events={events.filter((e) => e.kind === line.kind)}
+                  events={(full || events).filter((e) => e.kind === line.kind)}
+                  onMore={() => { if (full === null) loadAll() }}
                   busy={busy} guard={guard} changed={changed} onOpenBoard={onOpenBoard}
                   inProject={inProject} />
       ))}
@@ -156,24 +166,23 @@ function FilteredRows({ rows, onOpen }) {
 }
 
 // One kind in a card: its newest event in full, the rest behind "show N more"
-function KindLine({ line, run, events, busy, guard, changed, onOpenBoard, inProject }) {
+function KindLine({ line, run, events, onMore, busy, guard, changed, onOpenBoard, inProject }) {
   const [more, setMore] = useState(false)
   if (!events.length) return null
   const [first, ...rest] = events
-  const hidden = Math.max(0, line.n - events.length)
+  const toggle = () => { setMore(!more); if (!more && line.n > events.length) onMore() }
   return (
     <div className="srun-kind">
       <EventBlock ev={first} line={line} run={run} busy={busy} guard={guard} changed={changed}
                   onOpenBoard={onOpenBoard} head inProject={inProject} />
-      {rest.length > 0 && (
-        <button type="button" className="srun-link srun-more" onClick={() => setMore(!more)}
+      {line.n > 1 && (
+        <button type="button" className="srun-link srun-more" onClick={toggle}
                 aria-expanded={more}>
-          {more ? 'show fewer' : `show ${rest.length} more of this kind`}</button>)}
+          {more ? 'show fewer' : `show ${line.n - 1} more of this kind`}</button>)}
       {more && rest.map((ev) => (
         <EventBlock key={ev.id} ev={ev} line={line} run={run} busy={busy} guard={guard}
                     changed={changed} onOpenBoard={onOpenBoard} inProject={inProject} />))}
-      {more && hidden > 0 && (
-        <p className="dim small">{hidden} older ones are in the History.</p>)}
+      {more && line.n > events.length && <p className="dim small">Loading…</p>}
     </div>
   )
 }

@@ -304,9 +304,9 @@ async def list_runs(db: aiosqlite.Connection, *, queue: bool = True, sweep: bool
     (need-you or an agent report); `sweep` first resolves the info-only groups
     whose run has ended; `events` > 0 puts each card's newest N events in it
     (need-you and reports, with `doing`), so one request draws the whole Queue."""
-    if sweep:
-        await sweep_finished(db)
     groups, convs = await _groups(db)
+    if sweep and await sweep_finished(db, groups):
+        groups, convs = await _groups(db)             # some resolved: read the log again
     running = await _running_roots(db)
     cards = []
     for g in groups.values():
@@ -317,8 +317,8 @@ async def list_runs(db: aiosqlite.Connection, *, queue: bool = True, sweep: bool
         run = None if g["group"] != "run" or running is None else g["root"] in running
         card = _card(g, run)
         if events > 0:
-            rows = sorted(g["need"] + g["report"], key=lambda e: -e["id"])[:events]
-            card["events"] = [{**ev, "doing": await doing(db, ev, convs)} for ev in rows]
+            card["events"] = [{**ev, "doing": await doing(db, ev, convs)}
+                              for ev in _newest(g["need"] + g["report"], events)]
         cards.append(card)
     cards.sort(key=lambda c: (-TIER_RANK.get(c["tier"], -1), -c["newest_id"]))
     return {"runs": cards,
@@ -326,10 +326,31 @@ async def list_runs(db: aiosqlite.Connection, *, queue: bool = True, sweep: bool
                        "reports": sum(c["counts"]["reports"] for c in cards)}}
 
 
-async def sweep_finished(db: aiosqlite.Connection) -> int:
+def _newest(rows: list[dict], n: int) -> list[dict]:
+    """The newest event of EVERY kind in the card, then the newest of the rest up to
+    `n` in all: a card with six kinds never shows five of them. Newest first."""
+    rows = sorted(rows, key=lambda e: -e["id"])
+    picked, kinds = [], set()
+    for ev in rows:
+        if ev["kind"] not in kinds:
+            kinds.add(ev["kind"])
+            picked.append(ev)
+    have = {ev["id"] for ev in picked}
+    for ev in rows:
+        if len(picked) >= n:
+            break
+        if ev["id"] not in have:
+            have.add(ev["id"])
+            picked.append(ev)
+    return sorted(picked, key=lambda e: -e["id"])
+
+
+async def sweep_finished(db: aiosqlite.Connection, groups: dict | None = None) -> int:
     """Resolve the groups that hold only info/record rows, once their run has
-    ended. Returns the rows acknowledged. Unknown liveness resolves nothing."""
-    groups, _ = await _groups(db)
+    ended. Returns the rows acknowledged. Unknown liveness resolves nothing.
+    `groups` is a scan the caller already holds (_groups)."""
+    if groups is None:
+        groups, _ = await _groups(db)
     cand = [g for g in groups.values()
             if g["group"] == "run" and not g["need"] and (g["report"] or g["record"])]
     if not cand:

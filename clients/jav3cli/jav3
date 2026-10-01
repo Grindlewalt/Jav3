@@ -5214,7 +5214,7 @@ def build_tui(base: str, token: str, **kw):
                 self._get("queue", "egress", "/api/egress/pending", "pending"),
                 # one card per run (backend/secruns.py); an older server has none
                 self._get("queue", "alert runs", "/api/security/runs", "runs", quiet404=True,
-                          params={"events": 20}),
+                          params={"events": 10}),
                 self._get("queue", "services", "/api/services", "", quiet404=True),
                 self._get("queue", "packages", "/api/packages", "packages", quiet404=True,
                           params={"status": "pending"}))

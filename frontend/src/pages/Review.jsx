@@ -104,7 +104,7 @@ export function ReviewQueue({ slug }) {
   function loadAlerts() {
     // the Queue: one card per run (backend/secruns.py), each with its newest
     // events and what the agent was doing at each. Audit lines stay in the History.
-    api('/api/security/runs?events=20').then((r) => {
+    api('/api/security/runs?events=8').then((r) => {
       setRuns(cardsFor(r.runs || [], slug))
     }).catch(() => {})
   }

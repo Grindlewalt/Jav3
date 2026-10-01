@@ -386,6 +386,30 @@ async def test_the_host_matches_by_command_line_when_there_is_no_start_time(kbox
         await procview.kill_process("p-alpha", 812, p["exe"])
 
 
+async def test_the_default_rpc_speaks_the_verb_and_names_an_older_guest(tmp_env):
+    import json as _json
+    import socket
+    for reply, ok in ((b'{"type":"kill","ok":true,"pid":812,"sig":"TERM"}\n', True),
+                      (b'{"type":"final","content":"(guest loop error: KeyError)"}\n', False)):
+        a, b = socket.socketpair()
+        a.setblocking(False)
+        b.sendall(reply)
+
+        class T:
+            async def connect(self, port, _a=a):
+                return _a
+        box = SimpleNamespace(kind="project", transport=T())
+        spec = {"pid": 812, "exe": "/x", "start_ticks": 5, "cmd": "x", "sig": "TERM"}
+        if ok:
+            assert (await procview.rpc_kill(box, spec))["ok"] is True
+        else:
+            with pytest.raises(procview.KillRefused, match="older than Kill process"):
+                await procview.rpc_kill(box, spec)
+        sent = _json.loads(b.recv(1000))
+        assert sent["mode"] == "kill_pid" and sent["pid"] == 812 and sent["start_ticks"] == 5
+        b.close()
+
+
 async def test_the_guests_refusal_and_an_unreachable_box_are_relayed(kbox):
     async def refuse(b, spec):
         return {"type": "kill", "ok": False, "why": "changed", "error": "pid 812 is now curl"}
@@ -487,6 +511,20 @@ async def test_stop_whole_run_asks_first_and_then_stops_the_live_tree(db, client
     async with db.execute("SELECT actor, acknowledged FROM security_events "
                           "WHERE kind = 'run_stopped'") as cur:
         assert [tuple(x) for x in await cur.fetchall()] == [("operator", 1)]
+
+
+async def test_stop_is_honest_when_nothing_could_be_cancelled(db, client, live, monkeypatch):
+    """A node whose loop is live but is neither a chat turn nor an interactive run (a
+    plan item's own turn) has nothing here to cancel: say so, do not claim a stop."""
+    from backend import chat
+    await _conv(db, 60)
+    live.ids = {60}
+    monkeypatch.setattr(chat, "_stop", lambda cid: False)
+    eid = await _agent_event(db, 60)
+    out = (await client.post(f"/api/security/events/{eid}/stop", json={"scope": "agent"})).json()
+    assert out["stopped"] is False and "Nothing could be cancelled" in out["message"]
+    async with db.execute("SELECT COUNT(*) AS n FROM security_events WHERE kind = 'run_stopped'") as cur:
+        assert (await cur.fetchone())["n"] == 0
 
 
 async def test_stop_refusals(db, client, live):

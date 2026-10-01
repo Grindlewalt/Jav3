@@ -306,6 +306,21 @@ async def test_the_runs_list_can_carry_each_cards_newest_events(db, client):
     assert full["kinds"][0]["n"] == 3
 
 
+async def test_a_card_with_many_kinds_carries_every_kinds_newest_event(db, client):
+    await _conv(db, 51)
+    await _ev(db, kind="harness_fault", severity="info", conversation_id=51, summary="rep")
+    await _ev(db, project="p", conversation_id=51, summary="proc")
+    for i in range(6):                                  # newer than both, one kind
+        await _ev(db, kind="write_flag", project="p", conversation_id=51, summary=f"w{i}",
+                  detail={"path": f"f{i}.py"})
+    full = (await client.get("/api/security/runs?events=3")).json()["runs"][0]
+    assert {e["kind"] for e in full["events"]} == {"harness_fault", "unexpected_process",
+                                                   "write_flag"}
+    assert [e["id"] for e in full["events"]] == sorted((e["id"] for e in full["events"]),
+                                                       reverse=True)
+    assert len((await client.get("/api/security/runs?events=50")).json()["runs"][0]["events"]) == 8
+
+
 async def test_the_existing_endpoints_still_work(db, client):
     await _ev(db, kind="write_flag", project="p", summary="w")
     r = await client.get("/api/security/events?unacknowledged=true&queue=true")

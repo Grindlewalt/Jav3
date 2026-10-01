@@ -924,7 +924,9 @@ async def rpc_kill(box, spec: dict) -> Any:
         sock.close()
     reply = json.loads(line)
     if not isinstance(reply, dict) or reply.get("type") != "kill":
-        raise ValueError("not a kill reply (this box's guest may predate the verb)")
+        # an older guest answers an unknown mode with an error event
+        raise KillRefused("this box's guest is older than Kill process: restart the box to "
+                          "get the new one, or stop the process by hand")
     return reply
 
 
@@ -978,6 +980,8 @@ async def kill_process(box_id: str, pid: int, exe: str, *, cmd: str | None = Non
     try:
         reply = await asyncio.wait_for(_killers.get(box.kind, rpc_kill)(box, spec),
                                        FETCH_TIMEOUT_S * 2)
+    except KillRefused:
+        raise
     except (OSError, ValueError, asyncio.TimeoutError) as e:
         raise KillRefused(f"could not reach the box: {clean_str(str(e) or type(e).__name__, 'error')}")
     if not isinstance(reply, dict) or reply.get("ok") is not True:
