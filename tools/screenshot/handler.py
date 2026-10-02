@@ -174,10 +174,27 @@ def proxy_addr() -> tuple[str, str, int]:
 
 def chromium_argv(binary: str, url: str, out: str, width: int, height: int,
                   wait_ms: int, proxy: str, profile_dir: str, *, root: bool) -> list[str]:
+    # A headless launch phones Google for its own housekeeping (component
+    # updates, network time, optimization hints, crash upload, reliability
+    # beacons): 37 launches in one run put those hosts in the egress log 37 times
+    # each. Chromium honours only the LAST --disable-features, so it is one list.
+    # Checked against Chrome on a logging proxy: the network-time feature stops
+    # clients2.google.com and the component updater's url-source stops
+    # update.googleapis.com (--disable-component-update alone did not). Still
+    # seen: accounts.google.com/ListAccounts and a www.google.com/gstatic.com
+    # pair, which only a managed policy file in the image can switch off.
+    off = ",".join(("OptimizationHints", "OptimizationGuideModelDownloading",
+                    "OptimizationHintsFetching", "OptimizationTargetPrediction",
+                    "MediaRouter", "Translate", "NetworkTimeServiceQuerying",
+                    "AutofillServerCommunication", "CertificateTransparencyComponentUpdater"))
     argv = [binary, "--headless=new", "--disable-gpu", "--hide-scrollbars",
             "--no-first-run", "--no-default-browser-check", "--disable-extensions",
             "--disable-dev-shm-usage", "--disable-background-networking",
             "--disable-sync", "--metrics-recording-only", "--mute-audio",
+            "--disable-component-update", "--component-updater=url-source=http://127.0.0.1:9/",
+            "--disable-domain-reliability", "--no-pings", "--disable-breakpad",
+            "--disable-client-side-phishing-detection", "--disable-default-apps",
+            f"--disable-features={off}",
             f"--user-data-dir={profile_dir}", f"--window-size={width},{height}",
             f"--virtual-time-budget={max(wait_ms, 1)}", f"--screenshot={out}",
             f"--proxy-server={proxy}"]

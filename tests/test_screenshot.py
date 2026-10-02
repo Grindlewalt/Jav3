@@ -111,6 +111,25 @@ def test_chromium_argv_uses_proxy_and_url_last():
     assert "--window-size=1280,800" in argv
 
 
+def test_chromium_argv_keeps_the_browser_from_phoning_google():
+    argv = shot.chromium_argv("/usr/bin/chromium", "https://example.com", "/tmp/o.png",
+                              1280, 800, 2000, "http://10.201.10.1:8443", "/tmp/p", root=False)
+    for flag in ("--disable-background-networking", "--disable-sync", "--disable-component-update",
+                 "--disable-domain-reliability", "--no-pings", "--disable-breakpad",
+                 "--disable-client-side-phishing-detection"):
+        assert flag in argv, flag
+    # the component updater is pointed at a loopback port nothing listens on
+    assert "--component-updater=url-source=http://127.0.0.1:9/" in argv
+    # only the last --disable-features counts to Chromium, so there must be exactly one
+    feats = [a for a in argv if a.startswith("--disable-features=")]
+    assert len(feats) == 1
+    off = set(feats[0].split("=", 1)[1].split(","))
+    assert {"OptimizationHints", "MediaRouter", "NetworkTimeServiceQuerying"} <= off
+    # nothing here can turn the sandbox off or move the page: url last, proxy still set
+    assert argv[-1] == "https://example.com" and "--no-sandbox" not in argv
+    assert "--proxy-server=http://10.201.10.1:8443" in argv
+
+
 def test_host_side_refuses():
     assert asyncio.run(shot.run(mode="url", url="http://localhost")).startswith("error")
 
