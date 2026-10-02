@@ -9,7 +9,7 @@ import Button from './components/Button.jsx'
 import { activeFrom } from './chatActive.js'
 
 // The chat sidebar's list, grouped: Active (something running right now),
-// Projects (links to their workspace), then Starred, then each folder, then
+// Projects (links to their workspace, ＋ for a new one), then Starred, then each folder, then
 // Recent (everything unfiled). Each chat shows exactly once — an active chat
 // lives under Active while it runs, a starred one under Starred even if it is
 // filed, and each returns to its usual group when that stops.
@@ -271,24 +271,31 @@ export default function ChatGroups({
   return (
     <div className="convo-list">
       {activeRows.length > 0 && group('active', 'Active', activeRows)}
-      {projects.length > 0 && (
-        <section className="convo-group">
-          <GroupHead id="projects" label="Projects" count={projects.length}
-                     folded={!!folded.projects} onToggle={toggle} />
-          {!folded.projects && (
-            <ul id="convo-group-projects" className="convo-rows proj-rows">
-              {projects.map((p) => (
-                <li key={p.slug}>
-                  <Link to={projectHref(p)} title={p.slug}>
-                    <span className="proj-dot" aria-hidden="true" />
-                    <span className="convo-title ellipsis">{p.name}</span>
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      )}
+      {/* shown with no projects too: its ＋ is the way to make the first one.
+          /projects opens the Projects sheet (create, import, rename, delete),
+          which used to be reachable only from the bottom of Work's ＋ picker. */}
+      <section className="convo-group">
+        <GroupHead id="projects" label="Projects" count={projects.length}
+                   folded={!!folded.projects} onToggle={toggle}>
+          <Link to="/projects" className="win-btn convo-group-add" title="new project"
+                aria-label="new project">＋</Link>
+        </GroupHead>
+        {!folded.projects && (projects.length ? (
+          <ul id="convo-group-projects" className="convo-rows proj-rows">
+            {projects.map((p) => (
+              <li key={p.slug}>
+                <Link to={projectHref(p)} title={p.slug}>
+                  <span className="proj-dot" aria-hidden="true" />
+                  <span className="convo-title ellipsis">{p.name}</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p id="convo-group-projects" className="convo-group-empty">
+            No projects yet — ＋ makes one.</p>
+        ))}
+      </section>
       {starred.length > 0 && group('starred', 'Starred', starred)}
       {folders.map((f) => {
         const key = `f:${f.id}`

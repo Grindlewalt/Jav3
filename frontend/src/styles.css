@@ -978,6 +978,8 @@ input:focus, textarea:focus { border-color: var(--accent);
 .convo-group-count { margin-left: auto; letter-spacing: 0; opacity: 0.7;
   font-variant-numeric: tabular-nums; }
 .convo-group-menu { opacity: 0; transition: opacity 0.15s; }
+/* Projects' ＋ stays visible: it is the only obvious way to make a project */
+.convo-group-add { text-decoration: none; }
 .convo-group-head:hover .convo-group-menu,
 .convo-group-head:focus-within .convo-group-menu { opacity: 1; }
 .convo-group-empty { margin: 0; padding: var(--sp-2) var(--sp-6);
