@@ -309,3 +309,28 @@ def test_inner_timeout_parse():
     assert _inner_timeout("curl --timeout 5 url") is None       # a flag, not the command
     assert _inner_timeout("echo timeout_seconds 99") is None
     assert _inner_timeout("make") is None
+
+
+async def test_spec_says_which_route_installs_packages(tmp_env):
+    """The benchmark-game agent kept running apt-get in run_code while package_request
+    was refused by the profile: the spec names both routes, and the call's own limit."""
+    await init_db()
+    registry.compile_registry()
+    spec = next(s["function"] for s in registry.openai_tool_specs()
+                if s["function"]["name"] == "run_code")
+    desc = spec["description"]
+    assert "deb.debian.org" in desc and "package_request" in desc and "per-run" in desc
+    assert "…" not in desc                       # the body fits the spec cap uncut
+    limit = spec["parameters"]["properties"]["timeout_seconds"]["description"]
+    assert "does not raise it" in limit and "tail/head/grep" in limit
+
+
+async def test_edit_file_spec_describes_every_argument(tmp_env):
+    await init_db()
+    registry.compile_registry()
+    spec = next(s["function"] for s in registry.openai_tool_specs()
+                if s["function"]["name"] == "edit_file")
+    props = spec["parameters"]["properties"]
+    assert all(props[k].get("description") for k in ("path", "find", "replace", "all"))
+    assert "replace" in props["replace"]["description"] and "empty string" in props["replace"]["description"]
+    assert "run_code" in spec["description"]     # a cat/sed there counts as the read
