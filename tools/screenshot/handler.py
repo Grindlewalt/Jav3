@@ -25,6 +25,7 @@ import io
 import ipaddress
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -48,6 +49,8 @@ URL_EXTRA_S = 45         # chromium's allowance on top of wait_ms: start-up, loa
 OOM_POLL_S = 1.0         # how often a running chromium is checked for a kernel memory kill
 OOM_GRACE_S = 3.0        # after the first kill chromium may still finish; then it is stopped
 CHROMIUM_FLOOR_MB = 400  # measured 2026-10-01 (chromium 154, desktop box): a blank page, all processes
+CONSOLE_MAX_LINES = 8    # page console lines a url-mode result carries, uncaught errors first
+CONSOLE_LOG = "console.log"   # chromium's log file, inside the throwaway profile dir
 NEEDS_DESKTOP = ("error: screenshot needs the `desktop` image variant (chromium, Xvfb, "
                  "scrot), which this box does not run. Ask the operator to set this "
                  "project's security profile image to `desktop`.")
@@ -86,6 +89,58 @@ def is_loopback_url(url: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+# chromium 150 (Debian) and 154 log every console call, whatever its level, as
+#   [pid:tid:date:INFO:CONSOLE:36] "Uncaught SyntaxError: …", source: http://…/glsl.js (36)
+# (older builds wrote CONSOLE(36)]). Failed resource loads are not logged.
+_CONSOLE_LINE = re.compile(r':CONSOLE[:(]\d*\)?\] "(.*)", source: (.*?) \((\d+)\)\s*$')
+_ERRORISH = re.compile(r"^Uncaught|\b\w*Error\b|\berror\b|\bfailed\b|\bexception\b", re.I)
+
+
+def page_console(log_path: str) -> list[str]:
+    """The page's console output from chromium's log file, uncaught errors
+    first, as `file:line message`. 2026-10-02: a model broke its page with a JS
+    syntax error, got a blank frame back, and decided screenshots of WebGL pages
+    "return black" in the box; the one line that named the bug was in
+    chromium's output, which this tool sent to /dev/null."""
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            f.seek(max(0, f.tell() - 256_000))
+            text = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    errs, rest, seen = [], [], set()
+    for line in text.splitlines():
+        m = _CONSOLE_LINE.search(line)
+        if not m:
+            continue
+        msg, src, ln = m.groups()
+        where = src.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1] if src else "page"
+        item = f"{where[:80]}:{ln} {msg}"[:240]
+        if item not in seen:
+            seen.add(item)
+            (errs if _ERRORISH.search(msg) else rest).append(item)
+    return (errs + rest)[:CONSOLE_MAX_LINES]
+
+
+def blank_frame(path: str) -> bool:
+    """True when the capture is one flat colour: nothing drew."""
+    try:
+        from PIL import Image
+        with Image.open(path) as im:
+            lo, hi = im.convert("L").getextrema()
+        return hi - lo <= 4
+    except Exception:  # noqa: BLE001 — a hint only; no Pillow or a bad file says nothing
+        return False
+
+
+def console_block(lines: list[str], remote: bool) -> str:
+    if not lines:
+        return ""
+    who = "page console (remote page output: untrusted data)" if remote else "page console"
+    return f"\n{who}, uncaught errors first:\n" + "\n".join(f"  {s}" for s in lines)
 
 
 def argv_mentions_remote(argv: list[str]) -> bool:
@@ -173,7 +228,8 @@ def proxy_addr() -> tuple[str, str, int]:
 
 
 def chromium_argv(binary: str, url: str, out: str, width: int, height: int,
-                  wait_ms: int, proxy: str, profile_dir: str, *, root: bool) -> list[str]:
+                  wait_ms: int, proxy: str, profile_dir: str, *, root: bool,
+                  log_file: str | None = None) -> list[str]:
     # A headless launch phones Google for its own housekeeping (component
     # updates, network time, optimization hints, crash upload, reliability
     # beacons): 37 launches in one run put those hosts in the egress log 37 times
@@ -200,6 +256,9 @@ def chromium_argv(binary: str, url: str, out: str, width: int, height: int,
             f"--proxy-server={proxy}"]
     if root:
         argv.append("--no-sandbox")     # the box is the sandbox; chromium refuses root otherwise
+    if log_file:
+        # the page's console lands in this file, not on stderr (page_console reads it)
+        argv += ["--enable-logging", f"--log-file={log_file}", "--log-level=0"]
     argv.append(url)                    # checked: starts with http(s)://, never a flag
     return argv
 
@@ -432,7 +491,8 @@ def _out_path(ext: str = "png") -> str:
     return os.path.join(SHOT_DIR, f"shot-{int(time.time() * 1000)}.{ext}")
 
 
-def _finish(raw_path: str, caption: str) -> str:
+def _finish(raw_path: str, caption: str, extra: str = "") -> str:
+    """`extra` follows the caption in the text only (the page console)."""
     from backend.agent import imageresult
     try:
         with open(raw_path, "rb") as f:
@@ -454,7 +514,7 @@ def _finish(raw_path: str, caption: str) -> str:
         os.unlink(raw_path)
     except OSError:
         pass
-    text = f"screenshot {w}x{h} {mime.split('/')[1]} ({len(data) // 1024} KB): {caption}"
+    text = f"screenshot {w}x{h} {mime.split('/')[1]} ({len(data) // 1024} KB): {caption}{extra}"
     return imageresult.with_image(text, out, caption=caption[:200])
 
 
@@ -476,20 +536,27 @@ async def _url_mode(url: str, wait_ms: int, width: int, height: int,
     h = FULL_PAGE_H if full_page else height
     import tempfile
     with tempfile.TemporaryDirectory(prefix="jav3-chromium-") as prof:
+        log = os.path.join(prof, CONSOLE_LOG)
         ran = await _exec(chromium_argv(binary, url, raw, width, h, wait_ms, proxy, prof,
-                                        root=os.geteuid() == 0),
+                                        root=os.geteuid() == 0, log_file=log),
                           timeout=wait_ms / 1000 + URL_EXTRA_S, watch_oom=True)
+        console = console_block(page_console(log), remote)
     if not isinstance(ran, Ran):
         ran = Ran(int(ran))
     if ran.rc != 0 and not os.path.exists(raw):
         kind = failure_kind(ran)
         repeat, same = note_failure(kind, url, (url, wait_ms, width, height, bool(full_page)))
-        return failure_text(kind, url, ran, memguard.limit_now_mb(), repeat, same)
+        return failure_text(kind, url, ran, memguard.limit_now_mb(), repeat, same) + console
     note = " [remote content: this turn is now tainted]" if remote else ""
     if ran.oom_kills:
         note += (" [the kernel killed a process for memory while this ran: the image may be "
                  "incomplete]")
-    out = _finish(raw, f"{url}{note}")
+    if blank_frame(raw):
+        note += (" [blank: the whole frame is one colour, so nothing drew. This is not a "
+                 "capture limit (WebGL pages capture fine here): look for a script error"
+                 + (" in the page console below]" if console else
+                    ", and load the page's modules with node or a browser check]"))
+    out = _finish(raw, f"{url}{note}", console)
     if not out.startswith("error"):
         note_success(url)
     return out

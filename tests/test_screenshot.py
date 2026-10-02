@@ -504,3 +504,99 @@ def test_app_mode_names_a_memory_kill(guest, monkeypatch, tmp_path):
     assert out.startswith("error: the app or its display was killed for using more than the "
                           "975 MB")
     assert "raise this project's RAM" in out
+
+
+# --- the page console and blank frames (2026-10-02) ------------------------------
+# A model broke its page with a JS syntax error, got a blank frame back and decided
+# WebGL capture "returns black" in the box. The error line was in chromium's log.
+
+CHROMIUM_LOG = (
+    '[1:1:1002/113521.1:INFO:CONSOLE:3] "a plain log line", source: http://127.0.0.1:5173/ (3)\n'
+    '[1:1:1002/113521.1:WARNING:gpu_init.cc(9)] not a console line\n'
+    '[1:1:1002/113521.2:INFO:CONSOLE:36] "Uncaught SyntaxError: Unexpected identifier '
+    "'half'\", source: http://127.0.0.1:5173/src/render/glsl.js?v=2 (36)\n"
+    '[1:1:1002/113521.2:INFO:CONSOLE(7)] "Uncaught (in promise) Error: x", source: http://h/a.js (7)\n'
+    '[1:1:1002/113521.3:INFO:CONSOLE:3] "a plain log line", source: http://127.0.0.1:5173/ (3)\n')
+
+
+def test_page_console_errors_first_deduped(tmp_path):
+    log = tmp_path / "console.log"
+    log.write_text(CHROMIUM_LOG)
+    got = shot.page_console(str(log))
+    assert got[0] == "glsl.js:36 Uncaught SyntaxError: Unexpected identifier 'half'"
+    assert got[1] == "a.js:7 Uncaught (in promise) Error: x"      # the older CONSOLE(7)] form
+    assert got[2:] == ["127.0.0.1:5173:3 a plain log line"]           # once, after the errors
+    assert shot.page_console(str(tmp_path / "missing.log")) == []
+    log.write_text("".join(f'[x:INFO:CONSOLE:{i}] "line {i}", source: http://h/p.js ({i})\n'
+                           for i in range(40)))
+    assert len(shot.page_console(str(log))) == shot.CONSOLE_MAX_LINES
+
+
+def test_chromium_argv_logs_the_console_to_a_file_url_still_last():
+    argv = shot.chromium_argv("/usr/bin/chromium", "http://127.0.0.1:5173/", "/tmp/o.png",
+                              1280, 800, 2000, "http://10.201.10.1:8443", "/tmp/p", root=True,
+                              log_file="/tmp/p/console.log")
+    assert "--enable-logging" in argv and "--log-file=/tmp/p/console.log" in argv
+    assert "--log-level=0" in argv and argv[-1] == "http://127.0.0.1:5173/"
+    plain = shot.chromium_argv("/usr/bin/chromium", "http://127.0.0.1:5173/", "/tmp/o.png",
+                               1280, 800, 2000, "http://10.201.10.1:8443", "/tmp/p", root=True)
+    assert not any(a.startswith("--log-file") for a in plain)
+
+
+def test_blank_frame(tmp_path):
+    flat, noisy = tmp_path / "flat.png", tmp_path / "noisy.png"
+    flat.write_bytes(_png(320, 200))
+    noisy.write_bytes(_png(320, 200, noisy=True))
+    assert shot.blank_frame(str(flat)) and not shot.blank_frame(str(noisy))
+    assert not shot.blank_frame(str(tmp_path / "missing.png"))
+
+
+def _chromium_with_console(monkeypatch, png: bytes, log: str):
+    monkeypatch.setattr(shot.shutil, "which", lambda n: "/usr/bin/" + n if n == "chromium" else None)
+
+    async def fake_exec(argv, *, timeout, env=None, cwd=None, watch_oom=False):
+        opt = {a.split("=", 1)[0]: a.split("=", 1)[1] for a in argv if "=" in a}
+        with open(opt["--log-file"], "w") as f:
+            f.write(log)
+        with open(opt["--screenshot"], "wb") as f:
+            f.write(png)
+        return shot.Ran(0)
+    monkeypatch.setattr(shot, "_exec", fake_exec)
+
+
+def test_url_mode_blank_frame_carries_the_console(guest, monkeypatch):
+    _chromium_with_console(monkeypatch, _png(1280, 800), CHROMIUM_LOG)
+    out = asyncio.run(shot.run(mode="url", url="http://127.0.0.1:5173/"))
+    text, img = imageresult.split(out)
+    assert img is not None
+    assert "[blank: the whole frame is one colour" in text and "not a capture limit" in text
+    assert "page console, uncaught errors first:\n  glsl.js:36 Uncaught SyntaxError" in text
+    assert "untrusted" not in text                     # its own loopback page
+    assert "Uncaught" not in (img.caption or "")       # the console rides in the text only
+
+
+def test_url_mode_drawn_frame_no_blank_note_remote_console_marked(guest, monkeypatch):
+    _chromium_with_console(monkeypatch, _png(640, 400, noisy=True), CHROMIUM_LOG)
+    out = asyncio.run(shot.run(mode="url", url="https://example.com/"))
+    text, _ = imageresult.split(out)
+    assert "[blank" not in text
+    assert "page console (remote page output: untrusted data)" in text
+
+
+def test_url_mode_quiet_page_adds_nothing(guest, monkeypatch):
+    _chromium_with_console(monkeypatch, _png(640, 400, noisy=True), "")
+    text, _ = imageresult.split(asyncio.run(shot.run(mode="url", url="http://localhost:8000/")))
+    assert "console" not in text and "[blank" not in text
+
+
+def test_url_mode_failure_still_shows_the_console(guest, monkeypatch, _fresh_fails):
+    monkeypatch.setattr(shot.shutil, "which", lambda n: "/usr/bin/" + n)
+
+    async def fake_exec(argv, *, timeout, env=None, cwd=None, watch_oom=False):
+        log = next(a.split("=", 1)[1] for a in argv if a.startswith("--log-file="))
+        with open(log, "w") as f:
+            f.write(CHROMIUM_LOG)
+        return shot.Ran(1)
+    monkeypatch.setattr(shot, "_exec", fake_exec)
+    out = asyncio.run(shot.run(mode="url", url="http://127.0.0.1:5173/"))
+    assert out.startswith("error: chromium failed (exit 1)") and "glsl.js:36 Uncaught" in out
