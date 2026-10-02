@@ -13,7 +13,7 @@ from backend.orchestrator import run_job
 _in_funnel = contextvars.ContextVar("jav3_in_funnel", default=False)
 
 
-async def run(brief: str, title: str = "") -> str:
+async def run(brief: str, title: str = "", max_rounds: int | None = None) -> str:
     if not (brief or "").strip():
         return "error: empty brief — describe what the team should accomplish."
     if _in_funnel.get():
@@ -26,7 +26,8 @@ async def run(brief: str, title: str = "") -> str:
         leaf_tools = openai_tool_specs(
             [e for e in load_registry() if e["name"] not in NON_DELEGABLE])
         r = await run_job(job_id, brief, slug, leaf_tools=leaf_tools,
-                          title=(title or brief)[:60])
+                          title=(title or brief)[:60],
+                          **({"max_rounds": max_rounds} if max_rounds else {}))
         return (f"Agent team finished (job {job_id}); node rollups staged "
                 f"under runs/{job_id}/ for review.\n\nRollup:\n{r['rollup']}")
     finally:
