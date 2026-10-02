@@ -252,13 +252,18 @@ async def _open_run(db, agent: dict, task: str, active=_USE_DB, *,
 
 
 async def run_agent_headless(slug: str, task: str, active=_USE_DB, *,
-                             model: str | None = None, **hooks) -> dict:
+                             model: str | None = None,
+                             max_rounds: int | None = None, **hooks) -> dict:
     """Run a defined agent to completion, no streaming — for scheduled runs and
     the spawn_agent tool. `model` (provider/model) overrides the definition's
-    own pin for this run; `hooks` are _run_headless's keyword hooks."""
+    own pin for this run; `max_rounds` its round cap for this run (otherwise
+    the definition's max_iterations, else the subagent cap); `hooks` are
+    _run_headless's keyword hooks."""
     agent = _read(slug)  # 404s if missing
     if model:
         agent = {**agent, "model": model, "base_url": ""}
+    if max_rounds:
+        agent = {**agent, "max_iterations": clamp_rounds(max_rounds, settings.subagent_max_iterations)}
     return await _run_headless(agent, task, active, **hooks)
 
 
@@ -291,16 +296,36 @@ lookups skip the note. Your final reply goes to the agent that spawned you:
 outcome first, no process narration."""
 
 
-def _temp_agent_def(prompt: str, duplicate: bool, label: str = "") -> dict:
+# what the loop returns as the answer when a turn runs out of rounds without one
+CAP_FINAL = "(stopped: hit the ReAct iteration limit"
+
+
+def clamp_rounds(n, default: int) -> int:
+    """A caller-chosen round cap, kept in 1..plan_item_max_iterations (the most
+    any one headless run gets). Missing, zero or unparseable means `default`."""
+    try:
+        n = int(n or 0)
+    except (TypeError, ValueError):
+        n = 0
+    return max(1, min(n if n > 0 else default, settings.plan_item_max_iterations))
+
+
+def _temp_agent_def(prompt: str, duplicate: bool, label: str = "",
+                    max_rounds: int | None = None) -> dict:
     """An in-memory AGENT.md equivalent — same keys the _agent_* helpers read,
     never touches the roster on disk. `duplicate` mirrors the operator's ask:
-    a full copy of Jav3's context only when the task truly needs it."""
+    a full copy of Jav3's context only when the task truly needs it.
+
+    max_iterations is always set: left at 0 it fell back to the 12-round
+    subagent fence, which killed all three big delegations of the 2026-09-30
+    benchmark run (convs 571-573) with no way for the caller to ask for more."""
     return {
         "name": (label or "").strip()[:40] or "temp agent",
         "prompt": prompt.strip() + "\n\n" + TEMP_REPORT_BACK,
         "description": "", "model": "", "base_url": "", "own_memory": False,
         "context_exclude": [] if duplicate else list(TEMP_LEAN_EXCLUDE),
-        "tools_exclude": [], "skills_exclude": [], "max_iterations": 0,
+        "tools_exclude": [], "skills_exclude": [],
+        "max_iterations": clamp_rounds(max_rounds, settings.temp_agent_default_rounds),
         "project": "",
     }
 
@@ -308,13 +333,15 @@ def _temp_agent_def(prompt: str, duplicate: bool, label: str = "") -> dict:
 async def run_temp_agent_headless(prompt: str, task: str, *,
                                   duplicate: bool = False, label: str = "",
                                   active=_USE_DB, model: str | None = None,
+                                  max_rounds: int | None = None,
                                   **hooks) -> dict:
     """A disposable agent: no AGENT.md, no roster entry — a role prompt layered
     on Jav3's own context (full when duplicate, lean otherwise), run once and
     gone. What survives is the run's conversation row (Jobs view) and any
     memory note the agent writes. `model` (provider/model) as for
-    run_agent_headless."""
-    agent = _temp_agent_def(prompt, duplicate, label)
+    run_agent_headless; `max_rounds` is the agent's tool-round cap (default
+    settings.temp_agent_default_rounds, at most plan_item_max_iterations)."""
+    agent = _temp_agent_def(prompt, duplicate, label, max_rounds)
     if model:
         agent["model"] = model
     return await _run_headless(agent, task, active, **hooks)
@@ -397,10 +424,68 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
             "VALUES (?, 'assistant', ?)", (conversation_id, final_content))
         await db.commit()
         await rec.link(cur.lastrowid)
+        rounds, ended = await _turn_outcome(db, conversation_id, stop, final_content)
         return {"conversation_id": conversation_id, "agent": agent["name"],
-                "final": final_content, "stop": stop}
+                "final": final_content, "stop": stop,
+                # why the loop ended (final / cap / dead_end / budget), the
+                # rounds it used and the cap it ran under — the final event
+                # names only a budget stop, so the loop's own turn_stats row
+                # is where a hit round cap is recorded
+                "ended": ended, "rounds": rounds, "cap": cap}
     finally:
         await db.close()
+
+
+async def _turn_outcome(db, conversation_id: int, stop, final_content: str):
+    """(rounds used, why the turn ended) from the turn's turn_stats row — none
+    for an incognito turn, then a cap hit is told by the loop's own cut-off
+    text. `ended` is one of turnstats.STOPS."""
+    try:
+        async with db.execute(
+            "SELECT rounds, stop FROM turn_stats WHERE conversation_id = ? "
+            "ORDER BY id DESC LIMIT 1", (conversation_id,)) as cur:
+            row = await cur.fetchone()
+    except Exception:  # noqa: BLE001 — a missing counter row never fails the run
+        row = None
+    if row is not None:
+        return row["rounds"], (stop or row["stop"])
+    if stop:
+        return None, stop
+    return None, ("cap" if (final_content or "").startswith(CAP_FINAL) else "final")
+
+
+def stop_note(result: dict) -> tuple[str, str] | None:
+    """(headline, hint) for the parent when the child's loop did not end on its
+    own answer — a spent round cap above all — else None. The headline leads
+    the report it returns, the hint follows it. `result` is what _run_headless
+    returned (a caller's fake may lack the keys)."""
+    ended, cap = result.get("ended"), result.get("cap")
+    if ended == "cap":
+        used = min(result.get("rounds") or cap or 0, cap or 0) if cap else 0
+        of = f" ({used}/{cap})" if used else ""
+        return (f"ran out of rounds{of} before finishing; partial work:",
+                "Spawn it again with a higher max_rounds (up to "
+                f"{settings.plan_item_max_iterations}) or a narrower task, or "
+                "finish the rest yourself.")
+    if ended == "dead_end":
+        return ("stopped early — its tool calls kept failing, so the loop took its "
+                "tools away and made it answer; what it had:",
+                "Fix what blocked it (see its transcript), or do the rest yourself.")
+    if ended == "budget":
+        return ("stopped by the token budget before finishing; partial work:", "")
+    return None
+
+
+def spawn_report(result: dict, final: str) -> str:
+    """What spawn_agent / spawn_temp_agent hand back: the child's report under
+    its name, led by what stopped it when it did not finish on its own."""
+    stopped = stop_note(result)
+    if not stopped:
+        return f"[{result['agent']} reports]\n{final}"
+    headline, hint = stopped
+    tail = f"{hint} " if hint else ""
+    return (f"[{result['agent']}] {headline}\n{final}\n({tail}Transcript: "
+            f"conversation {result['conversation_id']} in the Jobs view.)")
 
 
 async def compact_report(agent_name: str, task: str, report: str,

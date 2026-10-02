@@ -17,6 +17,9 @@ parameters:
     model:
       type: string
       description: provider/model to run this agent on. ONLY when the operator explicitly said which model to use for this task — otherwise omit it and the agent uses its own or the default model. Never choose one yourself.
+    max_rounds:
+      type: integer
+      description: The most tool rounds the agent gets, 60 at most. Default is the agent's own limit, else 12 — raise it for a big job. When it runs out you get its partial work, marked as such.
   required: [agent, task]
 ---
 Brief the agent like a smart colleague who just walked into the room — it has
@@ -29,3 +32,6 @@ can spawn agents two levels deep (you -> agent -> agent, then leaf) on one
 shared token budget — brief a mid-level agent on WHO it may summon or it will
 do everything itself. You get its final report back as the tool result — relay
 the useful parts to the operator.
+
+Unless you pass max_rounds the agent gets its own round limit, else 12; a run
+that hits the limit comes back marked partial, not as a finished report.

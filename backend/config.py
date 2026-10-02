@@ -260,6 +260,11 @@ class Settings(BaseSettings):
     # tokens re-sending the pile each iteration.
     max_react_iterations: int = 60
     subagent_max_iterations: int = 12
+    # a spawn_temp_agent child is a one-off worker given a whole job (a build, an
+    # investigation), not a lookup: at 12 rounds three of three big delegations
+    # died unfinished (2026-09-30 benchmark run). The caller may pass max_rounds,
+    # up to plan_item_max_iterations.
+    temp_agent_default_rounds: int = 30
     # a plan item builds a whole slice of a project; 12 rounds went entirely on
     # recon in the 2026-09-27 Voxelcraft run (every item "ran out of budget")
     plan_item_max_iterations: int = 60
