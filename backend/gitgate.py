@@ -24,13 +24,30 @@ CLONE_TIMEOUT = 300
 
 # The harness's own files at the project root: never part of a commit or a push,
 # whatever the project's .gitignore says (the agent can replace the host-written
-# one). `.todo.md` is the todo_update list. Used for .gitignore, for
-# .git/info/exclude (which `git add -A` honours and the agent cannot write): the
-# add in approve_request and gitea's snapshot rely on that one.
-RUNTIME_FILES = (".staging", ".workspace.json", ".context.json", ".todo.md", "data")
-GITIGNORE = ".staging/\n.workspace.json\n.context.json\n.todo.md\ndata/\n"
+# one). `.todo.md` is the todo_update list (`.todo-archive.md` its pruned items),
+# `.plan.json` the plan checklist, `runs/<job>/*.md` the rollups an orchestrator
+# or research run writes. Used for .gitignore, for .git/info/exclude (which
+# `git add -A` honours and the agent cannot write: the add in approve_request and
+# gitea's snapshot rely on that one), and for unstage_harness below.
+RUNTIME_FILES = (".staging", ".workspace.json", ".context.json", ".todo.md",
+                 ".todo-archive.md", ".plan.json", "data")
+ROLLUP_GLOB = "runs/*/*.md"     # narrow on purpose: a project's own runs/ data stays committable
+_EXCLUDE_PATTERNS = tuple(f"/{n}" for n in RUNTIME_FILES) + (f"/{ROLLUP_GLOB}",)
+# what a commit must never stage even when tracked, as pathspecs (data/ is kept
+# out of new work above but is not policed once tracked: a project may hold real
+# data there on purpose)
+HARNESS_PATHSPECS = (".staging", ".workspace.json", ".context.json", ".todo.md",
+                     ".todo-archive.md", ".plan.json", f":(glob){ROLLUP_GLOB}")
+# The managed block of a project's .gitignore. Everything between the markers is
+# rewritten by ensure_gitignore, so a project's own rules go outside it.
+MANAGED_BEGIN = ("# >>> Jav3 harness files: managed by Jav3 (rewritten on load); "
+                 "your own rules go outside this block")
+MANAGED_END = "# <<< Jav3 harness files"
+GITIGNORE = "\n".join([
+    MANAGED_BEGIN, ".staging/", ".workspace.json", ".context.json", ".todo.md",
+    ".todo-archive.md", "/.plan.json", f"/{ROLLUP_GLOB}", "data/", MANAGED_END]) + "\n"
 _EXCLUDE = "# Jav3 runtime files (written by the host)\n" + "".join(
-    f"/{n}\n" for n in RUNTIME_FILES)
+    f"{p}\n" for p in _EXCLUDE_PATTERNS)
 
 
 def _project_dir(slug: str) -> Path:
@@ -84,6 +101,78 @@ async def flush_guest_writes(slug: str) -> None:
         log.warning("could not pull the guest's writes for %s: %s", slug, e)
 
 
+def ensure_gitignore(slug: str) -> bool:
+    """Make sure the project's .gitignore carries the current managed block of
+    harness files; True if the file was written. Idempotent: no block yet means
+    it is added at the end (nothing of the project's own rules is touched), an
+    old block is replaced in place, and a current one is left alone, so calling
+    it on every load costs one small read. Never raises: a project whose
+    directory or .gitignore cannot be used just goes without."""
+    path = _project_dir(slug) / ".gitignore"
+    try:
+        if not path.parent.is_dir():
+            return False
+        have = path.read_text() if path.exists() else ""
+        lines = have.splitlines()
+        begin = next((i for i, l in enumerate(lines)
+                      if l.startswith("# >>> Jav3 harness files")), None)
+        end = next((i for i, l in enumerate(lines)
+                    if begin is not None and i > begin
+                    and l.startswith("# <<< Jav3 harness files")), None)
+        block = GITIGNORE.splitlines()
+        if begin is not None and end is not None:
+            new = lines[:begin] + block + lines[end + 1:]
+        else:
+            # none, or a damaged one (an end marker lost): add a whole block at
+            # the end; a half block left behind only repeats lines harmlessly
+            new = lines + ([""] if lines and lines[-1].strip() else []) + block
+        text = "\n".join(new) + "\n"
+        if text == have:
+            return False
+        path.write_text(text)
+        return True
+    except (OSError, UnicodeDecodeError) as e:
+        log.warning("could not update %s: %s", path, e)
+        return False
+
+
+async def tracked_harness(slug: str, extra_env: dict[str, str] | None = None) -> list[str]:
+    """Harness files git already tracks (an old commit took them in): they
+    are no longer ignored, so every `git add -A` stages their changes."""
+    rc, out, _ = await run_git(slug, "ls-files", "-z", "--", *HARNESS_PATHSPECS,
+                               extra_env=extra_env)
+    return [p for p in out.split("\0") if p] if rc == 0 else []
+
+
+async def unstage_harness(slug: str, extra_env: dict[str, str] | None = None) -> list[str]:
+    """After a `git add`: put the harness files back to what HEAD has, so a file
+    that is tracked anyway (the history is the operator's to rewrite, not ours)
+    does not ride into the commit. Returns the files it put back."""
+    tracked = await tracked_harness(slug, extra_env)
+    if tracked:
+        await run_git(slug, "reset", "-q", "--", *tracked, extra_env=extra_env)
+    return tracked
+
+
+async def harness_notice(slug: str) -> list[str]:
+    """What to tell the agent about harness files that are tracked: one line per
+    file, and each file only ONCE per project (remembered in .git, which no
+    agent tool can write)."""
+    tracked = await tracked_harness(slug)
+    if not tracked:
+        return []
+    told_path = _project_dir(slug) / ".git" / "jav3-harness-told"
+    try:
+        told = set(told_path.read_text().split("\n")) if told_path.exists() else set()
+        fresh = [t for t in tracked if t not in told]
+        if fresh:
+            told_path.write_text("\n".join(sorted(told | set(fresh))) + "\n")
+    except OSError:
+        fresh = tracked
+    return [f"{t} is tracked; run `git rm --cached {t}` to stop committing it "
+            "(Jav3 leaves it out of every commit meanwhile)" for t in fresh]
+
+
 # per-slug init lock: git_status/git_diff are read_only-flagged, so the loop
 # may run them concurrently — two first-touches must not race `git init`
 _repo_locks: dict[str, asyncio.Lock] = {}
@@ -98,9 +187,7 @@ async def ensure_repo(slug: str) -> None:
             await run_git(slug, "config", "user.name", "Jav3", check=True)
             await run_git(slug, "config", "user.email", settings.git_author_email,
                           check=True)
-        gitignore = d / ".gitignore"
-        if not gitignore.exists():
-            gitignore.write_text(GITIGNORE)
+        ensure_gitignore(slug)
         # an `rm`/rewrite of .gitignore must not let the runtime files into a
         # commit: info/exclude lives inside .git, which no agent tool can write
         exclude = d / ".git" / "info" / "exclude"
@@ -335,6 +422,11 @@ async def create_request(slug: str, message: str, paths: list[str] | None = None
     await ensure_repo(slug)
     await flush_guest_writes(slug)      # this turn's write_file/edit_file, still in the VM
     _, porcelain, _ = await run_git(slug, "status", "--porcelain")
+    tracked = await tracked_harness(slug)
+    if tracked:
+        # a tracked harness file shows as modified on every turn but is never
+        # staged (unstage_harness): it is not something to commit
+        porcelain = "\n".join(l for l in porcelain.splitlines() if l[3:].strip('"') not in tracked)
     if not porcelain.strip():
         raise ValueError("nothing to commit — the working tree is clean: every file in "
                          "the project already matches the last commit. Write or edit "
@@ -362,6 +454,7 @@ async def create_request(slug: str, message: str, paths: list[str] | None = None
         await db.commit()
         row = await _fetch_request(db, cur.lastrowid)
         row["replaced"] = old
+        row["harness_notice"] = await harness_notice(slug)
         return row
     finally:
         await db.close()
@@ -452,6 +545,7 @@ async def approve_request(rid: int, slug: str | None = None) -> dict:
             await run_git(slug, "add", "--", *paths, check=True)
         else:
             await run_git(slug, "add", "-A", check=True)     # RUNTIME_FILES: info/exclude
+        await unstage_harness(slug)         # ...which does not cover a harness file already tracked
         rc, _, _ = await run_git(slug, "diff", "--cached", "--quiet")
         rc_head, head, _ = await run_git(slug, "rev-parse", "--verify", "-q", "HEAD")
         if rc == 0 and rc_head == 0:

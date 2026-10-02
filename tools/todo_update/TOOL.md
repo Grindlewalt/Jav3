@@ -27,5 +27,8 @@ parameters:
 Check items off by `text`, not an index you remember: indexes move as you and
 parallel subagents add items, and checking off the wrong one is worse than an
 error. Add a whole plan in one call with `items`. A call answers with the lines it
-changed and a count; `list` shows everything. The list lives in a hidden file of
-its own; a project's `todo.md` is never edited (an existing one only seeds it).
+changed and a count; `list` shows the finished items still on the list and the
+first 40 open ones, with a count of any more. A list past 45 items moves its older
+finished items to `.todo-archive.md` (the reply says so; positions move up). The
+list lives in a hidden file of its own; a project's `todo.md` is never edited (an
+existing one only seeds it).

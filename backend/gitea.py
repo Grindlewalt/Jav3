@@ -397,6 +397,7 @@ async def _snapshot_commit(slug: str, message: str) -> str:
         # git fails the whole add when such a pathspec names a file the .gitignore
         # also ignores, i.e. whenever a .workspace.json exists.)
         await gitgate.run_git(slug, "add", "-A", extra_env=env, check=True)
+        await gitgate.unstage_harness(slug, extra_env=env)     # a tracked harness file stays as HEAD has it
         _, tree, _ = await gitgate.run_git(slug, "write-tree", extra_env=env, check=True)
         _, base, _ = await gitgate.run_git(slug, "rev-parse", "HEAD^{tree}", check=True)
         if tree.strip() == base.strip():
