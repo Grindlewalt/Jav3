@@ -39,8 +39,12 @@ ARTIFACT_TOTAL_CAP = 8 * 1024 * 1024  # total capture cap per run
 # The same trees the turn-end pack drops (workspace_xfer.SKIP_OUT), so nothing is
 # reported as "kept" that the host then throws away (BUILD-04: .pytest_cache and
 # __pycache__ used to be listed as kept, and agents spent calls cleaning them).
+# .config/.local/.pki: HOME is the project here, so a chromium or pip run writes
+# them; the host drops them on the way out unless git tracks them
+# (workspace_xfer.HOME_DOT_DIRS), and this side cannot ask git.
 SKIP_DIRS = {".staging", ".git", "node_modules", ".npm", ".cache", ".venv",
-             "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+             "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+             ".config", ".local", ".pki"}
 PIPE_GRACE = 2.0     # seconds the pipes get to close after the shell exits
 # The biggest single file a run may write (RLIMIT_FSIZE). It used to be 64 MiB,
 # which killed `apt-get install chromium` (the .deb is bigger: "Method https has
