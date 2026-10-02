@@ -74,6 +74,15 @@ SUMMARY_CHARS = 2_000
 HISTORY_KEEP = 4          # earlier attempts' outcomes a retry is shown
 GUIDANCE_KEEP = 6         # orchestrator guidance entries kept per item
 MAX_FIXES = 4             # orchestrator re-dispatches per item (plan_fix retry)
+CAP_CONTINUES = 1         # round-cap stops per item that spend no attempt (one free continuation)
+RETRY_BRIEF_CHARS = 3_000   # most a retry's "where the last attempt stopped" section adds
+HANDOFF_NOTE_CHARS = 1_200  # of that, the previous attempt's own handoff note
+TRAIL_CALLS = 20          # last tool calls kept per attempt for the next one
+TRAIL_PATHS = 30          # files read / written kept per attempt (paths only)
+HANDOFF_FILE = "reports/notes/{id}.md"   # what an item writes when its rounds run low
+# what a "blocked" report was blocked on: the operator (a credential, a decision)
+# or a capability this host lacks (services, a desktop, a browser, a package)
+BLOCKED_ON = ("operator", "capability")
 
 _locks: dict[str, asyncio.Lock] = {}
 _runs: dict[str, asyncio.Task] = {}          # project slug -> the detached runner
@@ -128,7 +137,8 @@ def new_item(plan: dict, *, title: str, brief: str = "", depends_on=(),
             "model": (str(model).strip() or None) if model else None,
             "attempts": 0, "stalls": 0, "last_error": None, "result_summary": None,
             "conversation_id": None, "notes": [], "report": None,
-            "history": [], "guidance": [], "fixes": 0}
+            "history": [], "guidance": [], "fixes": 0,
+            "continues": 0, "blocked_on": None, "trail": None}
 
 
 def normalise(plan: dict) -> dict:
@@ -170,6 +180,9 @@ def normalise(plan: dict) -> dict:
         it["history"] = [h for h in (raw.get("history") or []) if isinstance(h, dict)][-HISTORY_KEEP:]
         it["guidance"] = [str(g) for g in (raw.get("guidance") or []) if g][-GUIDANCE_KEEP:]
         it["fixes"] = max(0, int(raw.get("fixes") or 0))
+        it["continues"] = max(0, int(raw.get("continues") or 0))
+        it["blocked_on"] = raw.get("blocked_on") if raw.get("blocked_on") in BLOCKED_ON else None
+        it["trail"] = raw.get("trail") if isinstance(raw.get("trail"), dict) else None
         items.append(it)
     ids = {i["id"] for i in items}
     for it in items:
@@ -249,7 +262,10 @@ def public(plan: dict | None, slug: str | None = None) -> dict | None:
     """What the API returns: the file plus the live flag the file cannot know."""
     if plan is None:
         return None
-    return {**plan, "running": is_running(slug) if slug else False}
+    # the retry trail (tool calls, file paths) is the runner's own memory for the
+    # next attempt, not something every poll of the plan should carry
+    items = [{k: v for k, v in it.items() if k != "trail"} for it in plan.get("items") or []]
+    return {**plan, "items": items, "running": is_running(slug) if slug else False}
 
 
 # --- dependency resolution (pure) --------------------------------------------
@@ -355,8 +371,11 @@ assign one to."""
 
 SYNTH_SYSTEM = """Write the closing report for a multi-agent plan run: what got
 done (with the exact paths/artifacts the items reported), what failed or was
-blocked and why, and what the operator should do next. Tight markdown, no
-preamble, no restating the checklist verbatim."""
+blocked and why, and what the operator should do next. Name each failure's real
+cause as the listing gives it: ran out of rounds, tools withdrawn, an error, or
+no report; and keep an item blocked on a host capability apart from a code
+failure (the host lacks a service, desktop, browser or package: say which).
+Tight markdown, no preamble, no restating the checklist verbatim."""
 
 
 def _read_refs(slug: str, files) -> str:
@@ -541,6 +560,7 @@ def apply_item_edit(plan: dict, it: dict, patch: dict) -> None:
             # a manual reset is a fresh start: the old report must not settle it
             it["report"] = None
             it["last_error"] = None
+            it["blocked_on"] = None
     if "position" in patch and patch["position"] is not None:
         items = plan["items"]
         items.remove(it)
@@ -597,6 +617,10 @@ REPORT_RULES = """# Keep moving
 - "blocked" is ONLY for what an agent cannot do at all: a credential or
   account, a paid service, a decision only the operator can make. Everything
   else you solve.
+- The HOST cannot do what the item needs (no services, no desktop, no browser,
+  a package it cannot install): status "blocked" with blocked_on "capability",
+  and say which capability in the summary. That is not a failure to retry: the
+  orchestrator reshapes the item. Write down what you could do first.
 - The work is written and only the proof RUN is blocked (a host the egress
   proxy refuses, a tool the box lacks): report "done" with the caveat and the
   exact command still to run, or "blocked" naming the hosts. Never "failed": a
@@ -641,7 +665,7 @@ def item_ports(slug: str, item_id: str) -> tuple[int, int]:
 
 
 def _item_task(plan: dict, it: dict, deps: list[dict],
-               ports: tuple[int, int] | None = None) -> str:
+               ports: tuple[int, int] | None = None, handoff: str = "") -> str:
     parts = [f"[item {it['id']}] {it['title']}",
              f"\nYou are working item {it['id']} of the plan \"{plan['title']}\". "
              "Do exactly this item, nothing more.",
@@ -667,6 +691,7 @@ def _item_task(plan: dict, it: dict, deps: list[dict],
             if h.get("progress"):
                 line += f"\n  got to: {h['progress']}"
             parts.append(line)
+        parts.append(_handoff_brief(it, handoff))
     if ports:
         parts.append(
             f"\n# Ports\nThis item owns ports {ports[0]}\u2013{ports[1]} on the shared box; "
@@ -710,7 +735,7 @@ def _item_agent(plan: dict, it: dict) -> dict:
 
 
 def _public_item(it: dict) -> dict:
-    return {k: v for k, v in it.items() if k != "report"}
+    return {k: v for k, v in it.items() if k not in ("report", "trail")}
 
 
 def _emit_item(job_id: str, it: dict) -> None:
@@ -764,12 +789,20 @@ async def leave_note(project: str | None, item_id: str, *, sender: str,
 
 
 async def report(slug: str, *, cid: int | None, item_id: str | None,
-                 status: str, summary: str) -> str:
+                 status: str, summary: str, blocked_on: str | None = None) -> str:
     """The plan_report tool. The item is the one whose running conversation is
     the caller's — an item can only ever report itself. `item_id`, if given,
-    must agree."""
+    must agree. `blocked_on` goes with status "blocked" only: "capability" says
+    the host cannot do something the item needs (a service, a desktop, a browser,
+    a package), which no retry fixes; "operator" (the default meaning) is a
+    credential or a decision."""
     if status not in REPORT_STATUSES:
         return f"error: status must be one of {', '.join(REPORT_STATUSES)}"
+    blocked_on = (blocked_on or "").strip().lower() or None
+    if blocked_on and blocked_on not in BLOCKED_ON:
+        return f"error: blocked_on must be one of {', '.join(BLOCKED_ON)}"
+    if blocked_on and status != "blocked":
+        return 'error: blocked_on only goes with status "blocked"'
     if not cid:
         return "error: plan_report only works inside a running plan item"
     try:
@@ -782,6 +815,8 @@ async def report(slug: str, *, cid: int | None, item_id: str | None,
                         "reports only itself")
             it["report"] = {"status": status, "summary": (summary or "").strip()[:SUMMARY_CHARS],
                             "at": _now()}
+            if blocked_on:
+                it["report"]["blocked_on"] = blocked_on
             it["result_summary"] = it["report"]["summary"] or None
             job_id = plan.get("job_id")
     except LookupError:
@@ -1129,12 +1164,158 @@ async def _notify_paused(slug: str, plan: dict) -> None:
         pass
 
 
+# --- what an attempt leaves for the next one ---------------------------------
+# The loop's reply says little about HOW an attempt ended (a round-cap stop and a
+# forgotten plan_report read the same). The runner keeps its own record: the last
+# tool calls and the files touched, from the loop's events, and the loop's own
+# stop reason from its turn_stats row.
+
+_READ_TOOLS = ("read_file", "local_read_file")
+_WRITE_TOOLS = ("write_file", "edit_file", "local_write_file", "local_edit_file")
+_ARG_KEYS = ("path", "command", "query", "url", "code", "to", "name")
+
+
+def _arg_line(args) -> str:
+    if not isinstance(args, dict):
+        return ""
+    val = next((args[k] for k in _ARG_KEYS if args.get(k)), None)
+    if val is None:
+        val = next((v for v in args.values() if isinstance(v, str) and v), "")
+    return " ".join(str(val).split())[:80]
+
+
+def _note_call(m: dict, ev: dict) -> None:
+    """Fold one loop event into the attempt's trail (m["trail"], m["read"],
+    m["wrote"]): bounded, so a 60-round attempt holds a few KB."""
+    trail = m.setdefault("trail", [])
+    if ev.get("type") == "tool":
+        name, args = str(ev.get("name") or ""), ev.get("args")
+        trail.append({"id": ev.get("id"), "line": f"{name} {_arg_line(args)}".strip()})
+        del trail[:-TRAIL_CALLS]
+        path = (args or {}).get("path") if isinstance(args, dict) else None
+        bucket = ("read" if name in _READ_TOOLS else "wrote" if name in _WRITE_TOOLS else None)
+        if bucket and isinstance(path, str) and path:
+            seen = m.setdefault(bucket, {})
+            seen.pop(path, None)                 # most recent last
+            seen[path] = True
+            while len(seen) > TRAIL_PATHS:
+                seen.pop(next(iter(seen)))
+    elif ev.get("type") == "tool_result" and ev.get("id"):
+        for c in reversed(trail):
+            if c["id"] == ev["id"]:
+                c["err"] = str(ev.get("result") or "").lstrip().lower().startswith("error")
+                break
+
+
+def _trail_of(m: dict, attempt: int, stop: str | None) -> dict:
+    """What the next attempt is shown (kept on the item, not in events)."""
+    calls = [c["line"] + (" (error)" if c.get("err") else "") for c in m.get("trail") or []]
+    return {"attempt": attempt, "stop": stop or "final", "calls": calls[-TRAIL_CALLS:],
+            "read": list(m.get("read") or {}), "wrote": list(m.get("wrote") or {})}
+
+
+_CAP_TEXT = "hit the ReAct iteration limit"      # loop.py's own words for a cap stop
+
+
+async def _turn_stop(cid, final: str) -> tuple[str | None, int]:
+    """(stop, rounds) of the attempt's loop turn. The final event carries a stop
+    only for a budget stop; the loop's turn_stats row (guest_turn records it and
+    does not pass it on) has the rest, and the loop's cap sentence is the last
+    resort for a turn that left no row."""
+    if cid:
+        try:
+            db = await get_db()
+            try:
+                async with db.execute(
+                    "SELECT stop, rounds FROM turn_stats WHERE conversation_id = ? "
+                    "ORDER BY id DESC LIMIT 1", (cid,)) as cur:
+                    row = await cur.fetchone()
+            finally:
+                await db.close()
+            if row and row["stop"] in ("cap", "dead_end", "budget"):
+                return row["stop"], int(row["rounds"] or 0)
+            if row:
+                return None, int(row["rounds"] or 0)
+        except Exception:  # noqa: BLE001 — a missing row is not a failed attempt
+            pass
+    return ("cap" if _CAP_TEXT in (final or "") else None), 0
+
+
+def read_handoff(slug: str, item_id: str) -> str:
+    """The note a previous attempt left at reports/notes/<item id>.md when its
+    rounds ran low — read if it is there, never required."""
+    try:
+        p = writes.resolve(slug, HANDOFF_FILE.format(id=item_id))
+        return p.read_text(errors="replace").strip()[:HANDOFF_NOTE_CHARS] if p else ""
+    except Exception:  # noqa: BLE001 — a bad path or a binary file: no note
+        return ""
+
+
+def _paths_line(paths) -> str:
+    out, used = [], 0
+    for i, p in enumerate(paths):
+        if used + len(p) > 420:
+            out.append(f"(+{len(paths) - i} more)")
+            break
+        out.append(p)
+        used += len(p) + 2
+    return ", ".join(out)
+
+
+def _handoff_brief(it: dict, note: str = "") -> str:
+    """The "continue from where the last attempt stopped" section of a retry's
+    brief: what stopped it, its handoff note, its last tool calls and the files
+    it touched — so the retry does not redo the reconnaissance. At most
+    RETRY_BRIEF_CHARS."""
+    last = (it.get("history") or [None])[-1]
+    if not last:
+        return ""
+    trail = it.get("trail") if isinstance(it.get("trail"), dict) else {}
+    why = last.get("error") or last.get("outcome") or "it stopped"
+    head = (f"\n# Continue from where the last attempt stopped\n"
+            f"Attempt {last.get('attempt')}: {why}. Continue from where it stopped: do not "
+            "redo the reading and set-up below, finish the item and call plan_report.")
+    parts = []
+    note = (note or "").strip()
+    if note:
+        parts.append(f"## Its handoff note ({HANDOFF_FILE.format(id=it['id'])})\n"
+                     + note[:HANDOFF_NOTE_CHARS])
+    tail = []
+    if trail.get("read"):
+        tail.append("## Files it read\n" + _paths_line(trail["read"]))
+    if trail.get("wrote"):
+        tail.append("## Files it wrote\n" + _paths_line(trail["wrote"]))
+    fixed = len(head) + sum(len(p) + 2 for p in parts + tail) + 40
+    calls = list(trail.get("calls") or [])
+    keep: list[str] = []
+    room = RETRY_BRIEF_CHARS - fixed - len("## Its last tool calls\n")
+    for line in reversed(calls):                 # the most recent ones first
+        if room < len(line) + 3:
+            break
+        keep.append(f"- {line}")
+        room -= len(line) + 3
+    if keep:
+        parts.insert(1 if note else 0, "## Its last tool calls\n" + "\n".join(reversed(keep)))
+    out = "\n".join([head, *parts, *tail])
+    return out[:RETRY_BRIEF_CHARS]
+
+
 async def _run_item(slug: str, job_id: str, root_id: int, plan: dict, it: dict,
                     deps: list[dict], m: dict) -> dict:
     """One attempt of one item, as a headless agent run under the plan's head."""
     from . import agents_run
-    task = _item_task(plan, it, deps, item_ports(slug, it["id"]))
+    handoff = ""
+    if it.get("history"):
+        # a retry: the last attempt's writes (and its handoff note) are still in
+        # the guest's buffer until the settle's pull has run; pull now, so the
+        # note is there to read (a no-op without a held guest workspace)
+        prev = it["history"][-1].get("conversation_id")
+        await orchestrator.flush_workspace(slug, prev)
+        handoff = read_handoff(slug, it["id"])
+    task = _item_task(plan, it, deps, item_ports(slug, it["id"]), handoff=handoff)
     item_id, title = it["id"], it["title"]
+    agent = _item_agent(plan, it)
+    m["rounds_cap"] = agent.get("max_iterations") or 0
 
     async def on_open(cid: int) -> None:
         m["cid"] = cid
@@ -1160,14 +1341,21 @@ async def _run_item(slug: str, job_id: str, root_id: int, plan: dict, it: dict,
         elif ev.get("type") == "tool_result":
             calls.pop(ev.get("id") or ev.get("name"), None)
             m["in_flight"] = next(reversed(calls.values()), None)
+        if ev.get("type") in ("tool", "tool_result"):
+            _note_call(m, ev)
         if ev.get("type") == "tool" and m["cid"] is not None:
             bus.publish(job_id, {"type": "tool", "name": ev.get("name"), "node_id": m["cid"]})
 
     try:
-        return await agents_run._run_headless(
-            _item_agent(plan, it), task, active=slug, job_id=job_id,
+        res = await agents_run._run_headless(
+            agent, task, active=slug, job_id=job_id,
             title=f"[item {item_id}] {title[:50]}", on_open=on_open, on_event=on_event,
             extra_tools=("plan_report",))
+        if isinstance(res, dict) and res.get("stop") not in ("budget", "cap", "dead_end"):
+            # how the loop ended, for _settle (the final event names only a budget stop)
+            res = {**res, **dict(zip(("stop", "rounds"), await _turn_stop(
+                m.get("cid") or res.get("conversation_id"), res.get("final") or "")))}
+        return res
     finally:
         _live_items.pop(m.get("cid"), None)
 
@@ -1188,6 +1376,26 @@ def _budget_stop(it: dict, plan: dict, final: str, cid, job_id: str) -> None:
          "conversation_id": cid, "at": _now()})
     it["history"] = it["history"][-HISTORY_KEEP:]
     _emit_item(job_id, it)
+
+
+NO_REPORT = "no structured completion report (plan_report was not called)"
+
+
+def _no_report_cause(stop: str | None, rounds, m: dict) -> tuple[str | None, str]:
+    """(history outcome, the error text) for an attempt that ended with no
+    plan_report, by how the loop stopped. Only a prose final with a normal stop
+    is the plain "no report"; before this every one of them read that way."""
+    if stop == "cap":
+        n = m.get("rounds_cap") or rounds
+        return "cap", (f"ran out of rounds ({n}) before calling plan_report" if n
+                       else "ran out of rounds before calling plan_report")
+    if stop == "dead_end":
+        last = ((m.get("trail") or [{}])[-1] or {}).get("line")
+        return "dead_end", (
+            f"its tools were withdrawn after {settings.dead_end_force_answer} failed or empty "
+            "tool calls in a row" + (f" (last call: {last})" if last else "")
+            + ", so it could not call plan_report")
+    return None, NO_REPORT
 
 
 async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -> bool:
@@ -1212,29 +1420,53 @@ async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -
     final = ""
     if exc is None:
         final = result.get("final") or ""
+    blocked_on, outcome, free = None, None, False
     if exc is not None:
         status, err, summary = "failed", f"{type(exc).__name__}: {exc}", None
     elif rep.get("status"):
         status, err, summary = rep["status"], None, rep.get("summary")
+        blocked_on = rep.get("blocked_on")
     else:
         block = _fenced_json(final)
         if block:
             status, err, summary = block["status"], None, str(block.get("summary") or "")
+            blocked_on = block.get("blocked_on")
         else:
-            status, err, summary = "failed", "no structured completion report (plan_report was not called)", None
+            # no report: say how the loop really ended, not only that it did
+            status, summary = "failed", None
+            outcome, err = _no_report_cause(result.get("stop"), result.get("rounds"), m)
+            # an item's first round-cap stop spends no attempt: running out of
+            # rounds with work done is not the item failing, and the retry
+            # continues from that work
+            free = outcome == "cap" and it.get("continues", 0) < CAP_CONTINUES
+    if status != "blocked" or blocked_on not in BLOCKED_ON:
+        blocked_on = None
     if status in ("failed", "blocked"):
         err = err or summary or "the agent reported no reason"
+        if blocked_on == "capability":
+            err = f"blocked on a host capability: {err}"
+        if free:
+            err += " (the first time, so no attempt is spent: it continues from there)"
         # what this attempt got to, so the next one continues instead of
         # starting over (the tail of its reply when it never reported)
         got = (summary or "").strip() or " ".join(final.split())[-SUMMARY_CHARS // 2:]
-        it.setdefault("history", []).append(
-            {"attempt": it["attempts"], "outcome": status, "error": err[:500],
-             "progress": got[:SUMMARY_CHARS // 2], "conversation_id": cid, "at": _now()})
+        entry = {"attempt": it["attempts"], "outcome": outcome or status, "error": err[:500],
+                 "progress": got[:SUMMARY_CHARS // 2], "conversation_id": cid, "at": _now()}
+        if blocked_on:
+            entry["blocked_on"] = blocked_on
+        it.setdefault("history", []).append(entry)
         it["history"] = it["history"][-HISTORY_KEEP:]
-    if status == "failed" and it["attempts"] < plan["attempts_max"]:
+        it["trail"] = _trail_of(m, it["attempts"], outcome)
+    else:
+        it["trail"] = None
+    if free:
+        it["continues"] = it.get("continues", 0) + 1
+        it["attempts"] = max(0, it["attempts"] - 1)
+    if status == "failed" and (free or it["attempts"] < plan["attempts_max"]):
         it["status"] = "todo"               # retried on the next tick
     else:
         it["status"] = status
+    it["blocked_on"] = blocked_on
     it["last_error"] = err
     it["result_summary"] = (summary or "").strip()[:SUMMARY_CHARS] or (
         " ".join(final.split())[:SUMMARY_CHARS] or None)
@@ -1270,9 +1502,18 @@ async def _nudge(root_id: int, it: dict, m: dict) -> None:
         await db.close()
 
 
+def _state(it: dict) -> str:
+    """An item's status as a person or an orchestrator reads it: a block on a
+    host capability is not the same state as a block that needs the operator, and
+    neither is a code failure."""
+    if it["status"] == "blocked" and it.get("blocked_on") == "capability":
+        return "blocked: host capability"
+    return it["status"]
+
+
 def _listing(plan: dict) -> str:
     return "\n".join(
-        f"- [{it['status']}] {it['id']} {it['title']}"
+        f"- [{_state(it)}] {it['id']} {it['title']}"
         + (f": {it['result_summary']}" if it.get("result_summary") else "")
         + (f" (error: {it['last_error']})" if it.get("last_error") and it["status"] != "done" else "")
         for it in plan["items"])
@@ -1303,7 +1544,7 @@ def render_checklist(plan: dict) -> str:
         deps = f" (after {', '.join(it['depends_on'])})" if it["depends_on"] else ""
         who = f" @{it['assignee']}" if it.get("assignee") else ""
         mdl = f" (model {it['model']})" if it.get("model") else ""
-        lines.append(f"- {it['id']} [{it['status']}]{who} {it['title']}{deps}{mdl}")
+        lines.append(f"- {it['id']} [{_state(it)}]{who} {it['title']}{deps}{mdl}")
     return "\n".join(lines)
 
 
@@ -1340,6 +1581,13 @@ a small unblocking fix directly (a missing stub, a name clash, a wrong path).
      verified. Never re-dispatch an agent just to have it file a report.
    - edit the brief when the brief was wrong, add an item for missing
      groundwork, split an item that was too big, or skip one that is moot.
+   - an item shown as "blocked: host capability" needs something this host
+     does not have (services, a desktop, a browser, a package). A retry will
+     block again: split the written work from the proof that needs the
+     capability, accept the work with the caveat, or skip it.
+   - an item that "ran out of rounds" had too much for one attempt: it has
+     already had a free continuation, so split it with edit/add rather than
+     retrying it whole.
    - Items blocked only because a dependency failed restart by themselves
      once that dependency is fixed.
    plan_fix restarts the run if it had stopped. Keep going until every item is
@@ -1431,6 +1679,7 @@ async def fix(slug: str, *, action: str, item: str | None = None,
                     it["fixes"] = it.get("fixes", 0) + 1
                     it["guidance"] = (it.get("guidance", []) + [guidance])[-GUIDANCE_KEEP:]
                     it["status"], it["report"], it["attempts"], it["stalls"] = "todo", None, 0, 0
+                    it["continues"], it["blocked_on"] = 0, None
                     what = f"{it['id']} back to todo (re-dispatch {it['fixes']}/{MAX_FIXES})"
                 elif action == "edit":
                     patch = {k: v for k, v in (("title", title), ("brief", brief)) if v}
@@ -1571,6 +1820,10 @@ def _status_text(plan: dict, running: bool, rollup: str | None, why: str) -> str
     for it in plan["items"]:
         counts[it["status"]] = counts.get(it["status"], 0) + 1
     tally = ", ".join(f"{n} {st}" for st, n in counts.items())
+    on_cap = sum(1 for it in plan["items"]
+                 if it["status"] == "blocked" and it.get("blocked_on") == "capability")
+    if on_cap:
+        tally += f" ({on_cap} of the blocked need a host capability)"
     lines = [f"Plan '{plan['title']}' — {'RUNNING' if running else 'not running'} "
              f"(status {plan['status']}, head conversation {plan.get('root_id')}). {why}",
              f"Items: {tally}. Tokens so far {plan.get('tokens_used', 0):,}; review "
@@ -1585,14 +1838,22 @@ def _status_text(plan: dict, running: bool, rollup: str | None, why: str) -> str
         mdl = f" model {it['model']}" if it.get("model") else ""
         cid = f" conv {it['conversation_id']}" if it.get("conversation_id") else ""
         tries = f" attempts {it['attempts']}" if it.get("attempts") else ""
-        lines.append(f"- {it['id']} [{it['status']}]{who}{mdl}{cid}{tries} {it['title']}")
+        lines.append(f"- {it['id']} [{_state(it)}]{who}{mdl}{cid}{tries} {it['title']}")
         if it.get("result_summary"):
             lines.append(f"    result: {_clip(it['result_summary'])}")
         if it.get("last_error") and it["status"] != "done":
             lines.append(f"    error: {_clip(it['last_error'])}")
     if any(it["status"] == "failed" for it in plan["items"]):
         lines.append("\nA failed item whose work is in place and checked by you only needs "
-                     "plan_fix accept (with a summary); retry re-runs a whole agent.")
+                     "plan_fix accept (with a summary); retry re-runs a whole agent. The "
+                     "error line says how each attempt ended: ran out of rounds, tools "
+                     "withdrawn, or no report; the item's detail (plan_status item=<id>) "
+                     "shows what it read and wrote.")
+    if on_cap:
+        lines.append("\nAn item blocked on a host capability cannot be fixed by a retry: the "
+                     "host lacks what it needs (services, a desktop, a browser, a package). "
+                     "Reshape it with plan_fix: split the code from the proof that needs "
+                     "the capability, accept the written work with the caveat, or skip it.")
     if not running and rollup:
         lines.append(f"\n# Closing rollup\n{_clip(rollup, 3000)}")
     elif running:
@@ -1601,18 +1862,34 @@ def _status_text(plan: dict, running: bool, rollup: str | None, why: str) -> str
 
 
 def _item_text(it: dict) -> str:
-    lines = [f"{it['id']} [{it['status']}] {it['title']}",
+    lines = [f"{it['id']} [{_state(it)}] {it['title']}",
              f"depends on: {', '.join(it['depends_on']) or 'nothing'} · attempts {it.get('attempts', 0)}"
              f" · re-dispatches {it.get('fixes', 0)}/{MAX_FIXES}"
+             + (f" · round-cap continuations {it['continues']}/{CAP_CONTINUES}"
+                if it.get("continues") else "")
              + (f" · conv {it['conversation_id']}" if it.get("conversation_id") else ""),
              f"\n# Brief\n{it.get('brief') or '(none)'}"]
     if it.get("result_summary"):
         lines.append(f"\n# Result\n{it['result_summary']}")
     if it.get("last_error"):
         lines.append(f"\n# Last error\n{it['last_error']}")
+    if it["status"] == "blocked" and it.get("blocked_on") == "capability":
+        lines.append("\n# Blocked on a host capability\nThe host cannot do what this item needs. "
+                     "A retry will block again: reshape the item (split the written work from "
+                     "the proof that needs the capability, accept the work with the caveat, or "
+                     "skip it).")
     for h in it.get("history") or []:
         lines.append(f"- attempt {h.get('attempt')}: {h.get('outcome')} — {h.get('error') or ''}"
                      + (f"\n  got to: {h['progress']}" if h.get("progress") else ""))
+    tr = it.get("trail") if isinstance(it.get("trail"), dict) else None
+    if tr and (tr.get("calls") or tr.get("read") or tr.get("wrote")):
+        lines.append(f"\n# How attempt {tr.get('attempt')} went (the retry is shown this)")
+        if tr.get("calls"):
+            lines.append("last calls: " + " | ".join(tr["calls"][-8:]))
+        if tr.get("read"):
+            lines.append("read: " + _paths_line(tr["read"]))
+        if tr.get("wrote"):
+            lines.append("wrote: " + _paths_line(tr["wrote"]))
     if it.get("guidance"):
         lines.append("\n# Your guidance so far\n" + "\n".join(f"- {g}" for g in it["guidance"]))
     if it.get("notes"):
