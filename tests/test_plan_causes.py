@@ -341,3 +341,11 @@ def test_the_retry_trail_stays_out_of_the_published_item_and_survives_the_file()
     again = plan_mod.normalise(dict(plan))["items"][0]
     assert again["trail"]["calls"] == ["a"] and again["continues"] == 1
     assert again["blocked_on"] == "capability"
+
+
+def test_the_plan_report_tool_offers_blocked_on_and_its_handler_takes_it():
+    """A TOOL.md that does not parse drops the tool from the item's list."""
+    [spec] = agents_run._internal_specs(("plan_report",))
+    params = spec["function"]["parameters"]
+    assert params["properties"]["blocked_on"]["enum"] == ["operator", "capability"]
+    assert "blocked_on" not in params["required"]

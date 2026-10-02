@@ -21,7 +21,7 @@ parameters:
     blocked_on:
       type: string
       enum: [operator, capability]
-      description: Only with status blocked. capability = the HOST cannot do what the item needs (no services, no desktop, no browser, a package it cannot install): say which in the summary. The plan shows it apart from a failure and the orchestrator reshapes the item instead of retrying. operator (the default) = a credential, an account or a decision only the operator can make.
+      description: Only with status blocked. capability = the HOST cannot do what the item needs (no services, no desktop, no browser, a package it cannot install), and the summary says which. The plan shows it apart from a failure and the orchestrator reshapes the item instead of retrying. operator (the default) = a credential, an account or a decision only the operator can make.
   required: [status, summary]
 ---
 `enabled: false` keeps this out of every ordinary turn: the plan runner

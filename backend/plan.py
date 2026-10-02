@@ -79,6 +79,7 @@ RETRY_BRIEF_CHARS = 3_000   # most a retry's "where the last attempt stopped" se
 HANDOFF_NOTE_CHARS = 1_200  # of that, the previous attempt's own handoff note
 TRAIL_CALLS = 20          # last tool calls kept per attempt for the next one
 TRAIL_PATHS = 30          # files read / written kept per attempt (paths only)
+FREE_NOTE = " (the first time, so no attempt is spent: it continues from there)"
 HANDOFF_FILE = "reports/notes/{id}.md"   # what an item writes when its rounds run low
 # what a "blocked" report was blocked on: the operator (a credential, a decision)
 # or a capability this host lacks (services, a desktop, a browser, a package)
@@ -1268,10 +1269,10 @@ def _handoff_brief(it: dict, note: str = "") -> str:
     it touched — so the retry does not redo the reconnaissance. At most
     RETRY_BRIEF_CHARS."""
     last = (it.get("history") or [None])[-1]
-    if not last:
+    if not last or last.get("outcome") == "accepted":   # accepted: nothing stopped
         return ""
     trail = it.get("trail") if isinstance(it.get("trail"), dict) else {}
-    why = last.get("error") or last.get("outcome") or "it stopped"
+    why = (last.get("error") or last.get("outcome") or "it stopped").replace(FREE_NOTE, "")
     head = (f"\n# Continue from where the last attempt stopped\n"
             f"Attempt {last.get('attempt')}: {why}. Continue from where it stopped: do not "
             "redo the reading and set-up below, finish the item and call plan_report.")
@@ -1446,7 +1447,7 @@ async def _settle(plan: dict, it: dict, t: asyncio.Task, m: dict, job_id: str) -
         if blocked_on == "capability":
             err = f"blocked on a host capability: {err}"
         if free:
-            err += " (the first time, so no attempt is spent: it continues from there)"
+            err += FREE_NOTE
         # what this attempt got to, so the next one continues instead of
         # starting over (the tail of its reply when it never reported)
         got = (summary or "").strip() or " ".join(final.split())[-SUMMARY_CHARS // 2:]
