@@ -446,6 +446,36 @@ def _steer(messages: list[dict], i: int, n_iter: int, err_streak: int,
     return force
 
 
+# The one "rounds left" note: a run with a round cap is told once, when it has used
+# this share of the cap, that it must write down where it is and report. Benchmark
+# game 2026-10-01: three attempts ran into the cap with the work done and never
+# reported (16M input tokens wasted); the only earlier note, at two thirds, was
+# generic and every run read it as "keep going".
+ROUNDS_LOW_AT = 0.8
+
+
+def _rounds_low_round(n_iter: int) -> int | None:
+    """How many rounds must have been used before the rounds-left note rides the
+    next tool result: ROUNDS_LOW_AT of the cap, but never the round of the
+    two-thirds note (they would stack), and never the last round (it has no tools,
+    so no tool result carries a note). None: a cap too small to fit both."""
+    at = max(int(n_iter * ROUNDS_LOW_AT), (n_iter * 2) // 3 + 1)
+    return at if at <= n_iter - 1 else None
+
+
+def _rounds_low_note(left: int, plan_item: bool) -> str:
+    """The note itself. A plan item (it holds plan_report) writes its progress to
+    reports/notes/<item id>.md, the file the retry brief reads (plan.py) when the
+    attempt does not finish; any other run is told to wrap up."""
+    if plan_item:
+        return (f"\n\n[system note: {left} rounds left: write your progress and next "
+                "steps to reports/notes/<item id>.md now (<item id> is your plan "
+                "item's id) and call plan_report before the cap, status failed with "
+                "the next step if the item is unfinished.]")
+    return (f"\n\n[system note: {left} rounds left: finish and report what you "
+            "have, and say plainly what you could not determine.]")
+
+
 def new_stats() -> dict:
     """What one turn did that the operator cannot otherwise see (RUNS-08): the
     loop's own recoveries and cut-offs, counted per turn."""
@@ -524,6 +554,8 @@ async def _run_turn(
     carry: list[str] = []        # the cut-off text of the answer being continued
     truncated = False            # the answer is still cut off after the continues
     edited: dict[str, int] = {}  # project path -> round of its last edit/write
+    low_at = _rounds_low_round(n_iter)
+    rounds_nudged = False        # the one rounds-left note has ridden a result
     evicted_spans: list[tuple] = []   # (path, first line, last line) of dropped reads
     for i in range(n_iter):
         # mail check. i == 0 was drained into `history` above; from here a
@@ -826,6 +858,10 @@ async def _run_turn(
         # appended to the last tool result so they sit adjacent to the failure
         if _steer(messages, i, n_iter, err_streak, can_delegate, has_todo):
             force_conclude = True
+        if (not rounds_nudged and not force_conclude
+                and low_at is not None and i + 1 >= low_at):
+            rounds_nudged = True
+            _note(messages, _rounds_low_note(n_iter - (i + 1), "plan_report" in offered))
         if (has_research and not web_nudged
                 and web_calls >= settings.web_handroll_nudge > 0):
             web_nudged = True
