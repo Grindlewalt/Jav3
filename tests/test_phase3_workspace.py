@@ -68,8 +68,8 @@ async def test_workspace_roundtrip_edit_in_guest_reconciled(tmp_env):
 
 
 async def test_build_output_comes_back_but_not_deps(tmp_env, tmp_path):
-    """dist/ is skipped going into the guest, but a build the agent made must
-    come back (dist/voxelcraft.html was dropped while run_code said "kept")."""
+    """A build the agent made must come back (dist/voxelcraft.html was dropped
+    while run_code said "kept"), and since 2026-10-01 it goes back in too."""
     (settings.projects_dir / "demo").mkdir(parents=True, exist_ok=True)
     out = tmp_path / "staging"
     (out / "dist").mkdir(parents=True)
@@ -79,7 +79,7 @@ async def test_build_output_comes_back_but_not_deps(tmp_env, tmp_path):
     result = await workspace_xfer.apply_guest_writes("demo", _tar_dir(out))
     assert result["applied"] == ["dist/game.html"]
     assert (settings.projects_dir / "demo" / "dist" / "game.html").is_file()
-    assert "dist/game.html" not in {m for m in _names(workspace_xfer.build_merged_tar("demo"))}
+    assert "dist/game.html" in set(_names(workspace_xfer.build_merged_tar("demo")))
 
 
 def _names(tar_bytes: bytes) -> list[str]:
