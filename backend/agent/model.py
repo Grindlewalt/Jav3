@@ -116,6 +116,11 @@ def _redact_images(messages: list[dict]) -> list[dict]:
 # key; None = a host-side call.
 call_box_id: contextvars.ContextVar = contextvars.ContextVar("jav3_call_box", default=None)
 
+# Whose cost a complete_text call is when its caller names no conversation: a
+# research scout or reader sets it around the helpers it calls, so those keep
+# their signatures and the ledger row still lands on the right node.
+billed_to: contextvars.ContextVar = contextvars.ContextVar("jav3_billed_to", default=None)
+
 
 async def record_model_call(conversation_id: int | None, model_name: str,
                             usage: dict | None, messages: list[dict],
@@ -568,15 +573,21 @@ class ModelGateway:
 model = ModelGateway()
 
 
-async def complete_text(system: str, user: str, temperature: float = 0.3) -> str:
+async def complete_text(system: str, user: str, temperature: float = 0.3,
+                        conversation_id: int | None = None) -> str:
     """Drain a no-tools `system + user -> text` model call to a single string —
     the common helper shared by summarize / research / the funnel. Runs through
     the same `model.complete` choke point, so it shares the operation's Budget
-    contextvar and is metered like any other call."""
+    contextvar and is metered like any other call. `conversation_id` says whose
+    cost it is (a research scout or reader), else `billed_to` does; with neither
+    the ledger row has none."""
     parts = []
+    if conversation_id is None:
+        conversation_id = billed_to.get()
     async for ev in model.complete(
             [{"role": "system", "content": system},
-             {"role": "user", "content": user}], temperature=temperature):
+             {"role": "user", "content": user}], temperature=temperature,
+            conversation_id=conversation_id):
         if ev["type"] == "message":
             parts.append(ev["content"] or "")
     return "".join(parts).strip()

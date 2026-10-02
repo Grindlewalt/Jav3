@@ -6,6 +6,7 @@ run_code (HOME is the project) would write .config / .local / .pki into the
 project. dist/ now ships (up to a cap, with a note past it); those dirs are
 dropped coming out unless the project has its own.
 """
+import base64
 import io
 import subprocess
 import tarfile
@@ -156,3 +157,87 @@ def test_a_file_named_like_a_home_dir_is_not_one():
     assert workspace_xfer._home_dir("src/.cache") is None
     assert workspace_xfer._home_dir("src/.cache/x") == "src/.cache"
     assert workspace_xfer._home_dir("a.txt") is None
+
+
+# --- the turn is told once when dist/ is left out ---------------------------------
+
+async def _spec_of_a_turn(monkeypatch, slug):
+    """Run one guest turn against a socketpair guest; return the spec it sent."""
+    import asyncio
+    import json
+    import socket
+    import types
+    from backend.agent import budget as budget_mod
+    from backend.vm import boxes, broker, guest_turn as gt
+
+    a, b = socket.socketpair()
+    a.setblocking(False)
+    b.setblocking(False)
+
+    async def connect(port):
+        return a
+
+    class Ctl:
+        async def acquire(self):
+            pass
+
+        def release(self):
+            pass
+    box = types.SimpleNamespace(is_shared=True, id="shared",
+                                transport=types.SimpleNamespace(connect=connect))
+
+    async def for_project(s):
+        return box
+
+    async def wait_turn_slot(bx, s):
+        return bx
+    monkeypatch.setattr(boxes, "for_project", for_project)
+    monkeypatch.setattr(boxes, "wait_turn_slot", wait_turn_slot)
+    monkeypatch.setattr(boxes, "controller", lambda bx: Ctl())
+    loop = asyncio.get_running_loop()
+    seen = {}
+
+    async def guest():
+        buf = b""
+        while b"\n" not in buf:
+            buf += await loop.sock_recv(b, 65536)
+        seen["spec"] = json.loads(buf.split(b"\n", 1)[0])
+        for ev in ({"type": "final", "content": "hi"}, {"type": "staged", "tar_b64": ""}):
+            await loop.sock_sendall(b, (json.dumps(ev) + "\n").encode())
+        b.close()
+    task = asyncio.create_task(guest())
+    gt._ws_holds.pop(slug, None)
+    try:
+        async for _ in gt.guest_turn(
+                7, "You are Jav3.", [], op_id="op-fcd",
+                envelope=broker.TurnEnvelope(op_id="op-fcd", active_project=slug,
+                                             web_session="ws", conversation_id=7),
+                active_slug=slug, push_workspace=True):
+            pass
+    finally:
+        await task
+        gt._ws_holds.pop(slug, None)
+        for fn in (broker.release_token, broker.release_turn, budget_mod.release):
+            fn("op-fcd")
+    return seen["spec"]
+
+
+async def test_a_turn_is_told_in_its_system_prompt_when_dist_is_left_out(env, monkeypatch):
+    monkeypatch.setattr(workspace_xfer, "DIST_MAX_BYTES", 100)
+    _proj({"main.py": "x\n", "dist/big.bin": "a" * 200}, slug="fcd")
+    spec = await _spec_of_a_turn(monkeypatch, "fcd")
+    assert spec["system_prompt"].startswith("You are Jav3.")
+    assert spec["system_prompt"].count("[Workspace note:") == 1
+    assert "dist/ build output" in spec["system_prompt"]
+    with tarfile.open(fileobj=io.BytesIO(base64.b64decode(spec["workspace_tar_b64"])),
+                      mode="r:gz") as t:
+        assert {m.name for m in t.getmembers()} == {"main.py"}
+
+
+async def test_a_turn_with_dist_in_the_copy_gets_its_prompt_unchanged(env, monkeypatch):
+    _proj({"main.py": "x\n", "dist/small.js": "1"}, slug="fcd")
+    spec = await _spec_of_a_turn(monkeypatch, "fcd")
+    assert spec["system_prompt"] == "You are Jav3."
+    with tarfile.open(fileobj=io.BytesIO(base64.b64decode(spec["workspace_tar_b64"])),
+                      mode="r:gz") as t:
+        assert {m.name for m in t.getmembers()} == {"main.py", "dist/small.js"}

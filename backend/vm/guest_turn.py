@@ -224,6 +224,9 @@ async def guest_turn(conversation_id, system_prompt, history, *, rules="",
             # the guest before the copy does (a stalled loop for a big project is
             # the smaller harm; a joiner needs the shipped-ack a thread would add).
             spec["workspace_tar_b64"] = _workspace_b64(active_slug)
+        if holds_ws and (note := workspace_xfer.workspace_note(active_slug)):
+            # what the copy leaves out (a dist/ over the cap), told once per turn
+            spec["system_prompt"] = f"{system_prompt or ''}\n\n{note}"
         if want_persist:
             # attach + mount BEFORE the turn starts (the guest is pinned, so the
             # reaper can't scrub between here and the release in finally). The
@@ -481,6 +484,46 @@ async def pull_writes(slug: str, op_id: str | None = None) -> dict | None:
         return await workspace_xfer.apply_guest_writes(
             slug, base64.b64decode(ev.get("tar_b64") or ""), op_id)
     return None
+
+
+# What one push_files call may carry: a file the host just wrote and told the
+# model to read (a research document), not a way to ship a project.
+PUSH_MAX_BYTES = 4 * 1024 * 1024
+
+
+async def push_files(slug: str, files: dict[str, bytes]) -> bool | None:
+    """Put files the HOST just wrote (rel path -> bytes) into the guest's live
+    copy of the project, mid-turn. The copy is only built at turn start, so a
+    file a host-side tool writes (research's document) is not in it, and the
+    next read_file says "no such file" (benchmark-game, 2026-10-01).
+
+    Unlike prime_workspace this leaves the rest of the copy, and the turn's own
+    write buffer, alone: the guest writes just these paths and drops its own
+    pending copy of them (the host's text is the newer). True when the guest has
+    them, False when it could not take them (the caller must say so), None
+    outside a brokered guest tool call (a host-run turn reads the host's files)."""
+    from ..agent import budget as budget_mod
+    op = budget_mod.active_op_id.get()
+    if not files or not op or broker.get_turn(op) is None:
+        return None
+    if sum(len(b) for b in files.values()) > PUSH_MAX_BYTES:
+        return False
+    try:
+        ev = await _pinned_rpc(
+            {"mode": "put_files", "active_slug": slug,
+             "files": {rel: base64.b64encode(b).decode() for rel, b in files.items()}},
+            await boxes.for_project(slug))
+    except Exception as e:  # noqa: BLE001 — the caller still has the file's head to show
+        log.warning("could not put %d file(s) into the guest's %s: %s: %s",
+                    len(files), slug, type(e).__name__, e)
+        return False
+    if not (ev and ev.get("type") == "put" and ev.get("ok")):
+        log.warning("the guest did not take %d file(s) for %s: %s", len(files), slug,
+                    (ev or {}).get("error") or ev)
+        return False
+    for rel, data in files.items():
+        workspace_xfer.note_shipped(slug, rel, data)
+    return True
 
 
 async def box_rpc(box, spec: dict) -> dict | None:

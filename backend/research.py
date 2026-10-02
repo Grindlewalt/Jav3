@@ -14,6 +14,7 @@ Every phase publishes bus events so the whole thing streams live on the Runs
 tab (head -> scout -> readers). Token cost is bounded and predictable.
 """
 import asyncio
+import contextlib
 import json
 import re
 import uuid
@@ -23,7 +24,7 @@ from urllib.parse import urlparse
 from . import bus, webtools
 from .agent import budget as budget_mod
 from .agent.loop import _enforce_rules
-from .agent.model import complete_text
+from .agent.model import billed_to, complete_text
 from .config import settings
 from .db import get_db, launcher, open_conversation
 from .memory import standing_rules_tail
@@ -33,6 +34,18 @@ MAX_QUERIES = 8
 RESULTS_PER_QUERY = 6
 MAX_SOURCES_TO_FILTER = 40
 MAX_URLS_PER_READER = 4
+
+
+@contextlib.contextmanager
+def _billed_to(cid: int | None):
+    """Model calls made inside this block are the cost of node `cid` (the head,
+    scout or reader the work is for). Without it every one of them was a
+    model_calls row with no conversation: the research tree showed no spend."""
+    tok = billed_to.set(cid)
+    try:
+        yield
+    finally:
+        billed_to.reset(tok)
 
 
 def _slugify(text: str) -> str:
@@ -53,6 +66,48 @@ async def _write_doc(project: str, doc_path: str, doc: str) -> str:
     file the operator listed as always loaded it waits for approval instead."""
     _, held = await apply_write_gated(project, doc_path, doc.encode(), tainted=True)
     return "held for approval" if held else "canonical"
+
+
+# How much of the document the research tool's result carries (about 1.2K tokens).
+DOC_HEAD_CHARS = 5000
+
+
+def _doc_head(doc: str, limit: int = DOC_HEAD_CHARS) -> str:
+    """The top of the document, cut at a line end when there is one near the limit."""
+    if len(doc) <= limit:
+        return doc
+    cut = doc[:limit]
+    nl = cut.rfind("\n")
+    return (cut[:nl] if nl > limit // 2 else cut).rstrip()
+
+
+async def result_text(project: str, r: dict) -> str:
+    """What the `research` tool tells the model. The document is written on the
+    HOST, but a guest turn's copy of the project was built at turn start, so the
+    next read_file said "no such file" and agents went on without the research
+    (benchmark-game, 2026-10-01). So the file is also put into the turn's live
+    workspace, and the head of it rides in this result either way."""
+    path, doc = r["doc_path"], r.get("doc") or ""
+    held = r.get("doc_status") != "canonical"
+    lead = f"Researched '{r['topic']}' (job {r['job_id']})."
+    if not doc:
+        return f"{lead}\nDocument written to {path}. Read it with read_file for the details."
+    if held:
+        where = (f"The document is held for the operator's approval, so {path} is not in "
+                 "the project yet. The start of it is below.")
+    else:
+        from .vm import guest_turn
+        pushed = await guest_turn.push_files(project, {path: doc.encode()})
+        if pushed is False:
+            where = (f"Document written to {path}, but it could not be copied into this "
+                     "turn's workspace: read_file may say it does not exist until the next "
+                     "turn. The start of it is below.")
+        else:   # in the guest's copy now, or a host-run turn that reads the project itself
+            where = f"Document written to {path}; read_file {path} for all of it."
+    head = _doc_head(doc)
+    more = f"\n[cut here: {len(doc) - len(head):,} more chars]" if len(head) < len(doc) else ""
+    return (f"{lead}\n{where}\n\n--- start of {path} ({len(doc):,} chars; "
+            f"full document at {path}) ---\n{head}{more}")
 
 
 async def _node(project, parent, job_id, kind, title) -> int:
@@ -166,8 +221,9 @@ async def _reader(project, parent, job_id, group, topic, session) -> str:
     # pages within a group are independent — fetch+summarize them concurrently
     # (the readers themselves already run in parallel; this was the last serial
     # leg of the pipeline)
-    results = await asyncio.gather(*[_one(u) for u in group["urls"]],
-                                   return_exceptions=True)
+    with _billed_to(cid):
+        results = await asyncio.gather(*[_one(u) for u in group["urls"]],
+                                       return_exceptions=True)
     summaries = [r for r in results if isinstance(r, str)]
     findings = (f"## {group['theme']}\n\n" +
                 ("\n\n".join(summaries) if summaries else "(no usable sources)"))
@@ -190,7 +246,7 @@ async def _synthesize(topic: str, findings: list[str]) -> str:
     doc = (f"# Research: {topic}\n\n*Compiled {date.today().isoformat()} by Jav3 "
            "research agents.*\n\n" + body)
     rules = standing_rules_tail()
-    return await _enforce_rules(doc, rules) if rules else doc
+    return await _enforce_rules(doc, rules, conversation_id=billed_to.get()) if rules else doc
 
 
 # --- the pipeline ------------------------------------------------------------
@@ -230,12 +286,14 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
         bus.publish(job_id, {"type": "node_spawned", "node_id": scout, "parent_id": head,
                              "kind": "scout", "title": "search & filter", "depth": 1})
         bus.publish(job_id, {"type": "node_status", "node_id": scout, "status": "running"})
-        queries = await _gen_queries(topic)
+        with _billed_to(scout):
+            queries = await _gen_queries(topic)
         for q in queries:
             bus.publish(job_id, {"type": "tool", "node_id": scout, "name": f"search: {q}"})
         results = await _batch_search(queries)
         bus.publish(job_id, {"type": "node_status", "node_id": scout, "status": "summarizing"})
-        groups = await _filter_and_assign(topic, results, n_groups)
+        with _billed_to(scout):
+            groups = await _filter_and_assign(topic, results, n_groups)
         kept = sum(len(g["urls"]) for g in groups)
         scout_rollup = (f"Ran {len(queries)} searches, found {len(results)} unique "
                         f"sources, kept {kept} across {len(groups)} reading groups.")
@@ -254,7 +312,7 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
             bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": head,
                                  "doc_path": doc_path, "rollup": note, "usage": b.summary()})
             return {"topic": topic, "job_id": job_id, "root_id": head,
-                    "doc_path": doc_path, "doc_status": doc_status}
+                    "doc_path": doc_path, "doc_status": doc_status, "doc": doc}
 
         # phase 2: readers in parallel (session = job_id so reads are fresh per
         # run). One crashed reader must not sink the job — drop it and synthesize
@@ -267,7 +325,8 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
             raise RuntimeError("every reader subagent failed")
 
         # phase 3: synthesize
-        doc = await _synthesize(topic, findings)
+        with _billed_to(head):
+            doc = await _synthesize(topic, findings)
         doc_status = await _write_doc(project, doc_path, doc)
         head_rollup = f"Researched '{topic}' via {len(groups)} reader groups. {b.summary()}"
         await _save_rollup(head, head_rollup)
@@ -277,7 +336,7 @@ async def run_research(topic: str, project: str, n_angles: int = 3,
                              "doc_path": doc_path, "rollup": head_rollup,
                              "usage": b.summary()})
         return {"topic": topic, "job_id": job_id, "root_id": head,
-                "doc_path": doc_path, "doc_status": doc_status}
+                "doc_path": doc_path, "doc_status": doc_status, "doc": doc}
     except asyncio.CancelledError:
         # a stop: the head still ends with a rollup, or the chat reload shows
         # the job running for good (ROBUST-22)
