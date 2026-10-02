@@ -42,6 +42,13 @@ ARTIFACT_TOTAL_CAP = 8 * 1024 * 1024  # total capture cap per run
 SKIP_DIRS = {".staging", ".git", "node_modules", ".npm", ".cache", ".venv",
              "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 PIPE_GRACE = 2.0     # seconds the pipes get to close after the shell exits
+# The biggest single file a run may write (RLIMIT_FSIZE). It used to be 64 MiB,
+# which killed `apt-get install chromium` (the .deb is bigger: "Method https has
+# died unexpectedly! signal 25", benchmark game 2026-10-01). This handler runs
+# only in the guest (the host refuses), where the VM or container is the boundary
+# and its own disk or tmpfs size is the real cap: this just stops one runaway
+# write from filling the shared box in a single call.
+FSIZE_LIMIT = 2 * 1024 * 1024 * 1024
 
 
 def _group_pids(pgid: int) -> list[int]:
@@ -81,7 +88,7 @@ def _limits(cpu_seconds: int) -> None:
     for limit, val in (
         (resource.RLIMIT_CPU, cpu_seconds),
         (resource.RLIMIT_NPROC, 512),
-        (resource.RLIMIT_FSIZE, 64 * 1024 * 1024),
+        (resource.RLIMIT_FSIZE, FSIZE_LIMIT),
     ):
         try:
             resource.setrlimit(limit, (val, val))
@@ -249,6 +256,57 @@ def _egress_note(source: str, output: str) -> str:
     return "\n".join(parts)
 
 
+# `timeout 280 cmd`, `timeout -s KILL 5m cmd`: the first number after the options
+_TIMEOUT_IN_CMD = re.compile(
+    r"(?<![\w.-])timeout\s+(?:(?:-[A-Za-z]\s+\S+|-\S+)\s+)*(\d+)([smhd]?)(?![\w.])")
+_UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _inner_timeout(command: str) -> int | None:
+    """The longest `timeout NNN` the command itself asks for, in seconds."""
+    best = None
+    for m in _TIMEOUT_IN_CMD.finditer(command or ""):
+        secs = int(m.group(1)) * _UNIT_SECONDS[m.group(2)]
+        best = secs if best is None else max(best, secs)
+    return best
+
+
+def _timeout_note(command: str, timeout: int) -> str:
+    """What to tell the model after the wall-clock kill. The kill takes the whole
+    process group, so a `| tail -25` dies with the command it was reading and
+    prints nothing: the run came back "(no output)" and the agent could not tell
+    what had happened. A `timeout 280` inside the command does not stretch this
+    call's own limit (it died at the 60 s default, benchmark game 2026-10-01)."""
+    parts = [f"[timed out: this call's limit is {timeout}s (timeout_seconds, default "
+             f"{DEFAULT_TIMEOUT}, max {MAX_TIMEOUT}). Output piped into tail/head/grep "
+             "is lost when a run is killed: write long output to a file "
+             "(`cmd > /tmp/x.log 2>&1`) and read that instead.]"]
+    inner = _inner_timeout(command)
+    if inner is not None and inner > timeout:
+        fix = (f"pass timeout_seconds: {min(inner + 10, MAX_TIMEOUT)}" if inner < MAX_TIMEOUT
+               else f"pass timeout_seconds: {MAX_TIMEOUT} and run what is left in a "
+                    "background job (`cmd > /tmp/x.log 2>&1 &`), polling the log")
+        parts.append(f"[your `timeout {inner}` is longer than this call's timeout_seconds "
+                     f"({timeout}): {fix}.]")
+    return "\n".join(parts)
+
+
+def _fsize_note(returncode: int, text: str) -> str:
+    """A write past RLIMIT_FSIZE is SIGXFSZ (25): a killed child, a shell's 153, or
+    EFBIG when something ignores the signal. Says so, with the limit, instead of
+    leaving "died unexpectedly! signal 25" to be guessed at."""
+    low = text.lower()
+    # the words alone only count on a failed run: a passing one may just print them
+    if (returncode in (-signal.SIGXFSZ, 128 + signal.SIGXFSZ)
+            or (returncode not in (0, None) and (
+                "file size limit exceeded" in low or "signal 25" in low
+                or "file too large" in low))):
+        return (f"[file-size limit ({FSIZE_LIMIT // (1024 * 1024)} MB): one file this run "
+                "wrote hit the per-file limit (SIGXFSZ, signal 25). Split what you are "
+                "writing into smaller files.]")
+    return ""
+
+
 async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> str:
     if not getattr(settings, "in_guest", False):
         return ("error: run_code only executes inside the sandbox guest. The "
@@ -396,8 +454,13 @@ async def run(code: str = "", command: str = "", timeout_seconds: int = 0) -> st
         lines += ["--- stderr ---", err.rstrip()]
     if not out.strip() and not err.strip():
         lines.append("(no output)")
+    if timed_out:
+        lines.append(_timeout_note(command, timeout))
     if detached:
         lines.append(detached)
+    fsize = _fsize_note(proc.returncode, out + "\n" + err)
+    if fsize:
+        lines.append(fsize)
     kills_after = memguard.oom_kills()
     if kills_before is not None and kills_after is not None and kills_after > kills_before:
         lines.append(memguard.oom_note(kills_after - kills_before))
