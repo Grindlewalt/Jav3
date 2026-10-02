@@ -29,6 +29,9 @@ async def run(dump: str, files: list[str] | None = None, run: bool = True,
         return f"error: {e}"
     out = [f"Plan '{plan['title']}' — {len(plan['items'])} items saved to "
            f"{slug}/.plan.json:", plan_mod.render_checklist(plan)]
+    notes = await plan_mod.creation_notes(slug, plan)   # what this host can do + plan warnings
+    if notes:
+        out.append(notes)
     if not run:
         out.append("Not started (run=false): the operator can edit it on the Plan panel "
                    "and press Run there.")

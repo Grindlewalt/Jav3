@@ -44,7 +44,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 
-from . import bus, orchestrator, runtime, writes
+from . import bus, capabilities, orchestrator, runtime, writes
 from .agent import budget as budget_mod
 from .agent.budget import BudgetExceeded
 from .agent.model import complete_text
@@ -59,6 +59,12 @@ STATUSES = ("todo", "running", "blocked", "done", "failed", "skipped")
 # what an operator edit may set directly (the runner owns `running`/`blocked`)
 OPERATOR_STATUSES = ("todo", "done", "skipped", "failed", "blocked")
 SETTLED = ("done", "skipped")            # satisfies a dependency
+# what satisfies a SOFT dependency: it only has to be over, however it ended
+# (a failed item has used its attempts; a blocked one is waiting on a person or
+# a capability, or on something that never ran)
+SOFT_SETTLED = SETTLED + ("failed", "blocked")
+FAN_IN_MAX = 8            # hard dependencies past which an item gets a lint warning
+MAX_WARNINGS = 8          # plan warnings shown in one result
 DEP_BLOCK = "dependency "                # last_error prefix of a runner-made block
 REPORT_STATUSES = ("done", "failed", "blocked")
 
@@ -120,20 +126,24 @@ def empty_plan(*, title: str = "", dump: str = "") -> dict:
 
 def new_item(plan: dict, *, title: str, brief: str = "", depends_on=(),
              assignee: str | None = None, id_: str | None = None,
-             model: str | None = None) -> dict:
+             model: str | None = None, soft_deps=()) -> dict:
     """A fresh item. Without `id_` it takes the plan's next counter; with one
     (a file being re-read, a PUT naming its items) the counter is untouched —
     normalise() keeps the counter above every explicit numeric id.
 
     `model` (provider/model) is set only where the operator explicitly named
     the model for this work (see plan_from_dump); None runs the item on the
-    assignee's own model or the default."""
+    assignee's own model or the default.
+
+    `soft_deps` is the part of `depends_on` the item only FOLLOWS: it runs once
+    those items have settled however they ended (see ready())."""
     if id_ is None:
         n = int(plan.get("next_id") or 1)
         plan["next_id"] = n + 1
         id_ = f"i{n}"
     return {"id": id_, "title": " ".join((title or "").split())[:120] or f"item {id_}",
             "brief": (brief or "").strip(), "depends_on": list(depends_on),
+            "soft_deps": [str(d) for d in soft_deps],
             "status": "todo", "assignee": (assignee or "").strip() or None,
             "model": (str(model).strip() or None) if model else None,
             "attempts": 0, "stalls": 0, "last_error": None, "result_summary": None,
@@ -166,6 +176,7 @@ def normalise(plan: dict) -> dict:
         it = new_item(plan, title=str(raw.get("title") or ""),
                       brief=str(raw.get("brief") or ""),
                       depends_on=[str(d) for d in (raw.get("depends_on") or [])],
+                      soft_deps=[str(d) for d in (raw.get("soft_deps") or [])],
                       assignee=raw.get("assignee"),
                       id_=rid if rid and rid not in seen else None,
                       model=raw.get("model"))
@@ -190,6 +201,8 @@ def normalise(plan: dict) -> dict:
         it["depends_on"] = [d for d in dict.fromkeys(it["depends_on"])
                             if d in ids and d != it["id"]]
     _break_cycles(items)
+    for it in items:                  # a soft mark only means something on a live edge
+        it["soft_deps"] = [d for d in dict.fromkeys(it["soft_deps"]) if d in it["depends_on"]]
     plan["items"] = items
     release_blocked(plan)
     return plan
@@ -266,7 +279,8 @@ def public(plan: dict | None, slug: str | None = None) -> dict | None:
     # the retry trail (tool calls, file paths) is the runner's own memory for the
     # next attempt, not something every poll of the plan should carry
     items = [{k: v for k, v in it.items() if k != "trail"} for it in plan.get("items") or []]
-    return {**plan, "items": items, "running": is_running(slug) if slug else False}
+    return {**plan, "items": items, "running": is_running(slug) if slug else False,
+            "warnings": lint(plan, open_only=True)}
 
 
 # --- dependency resolution (pure) --------------------------------------------
@@ -275,22 +289,43 @@ def index(plan: dict) -> dict[str, dict]:
     return {it["id"]: it for it in plan["items"]}
 
 
+def hard_deps(it: dict) -> list[str]:
+    """The dependencies an item cannot run without (everything not marked soft)."""
+    soft = set(it.get("soft_deps") or ())
+    return [d for d in it["depends_on"] if d not in soft]
+
+
+def soft_of(it: dict) -> list[str]:
+    """The dependencies it only follows: it runs once they settle, however they ended."""
+    soft = set(it.get("soft_deps") or ())
+    return [d for d in it["depends_on"] if d in soft]
+
+
+def _dep_met(dep: dict | None, soft: bool) -> bool:
+    if dep is None:                    # a vanished dependency: nothing to wait for if soft
+        return soft
+    return dep["status"] in (SOFT_SETTLED if soft else SETTLED)
+
+
 def ready(plan: dict) -> list[dict]:
-    """todo items whose every dependency is settled, in checklist order."""
+    """todo items whose every dependency is met, in checklist order. A hard
+    dependency is met once it is done or skipped; a soft one once it has
+    settled in any way (done, skipped, failed, blocked)."""
     idx = index(plan)
     out = []
     for it in plan["items"]:
         if it["status"] != "todo":
             continue
-        deps = [idx.get(d) for d in it["depends_on"]]
-        if all(d is not None and d["status"] in SETTLED for d in deps):
+        soft = set(it.get("soft_deps") or ())
+        if all(_dep_met(idx.get(d), d in soft) for d in it["depends_on"]):
             out.append(it)
     return out
 
 
 def propagate_blocked(plan: dict) -> list[dict]:
-    """todo items behind a failed/blocked (or vanished) dependency become
-    blocked; blocking cascades. Returns the items this call changed."""
+    """todo items behind a failed/blocked (or vanished) HARD dependency become
+    blocked; blocking cascades. A soft dependency never blocks. Returns the
+    items this call changed."""
     idx = index(plan)
     changed: list[dict] = []
     moved = True
@@ -299,7 +334,7 @@ def propagate_blocked(plan: dict) -> list[dict]:
         for it in plan["items"]:
             if it["status"] != "todo":
                 continue
-            for d in it["depends_on"]:
+            for d in hard_deps(it):
                 dep = idx.get(d)
                 if dep is None or dep["status"] in ("failed", "blocked"):
                     it["status"] = "blocked"
@@ -313,10 +348,11 @@ def propagate_blocked(plan: dict) -> list[dict]:
 
 def release_blocked(plan: dict) -> list[dict]:
     """The inverse of propagate_blocked: an item the RUNNER blocked because a
-    dependency failed goes back to todo once no dependency is failed/blocked
-    any more — the operator reset or deleted the failure — and the release
-    cascades down the chain. An item that blocked ITSELF (reported "blocked":
-    it needs the operator) is left alone. Pure; returns what it changed."""
+    hard dependency failed goes back to todo once no hard dependency is
+    failed/blocked any more — the operator reset or deleted the failure, or
+    made the dependency soft — and the release cascades down the chain. An item
+    that blocked ITSELF (reported "blocked": it needs the operator) is left
+    alone. Pure; returns what it changed."""
     idx = index(plan)
     changed: list[dict] = []
     moved = True
@@ -325,7 +361,7 @@ def release_blocked(plan: dict) -> list[dict]:
         for it in plan["items"]:
             if it["status"] != "blocked" or not (it.get("last_error") or "").startswith(DEP_BLOCK):
                 continue
-            deps = [idx.get(d) for d in it["depends_on"]]
+            deps = [idx.get(d) for d in hard_deps(it)]
             if all(d is not None and d["status"] not in ("failed", "blocked") for d in deps):
                 it["status"], it["last_error"] = "todo", None
                 changed.append(it)
@@ -337,6 +373,42 @@ def finished(plan: dict) -> bool:
     return not ready(plan) and not any(it["status"] == "running" for it in plan["items"])
 
 
+# an item whose title says it gathers other items' work: verify / integrate / ship
+_JOIN_TITLE = re.compile(
+    r"\b(verif\w*|integrat\w*|assembl\w*|ship\w*|releas\w*|end-to-end|e2e|smoke[- ]test)",
+    re.I)
+
+
+def lint(plan: dict, *, open_only: bool = False, only=None) -> list[str]:
+    """Structure warnings for a plan, as lines for the orchestrator (never a
+    refusal). An item with many hard dependencies, or one that verifies, ships or
+    integrates other items' work, blocks as soon as ONE of them fails or never
+    runs, and everything behind it with it: 8 of a 22-item plan never ran that
+    way (one verify item, 18 hard dependencies). Soft dependencies let it run with
+    whatever settled. `open_only` keeps to items that have not run yet (todo, or
+    blocked only by a dependency), the ones a fix can still help; `only` keeps
+    to those item ids."""
+    out = []
+    for it in plan["items"]:
+        if only is not None and it["id"] not in only:
+            continue
+        if open_only and not (it["status"] == "todo" or (
+                it["status"] == "blocked" and (it.get("last_error") or "").startswith(DEP_BLOCK))):
+            continue
+        hard = hard_deps(it)
+        joins = bool(_JOIN_TITLE.search(it["title"]))
+        if len(hard) > FAN_IN_MAX or (joins and len(hard) >= 2):
+            why = (f"{len(hard)} hard dependencies" if len(hard) > FAN_IN_MAX else
+                   f"verifies/integrates/ships other items' work and has {len(hard)} hard "
+                   "dependencies")
+            out.append(f"{it['id']} \"{it['title'][:60]}\" {why} "
+                       f"({', '.join(hard[:6])}{', ...' if len(hard) > 6 else ''}): if any one "
+                       "fails or never runs, it and everything behind it is blocked. Make the "
+                       "ones it can work without soft (after_soft in the plan, soft_deps in "
+                       "plan_fix): it then runs with what finished and reports the gaps.")
+    return out
+
+
 # --- the planner pass --------------------------------------------------------
 
 PLANNER_SYSTEM = """You are a planning assistant for a team of AI agents working
@@ -346,12 +418,22 @@ self-contained enough that an agent who has NOT read the dump can do it from
 the brief alone.
 
 Reply with ONLY a JSON array, no prose, no markdown fence:
-[{"title": "<= 80 chars", "brief": "concrete, self-contained instructions: what to do, where (paths), what done looks like", "depends_on": [<0-based indices of EARLIER items whose results this one needs>], "assignee": "<agent slug from the roster, or null>"}]
+[{"title": "<= 80 chars", "brief": "concrete, self-contained instructions: what to do, where (paths), what done looks like", "depends_on": [<0-based indices of EARLIER items this one cannot start without>], "after_soft": [<0-based indices of EARLIER items this one only follows>], "assignee": "<agent slug from the roster, or null>"}]
 
 Rules: 3 to 12 items. Items with no dependency run in PARALLEL, so keep
 independent work independent and put shared groundwork first. Prefer fewer,
 larger items over many tiny ones. Never invent an assignee that is not in the
 roster; null means a general worker.
+
+Two kinds of dependency. depends_on is HARD: the item cannot do its work without
+that item's output, and if that item fails or never runs, this one is blocked
+and so is everything behind it. after_soft is SOFT: the item runs once those
+items have finished, however they ended, with whatever they produced, and
+reports the gaps. An item that integrates, verifies or ships what several other
+items built (a final build, an end-to-end check) lists those items in
+after_soft, never in depends_on; one failed part must not stop the whole
+assembly. Keep depends_on to the few items a piece of work truly needs, usually
+one to three.
 
 Write every brief for an agent that must FINISH on its own: name the files it
 owns, the command that proves it works (a test, a run, a build) and what done
@@ -369,6 +451,16 @@ Model assignments: the operator said which model to use for some of the work
 assigned model id, exactly as listed, on each item that does that work, and
 null on every other item. Never put a model on an item the operator did not
 assign one to."""
+
+# appended to the planner's instructions when the host's capabilities could be
+# read (the user message then carries "# What this host can and cannot do")
+PLANNER_HOST = """
+This host: the user message lists what it can and cannot do right now. Never plan
+an item whose proof needs something under "Cannot" (a browser check, a
+screenshot, a running service, a download with no network): the item would only
+find out when it runs. Put the written work in one item and the proof as a
+command in its brief that the operator runs where the capability exists; do not
+make a later item depend on that proof."""
 
 SYNTH_SYSTEM = """Write the closing report for a multi-agent plan run: what got
 done (with the exact paths/artifacts the items reported), what failed or was
@@ -484,6 +576,10 @@ async def plan_from_dump(slug: str, dump: str, files=(), *, title: str = "",
     user = (f"Project: {slug}\n\n# Dump\n{dump[:PLANNER_DUMP_CHARS]}\n\n"
             f"{_read_refs(slug, files)}\n\n# Roster\n{roster}")
     system = PLANNER_SYSTEM
+    host = capabilities.block(await capabilities.for_project(slug))
+    if host:
+        system += PLANNER_HOST
+        user += "\n\n" + host
     if models:
         system += PLANNER_MODELS
         user += "\n\n# Model assignments\n" + "\n".join(
@@ -502,27 +598,55 @@ async def plan_from_dump(slug: str, dump: str, files=(), *, title: str = "",
                               brief=str(raw.get("brief") or raw.get("title")),
                               assignee=assignee if assignee in known else None,
                               model=_assigned_model(raw, allowed)))
-    # depends_on arrives as indices, ids or titles — resolve all three
+    # depends_on / after_soft arrive as indices, ids or titles — resolve all three
     by_title = {it["title"].lower(): it["id"] for it in items}
-    for it, raw in zip(items, raws):
-        deps = []
-        for d in raw.get("depends_on") or []:
-            if isinstance(d, int) and 0 <= d < len(items):
-                deps.append(items[d]["id"])
+    ids = {i["id"] for i in items}
+
+    def resolve(refs) -> list[str]:
+        out = []
+        for d in refs or []:
+            if isinstance(d, int) and not isinstance(d, bool) and 0 <= d < len(items):
+                out.append(items[d]["id"])
             elif isinstance(d, str):
                 ds = d.strip()
                 if ds.isdigit() and int(ds) < len(items):
-                    deps.append(items[int(ds)]["id"])
-                elif ds in {i["id"] for i in items}:
-                    deps.append(ds)
+                    out.append(items[int(ds)]["id"])
+                elif ds in ids:
+                    out.append(ds)
                 elif ds.lower() in by_title:
-                    deps.append(by_title[ds.lower()])
-        it["depends_on"] = deps
+                    out.append(by_title[ds.lower()])
+        return out
+
+    for it, raw in zip(items, raws):
+        hard = resolve(raw.get("depends_on"))
+        # an item named in both lists is needed: hard wins, as before soft existed
+        soft = [d for d in resolve(raw.get("after_soft")) if d not in hard]
+        it["depends_on"] = list(dict.fromkeys([*hard, *soft]))
+        it["soft_deps"] = list(dict.fromkeys(soft))
     plan["items"] = items
     plan = normalise(plan)
     async with _lock(slug):
         await save(slug, plan)
     return plan
+
+
+async def creation_notes(slug: str, plan: dict) -> str:
+    """What a plan-creation result tells the orchestrator beside the checklist: what
+    this host can and cannot do, and the plan's structure and capability warnings.
+    The plan is saved either way; these are for the orchestrator to act on with
+    plan_fix (edit, skip, add), not reasons to refuse. "" when there is nothing."""
+    caps = await capabilities.for_project(slug)
+    return "\n\n".join(x for x in (capabilities.block(caps), _warning_text(
+        lint(plan) + capabilities.item_warnings(plan["items"], caps))) if x)
+
+
+def _warning_text(warnings: list[str]) -> str:
+    if not warnings:
+        return ""
+    return ("Plan warnings (the plan stands as saved; fix what is real with plan_fix):\n"
+            + "\n".join(f"- {w}" for w in warnings[:MAX_WARNINGS])
+            + (f"\n- ... and {len(warnings) - MAX_WARNINGS} more" if len(warnings) > MAX_WARNINGS
+               else ""))
 
 
 # --- operator edits ----------------------------------------------------------
@@ -536,6 +660,12 @@ def apply_item_edit(plan: dict, it: dict, patch: dict) -> None:
         it["brief"] = str(patch["brief"]).strip()
     if "depends_on" in patch and patch["depends_on"] is not None:
         it["depends_on"] = [str(d) for d in patch["depends_on"]]
+    if "soft_deps" in patch and patch["soft_deps"] is not None:
+        # the soft set is replaced (an empty list makes every dependency hard);
+        # a soft id the item does not depend on yet becomes a dependency
+        soft = list(dict.fromkeys(str(d) for d in patch["soft_deps"]))
+        it["depends_on"] = list(dict.fromkeys([*it["depends_on"], *soft]))
+        it["soft_deps"] = soft
     if "assignee" in patch:
         a = (patch["assignee"] or "").strip() or None
         if a and a not in _known_agents():
@@ -583,8 +713,8 @@ def replace_items(plan: dict, incoming: list[dict]) -> None:
         if it is None:
             fresh = bool(rid) and rid not in {i["id"] for i in items}
             it = new_item(plan, title=str(raw.get("title") or ""), id_=rid if fresh else None)
-        patch = {k: raw[k] for k in ("title", "brief", "depends_on", "assignee", "model")
-                 if k in raw}
+        patch = {k: raw[k] for k in ("title", "brief", "depends_on", "soft_deps", "assignee",
+                                     "model") if k in raw}
         if raw.get("status") in OPERATOR_STATUSES and raw.get("status") != it["status"]:
             patch["status"] = raw["status"]
         apply_item_edit(plan, it, patch)
@@ -665,17 +795,48 @@ def item_ports(slug: str, item_id: str) -> tuple[int, int]:
     return first, first + settings.plan_port_block - 1
 
 
+def _gap_line(d: dict) -> str:
+    """How one soft dependency that did not finish ended, for the item that ran anyway."""
+    err = _clip(d.get("last_error") or "", 160)
+    if not d.get("attempts"):
+        why = f"never ran ({err})" if err else "never ran"
+        return f"- {d['id']} {d['title']}: {why}. Its part is missing."
+    if d["status"] == "blocked":
+        cap = " on a host capability" if d.get("blocked_on") == "capability" else ""
+        how = f"blocked{cap} after {d['attempts']} attempt(s)"
+    else:
+        how = f"failed after {d['attempts']} attempt(s)"
+    got = _clip(d.get("result_summary") or "", 300)
+    return (f"- {d['id']} {d['title']}: {how}" + (f" ({err})" if err else "")
+            + ". Its part is missing or partial; check the files it wrote."
+            + (f" What it reported: {got}" if got else ""))
+
+
+def _gaps_brief(gaps: list[dict]) -> str:
+    return ("\n# Dependencies that did not finish\n"
+            "You were set to run after these items WHATEVER happened to them (soft "
+            "dependencies), so you run with what exists. Integrate what exists, work "
+            "around each gap (a stub, or leave that part out and say so), and list the "
+            "gaps in your plan_report summary. Do not stop because a part is missing.\n"
+            + "\n".join(_gap_line(d) for d in gaps))
+
+
 def _item_task(plan: dict, it: dict, deps: list[dict],
                ports: tuple[int, int] | None = None, handoff: str = "") -> str:
     parts = [f"[item {it['id']}] {it['title']}",
              f"\nYou are working item {it['id']} of the plan \"{plan['title']}\". "
              "Do exactly this item, nothing more.",
              f"\n# Brief\n{it['brief'] or it['title']}"]
-    if deps:
+    gaps = [d for d in deps if d["id"] in soft_of(it) and d["status"] not in SETTLED]
+    if len(gaps) < len(deps):
         parts.append("\n# Results from the items this depends on")
         for d in deps:
+            if d in gaps:
+                continue
             parts.append(f"## {d['id']} — {d['title']} ({d['status']})\n"
                          f"{d.get('result_summary') or '(no summary was reported)'}")
+    if gaps:
+        parts.append(_gaps_brief(gaps))
     if it.get("notes"):
         parts.append("\n# Notes teammates left for you")
         parts += [f"- from {n.get('from', 'a teammate')}: {n.get('body', '')}"
@@ -1542,7 +1703,11 @@ def render_checklist(plan: dict) -> str:
     """The checklist as the model or a terminal reads it."""
     lines = []
     for it in plan["items"]:
-        deps = f" (after {', '.join(it['depends_on'])})" if it["depends_on"] else ""
+        hard, soft = hard_deps(it), soft_of(it)
+        deps = ""
+        if hard or soft:
+            deps = " (" + "; ".join(x for x in (f"after {', '.join(hard)}" if hard else "",
+                                                f"soft: {', '.join(soft)}" if soft else "") if x) + ")"
         who = f" @{it['assignee']}" if it.get("assignee") else ""
         mdl = f" (model {it['model']})" if it.get("model") else ""
         lines.append(f"- {it['id']} [{_state(it)}]{who} {it['title']}{deps}{mdl}")
@@ -1561,7 +1726,10 @@ a small unblocking fix directly (a missing stub, a name clash, a wrong path).
 1. Plan and launch: call orchestrate with the operator's dump — verbatim, plus
    any facts from this conversation the agents need (they will not see it). It
    saves an explicit checklist and runs one agent per item in this project, on
-   this host, under this project's egress policy, dependencies respected.
+   this host, under this project's egress policy, dependencies respected. The
+   result says what this host can and cannot do (services, desktop, browser,
+   packages, internet) and warns about items that need what it lacks or hang on
+   too many hard dependencies: fix those with plan_fix before they run.
 2. Monitor: call plan_status with wait_seconds (e.g. 300). It returns when an
    item changes state, a message arrives for you, or the wait runs out, and
    shows every item's status, its agent's conversation id, and its result or
@@ -1590,7 +1758,10 @@ a small unblocking fix directly (a missing stub, a name clash, a wrong path).
      already had a free continuation, so split it with edit/add rather than
      retrying it whole.
    - Items blocked only because a dependency failed restart by themselves
-     once that dependency is fixed.
+     once that dependency is fixed. An item that integrates, verifies or ships
+     other items' work must not wait for every one of them: plan_fix edit with
+     soft_deps (the items it only follows) lets it run with what finished and
+     report the gaps.
    plan_fix restarts the run if it had stopped. Keep going until every item is
    done or skipped. Exception: every {pause_tokens} tokens the run PAUSES for the
    operator's review (running turns finish, nothing new starts). Then report
@@ -1627,9 +1798,27 @@ FIX_ACTIONS = ("retry", "edit", "add", "skip", "accept")
 FIX_TEARDOWN_WAIT = 300.0     # seconds a plan_fix waits for a closing run to end
 
 
-async def fix(slug: str, *, action: str, item: str | None = None,
-              guidance: str = "", title: str = "", brief: str = "",
-              depends_on=None, run: bool = True, summary: str = "") -> str:
+async def fix(slug: str, *, action: str, item: str | None = None, **kw) -> str:
+    """The plan_fix tool (see _fix). An add or an edit also gets the structure and
+    capability warnings for the item it left behind."""
+    out = await _fix(slug, action=action, item=item, **kw)
+    if action in ("add", "edit") and not out.startswith("error"):
+        plan = load(slug)
+        it = (index(plan).get(str(item or "")) if action == "edit" else
+              (plan["items"][-1] if plan and plan["items"] else None)) if plan else None
+        if it is not None:
+            caps = await capabilities.for_project(slug)
+            notes = _warning_text(lint(plan, only={it["id"]})
+                                  + capabilities.item_warnings([it], caps))
+            if notes:
+                out += "\n" + notes
+    return out
+
+
+async def _fix(slug: str, *, action: str, item: str | None = None,
+               guidance: str = "", title: str = "", brief: str = "",
+               depends_on=None, run: bool = True, summary: str = "",
+               soft_deps=None) -> str:
     """The plan_fix tool: an orchestrator repairs its own plan instead of
     handing failures to the operator. retry = back to todo with guidance the
     next attempt reads (and its earlier attempts' history); edit = new
@@ -1638,7 +1827,14 @@ async def fix(slug: str, *, action: str, item: str | None = None,
     no agent run (RUNS-07: two 'your work is done, just report it' retries
     cost 130-240k input tokens each). Items the runner blocked behind a fixed
     dependency are released, and a stopped run is relaunched when there is
-    work to do."""
+    work to do.
+
+    `soft_deps` (add / edit) names the dependencies the item only follows: it
+    runs once they settle however they ended, with a brief that lists the ones
+    that did not finish. An id there that is not in depends_on is added to it;
+    an edit's empty list makes every dependency hard again. An add or an edit
+    that leaves the item with a structure or capability problem (see lint,
+    capabilities.item_warnings) says so in its result."""
     if action not in FIX_ACTIONS:
         return f"error: action must be one of {', '.join(FIX_ACTIONS)}"
     guidance = " ".join((guidance or "").split())[:SUMMARY_CHARS]
@@ -1648,13 +1844,15 @@ async def fix(slug: str, *, action: str, item: str | None = None,
             if action == "add":
                 if not (title or brief):
                     return "error: add needs a title and a brief"
-                deps = [str(d) for d in (depends_on or [])]
+                soft = [str(d) for d in (soft_deps or [])]
+                deps = list(dict.fromkeys([str(d) for d in (depends_on or [])] + soft))
                 bad = [d for d in deps if d not in idx]
                 if bad:
                     return f"error: no item {', '.join(bad)} to depend on"
                 if len(plan["items"]) >= MAX_ITEMS:
                     return f"error: the plan already has {MAX_ITEMS} items"
-                it = new_item(plan, title=title or brief[:80], brief=brief, depends_on=deps)
+                it = new_item(plan, title=title or brief[:80], brief=brief, depends_on=deps,
+                              soft_deps=soft)
                 if guidance:
                     it["guidance"] = [guidance]
                 plan["items"].append(it)
@@ -1684,13 +1882,18 @@ async def fix(slug: str, *, action: str, item: str | None = None,
                     what = f"{it['id']} back to todo (re-dispatch {it['fixes']}/{MAX_FIXES})"
                 elif action == "edit":
                     patch = {k: v for k, v in (("title", title), ("brief", brief)) if v}
-                    if depends_on is not None:
-                        bad = [str(d) for d in depends_on if str(d) not in idx]
+                    if depends_on is not None or soft_deps is not None:
+                        named = [str(d) for d in [*(depends_on or []), *(soft_deps or [])]]
+                        bad = [d for d in named if d not in idx]
                         if bad:
                             return f"error: no item {', '.join(bad)} to depend on"
+                    if depends_on is not None:
                         patch["depends_on"] = [str(d) for d in depends_on]
+                    if soft_deps is not None:
+                        patch["soft_deps"] = [str(d) for d in soft_deps]
                     if not patch and not guidance:
-                        return "error: edit needs a title, brief, depends_on or guidance"
+                        return ("error: edit needs a title, brief, depends_on, soft_deps or "
+                                "guidance")
                     apply_item_edit(plan, it, patch)
                     if guidance:
                         it["guidance"] = (it.get("guidance", []) + [guidance])[-GUIDANCE_KEEP:]
@@ -1813,7 +2016,8 @@ def _clip(text: str, n: int = STATUS_LINE_CHARS) -> str:
     return t if len(t) <= n else t[:n - 1] + "…"
 
 
-def _status_text(plan: dict, running: bool, rollup: str | None, why: str) -> str:
+def _status_text(plan: dict, running: bool, rollup: str | None, why: str,
+                 notes=()) -> str:
     """One compact block per item, so a 20+ item plan fits in one result (a
     22-item run truncated at 26k and hid its own second half: harness fault
     #1). plan_status item=<id> gives an item's full detail."""
@@ -1844,6 +2048,16 @@ def _status_text(plan: dict, running: bool, rollup: str | None, why: str) -> str
             lines.append(f"    result: {_clip(it['result_summary'])}")
         if it.get("last_error") and it["status"] != "done":
             lines.append(f"    error: {_clip(it['last_error'])}")
+    if notes:
+        lines.append("\n" + _warning_text(list(notes)))
+    stuck = [it["id"] for it in plan["items"] if it["status"] == "blocked"
+             and (it.get("last_error") or "").startswith(DEP_BLOCK)]
+    if stuck:
+        lines.append(f"\n{', '.join(stuck[:8])} blocked only because a hard dependency failed or "
+                     "never ran. One that can work with what exists is released by plan_fix edit "
+                     "with soft_deps naming those dependencies (it runs with what finished and "
+                     "reports the gaps); the others restart by themselves once the dependency "
+                     "is fixed.")
     if any(it["status"] == "failed" for it in plan["items"]):
         lines.append("\nA failed item whose work is in place and checked by you only needs "
                      "plan_fix accept (with a summary); retry re-runs a whole agent. The "
@@ -1864,7 +2078,10 @@ def _status_text(plan: dict, running: bool, rollup: str | None, why: str) -> str
 
 def _item_text(it: dict) -> str:
     lines = [f"{it['id']} [{_state(it)}] {it['title']}",
-             f"depends on: {', '.join(it['depends_on']) or 'nothing'} · attempts {it.get('attempts', 0)}"
+             f"depends on: {', '.join(hard_deps(it)) or 'nothing'}"
+             + (f" · soft (runs after they settle, however they ended): {', '.join(soft_of(it))}"
+                if soft_of(it) else "")
+             + f" · attempts {it.get('attempts', 0)}"
              f" · re-dispatches {it.get('fixes', 0)}/{MAX_FIXES}"
              + (f" · round-cap continuations {it['continues']}/{CAP_CONTINUES}"
                 if it.get("continues") else "")
@@ -1898,6 +2115,18 @@ def _item_text(it: dict) -> str:
     return "\n".join(lines)
 
 
+async def _status_notes(slug: str, plan: dict) -> list[str]:
+    """Warnings for the items that have not run yet (todo, or blocked only by a
+    dependency): the structure ones, and the ones whose words need a capability the
+    host lacks now. Nothing to say, and nothing probed, once every item has run."""
+    open_ = [it for it in plan["items"] if it["status"] == "todo" or (
+        it["status"] == "blocked" and (it.get("last_error") or "").startswith(DEP_BLOCK))]
+    if not open_:
+        return []
+    caps = await capabilities.for_project(slug)
+    return lint(plan, open_only=True) + capabilities.item_warnings(open_, caps)
+
+
 async def status(slug: str, *, wait_seconds: int = 0, cid: int | None = None,
                  item: str | None = None) -> str:
     """The plan_status tool: the checklist as it stands, after waiting (up to
@@ -1929,4 +2158,4 @@ async def status(slug: str, *, wait_seconds: int = 0, cid: int | None = None,
                 why = "The plan changed." if running else "The run finished."
                 break
     rollup = None if running else await _head_rollup(plan.get("root_id"))
-    return _status_text(plan, running, rollup, why)
+    return _status_text(plan, running, rollup, why, await _status_notes(slug, plan))
