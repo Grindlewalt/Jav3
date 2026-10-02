@@ -120,8 +120,13 @@ async def _node_context(kind: str, project: str, parent_summary: str) -> str:
 
 async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str,
                    depth: int, budget: _Budget, leaf_tools,
-                   parent_summary: str = "") -> dict:
-    """Run one node. Returns {"cid","kind","output","rollup"}."""
+                   parent_summary: str = "", max_rounds: int | None = None,
+                   spent: list | None = None) -> dict:
+    """Run one node. Returns {"cid","kind","output","rollup"}. `max_rounds` is
+    the round cap of a worker (default settings.temp_agent_default_rounds);
+    `spent` collects (title, why) for every worker whose loop did not end on its
+    own answer, so run_job can say so in the job's rollup."""
+    stopped = None      # why this node's loop ended without an answer, if it did
     try:
         bus.publish(job_id, {"type": "node_status", "node_id": cid, "status": "planning"})
         subtasks = []
@@ -148,7 +153,8 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
             results = await asyncio.gather(*[
                 run_node(job_id=job_id, cid=ccid, kind=st["kind"], brief=st["title"],
                          project=project, depth=depth + 1, budget=budget,
-                         leaf_tools=leaf_tools, parent_summary=brief)
+                         leaf_tools=leaf_tools, parent_summary=brief,
+                         max_rounds=max_rounds, spent=spent)
                 for ccid, st in children], return_exceptions=True)
             child_outputs = [r["output"] for r in results if isinstance(r, dict)]
             child_rollups = [r["rollup"] for r in results if isinstance(r, dict)]
@@ -165,13 +171,19 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
             context = await _node_context(kind, project, parent_summary)
             node = Agent(context=context, tools=leaf_tools or [], brief=brief)
             system_prompt = node.system_prompt()
-            # subagents are narrow: a tight iteration cap stops the "read 80
-            # pages" runaway. Head/leader nodes that fall through to DIRECT keep
-            # the normal cap.
-            cap = settings.subagent_max_iterations if kind == "subagent" else None
+            # subagents are narrow but are given a whole sub-task: a cap stops
+            # the "read 80 pages" runaway, and it is the one a spawn_temp_agent
+            # gets (the 12-round fence of the old subagent cap ended workers
+            # mid-job with nobody told). Head/leader nodes that fall through to
+            # DIRECT keep the normal cap unless the caller asked for one.
+            from . import agents_run
+            if kind == "subagent":
+                cap = agents_run.clamp_rounds(max_rounds, settings.temp_agent_default_rounds)
+            else:
+                cap = agents_run.clamp_rounds(max_rounds, 0) if max_rounds else None
             db = await get_db()
             try:
-                final = ""
+                final, stop = "", None
                 # leaves run the loop in the guest too (run_agent_turn). They are
                 # nested (the job's Budget is in scope), so they reuse the single
                 # workspace copy run_job primed up front — see run_job below.
@@ -184,14 +196,22 @@ async def run_node(*, job_id: str, cid: int, kind: str, brief: str, project: str
                     if ev["type"] in ("token", "tool"):
                         bus.publish(job_id, {**ev, "node_id": cid})
                     elif ev["type"] == "final":
-                        final = ev["content"]
+                        final, stop = ev["content"], ev.get("stop")
+                rounds, ended = await agents_run.turn_outcome(db, cid, stop, final)
             finally:
                 await db.close()
+            note = agents_run.stop_note({"ended": ended, "rounds": rounds, "cap": cap})
+            if note:
+                stopped = note[0].rstrip(":")
+                if spent is not None:
+                    spent.append((brief[:60], stopped, ended == "cap"))
             output = final
             rollup_source = final
 
         bus.publish(job_id, {"type": "node_status", "node_id": cid, "status": "summarizing"})
         rollup = await _rollup(brief, rollup_source)
+        if stopped:
+            rollup = f"({stopped})\n{rollup}"       # a summary must not read as a finished job
         db = await get_db()
         try:
             await db.execute("UPDATE conversations SET rollup = ? WHERE id = ?", (rollup, cid))
@@ -307,10 +327,23 @@ async def flush_workspace(project: str | None, cid: int | None = None, *,
             runtime.conversation_id.reset(token)
 
 
+def _spent_note(spent: list) -> str:
+    """What the job's rollup says when workers stopped short: the summaries
+    above come from partial work, and the head's own summary cannot be trusted
+    to have kept that."""
+    lines = [f"- {title}: {why}" for title, why, _ in spent]
+    hint = (" Re-deploy with a higher max_rounds (up to "
+            f"{settings.plan_item_max_iterations}) or a narrower brief."
+            if any(cap for _, _, cap in spent) else "")
+    return (f"\n\nNote: {len(spent)} worker(s) did not finish, so their part of "
+            "this rollup is partial:\n" + "\n".join(lines) + hint)
+
+
 async def run_job(job_id: str, brief: str, project: str, *,
-                  leaf_tools=None, title: str = "") -> dict:
+                  leaf_tools=None, title: str = "", max_rounds: int | None = None) -> dict:
     """Open the head node, run the tree, publish job lifecycle events. Returns
-    {"root_id","rollup","usage"}."""
+    {"root_id","rollup","usage"}. `max_rounds` is each worker's tool-round cap
+    (default settings.temp_agent_default_rounds, at most plan_item_max_iterations)."""
     try:
         db = await get_db()
         try:
@@ -355,6 +388,7 @@ async def run_job(job_id: str, brief: str, project: str, *,
 
     ncap = _Budget(MAX_NODES)
     ncap.take()  # the head itself
+    spent: list = []       # workers that stopped short, for the closing note
     # job-scoped fetch ledger (same scheme as research): every worker in this
     # tree dedups against its siblings, and the next job starts fresh
     from . import runtime
@@ -367,15 +401,25 @@ async def run_job(job_id: str, brief: str, project: str, *,
         async with job_workspace(project, top_level=optok is not None):
             result = await run_node(job_id=job_id, cid=root_id, kind="head", brief=brief,
                                     project=project, depth=0, budget=ncap,
-                                    leaf_tools=leaf_tools)
+                                    leaf_tools=leaf_tools, max_rounds=max_rounds,
+                                    spent=spent)
     finally:
         runtime.web_session.reset(wtoken)
         if optok is not None:
             budget_mod.active_op_id.reset(optok)
             budget_mod.release(job_id)
 
+    rollup = result["rollup"]
+    if spent:
+        rollup += _spent_note(spent)
+        db = await get_db()
+        try:
+            await db.execute("UPDATE conversations SET rollup = ? WHERE id = ?", (rollup, root_id))
+            await db.commit()
+        finally:
+            await db.close()
     bus.publish(job_id, {"type": "job_final", "job_id": job_id, "root_id": root_id,
-                         "rollup": result["rollup"], "usage": tbudget.summary()})
+                         "rollup": rollup, "usage": tbudget.summary()})
     bus.close_job(job_id)
-    return {"root_id": root_id, "rollup": result["rollup"],
+    return {"root_id": root_id, "rollup": rollup,
             "usage": tbudget.summary()}

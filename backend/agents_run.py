@@ -424,7 +424,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
             "VALUES (?, 'assistant', ?)", (conversation_id, final_content))
         await db.commit()
         await rec.link(cur.lastrowid)
-        rounds, ended = await _turn_outcome(db, conversation_id, stop, final_content)
+        rounds, ended = await turn_outcome(db, conversation_id, stop, final_content)
         return {"conversation_id": conversation_id, "agent": agent["name"],
                 "final": final_content, "stop": stop,
                 # why the loop ended (final / cap / dead_end / budget), the
@@ -436,7 +436,7 @@ async def _run_headless(agent: dict, task: str, active=_USE_DB, *,
         await db.close()
 
 
-async def _turn_outcome(db, conversation_id: int, stop, final_content: str):
+async def turn_outcome(db, conversation_id: int, stop, final_content: str):
     """(rounds used, why the turn ended) from the turn's turn_stats row — none
     for an incognito turn, then a cap hit is told by the loop's own cut-off
     text. `ended` is one of turnstats.STOPS."""
