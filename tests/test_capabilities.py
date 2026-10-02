@@ -271,3 +271,14 @@ async def test_plan_status_and_plan_fix_warn_about_a_capability_the_host_lacks(
                              brief="a script the operator runs", run=False)
     assert "i2 edited" in out and "needs a browser" not in out
     assert 'i2 "Write the check as a script" needs' not in await plan_mod.status(SLUG)
+
+
+async def test_the_real_checks_run_against_a_fresh_install(client, monkeypatch):
+    """No substitutes: the default profile, placement and image table of a new
+    install. Every check must answer (a crash would read as "not checked")."""
+    monkeypatch.setattr(browser, "_browsers", {})
+    caps = await capabilities.for_project(SLUG)
+    assert list(caps) == list(capabilities.CAPS)
+    assert all(v["ok"] is not None for v in caps.values()), caps
+    assert caps["desktop"]["ok"] is False and caps["browser"]["ok"] is False
+    assert capabilities.block(caps).startswith("# What this host can and cannot do")
