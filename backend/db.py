@@ -791,6 +791,8 @@ async def init_db() -> None:
         await _migrate_secnotify(db)
         await _migrate_boxlog(db)
         await _detach_orphan_usage(db)
+        # after _migrate_turnstats: the trigger names that table
+        await _migrate_usage_detach(db)
         await db.commit()
     finally:
         await db.close()
@@ -911,6 +913,24 @@ async def _detach_orphan_usage(db: aiosqlite.Connection) -> None:
         await db.execute(
             f"UPDATE {table} SET conversation_id = NULL WHERE conversation_id IS NOT NULL "
             "AND conversation_id NOT IN (SELECT id FROM conversations)")
+
+async def _migrate_usage_detach(db: aiosqlite.Connection) -> None:
+    """Whoever deletes a conversation row, its usage stops following the id.
+
+    Ids are reused (`INTEGER PRIMARY KEY`, no AUTOINCREMENT), so the next chat
+    to take a freed id inherited the old one's model_calls: in the benchmark run
+    four conversations (two heads, two chats) showed calls stamped 8 to 28 hours
+    BEFORE they started, and every duration read off them was wrong. The usage
+    is kept (it is real spend), just unattributed. chat.py's delete does this
+    itself; the trigger covers every other path (the incognito wipe, the
+    startup sweep, raw SQL) with no second place to forget."""
+    await db.execute(
+        "CREATE TRIGGER IF NOT EXISTS conversations_detach_usage "
+        "AFTER DELETE ON conversations BEGIN "
+        "UPDATE model_calls SET conversation_id = NULL WHERE conversation_id = OLD.id; "
+        "UPDATE turn_stats SET conversation_id = NULL WHERE conversation_id = OLD.id; "
+        "END")
+
 
 async def _migrate_boxes(db: aiosqlite.Connection) -> None:
     """Columns the boxes design adds to existing tables (DESIGN-BOXES.md, the
