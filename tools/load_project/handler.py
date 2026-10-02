@@ -59,6 +59,8 @@ async def run(slug: str) -> str:
     # the rest of THIS turn resolves the new project too (host loop path — the
     # contextvar set sticks for the remainder of the turn task)
     runtime.active_project.set(slug)
+    from backend import gitgate
+    gitgate.ensure_gitignore(slug)      # the harness-files block, before anything writes them
     in_guest_turn, previous, scratch = False, None, None
     try:
         from backend.agent import budget as budget_mod

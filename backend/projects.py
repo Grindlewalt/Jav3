@@ -365,6 +365,8 @@ async def load_project(slug: str):
         await set_state(db, "active_project", slug)
     finally:
         await db.close()
+    from . import gitgate
+    gitgate.ensure_gitignore(slug)      # the harness-files block, before anything writes them
     return {"ok": True, "active": slug}
 
 
