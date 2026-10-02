@@ -4,8 +4,6 @@ read "no structured completion report" whatever had happened).
 
 Same offline harness as test_plan.py: an item's turn is a scripted stand-in for
 `agents_run.run_agent_turn`; here it also emits tool events and a loop stop."""
-import pytest
-
 from backend import agents_run, turnstats
 from backend import plan as plan_mod
 from backend.config import settings
