@@ -18,17 +18,14 @@ parameters:
     items:
       type: array
       items: {type: string}
-      description: For add, several items in one call (write a whole plan at once).
+      description: For add, several items at once.
     index:
       type: integer
-      description: 0-based index, only when `text` is ambiguous. Positions shift as items are added; prefer text.
+      description: 0-based index, only if `text` is ambiguous.
   required: [action]
 ---
-Check items off by `text`, not an index you remember: indexes move as you and
-parallel subagents add items, and checking off the wrong one is worse than an
-error. Add a whole plan in one call with `items`. A call answers with the lines it
-changed and a count; `list` shows the finished items still on the list and the
-first 40 open ones, with a count of any more. A list past 45 items moves its older
-finished items to `.todo-archive.md` (the reply says so; positions move up). The
-list lives in a hidden file of its own; a project's `todo.md` is never edited (an
-existing one only seeds it).
+Check items off by `text`, not a remembered index (indexes shift as you and
+parallel subagents add items). Add a whole plan in one call with `items`. Replies
+show the changed lines and a count; `list` shows up to 40 open items. Past 45
+items, old finished ones move to `.todo-archive.md`. A project's `todo.md` is never
+edited (an existing one only seeds it).
