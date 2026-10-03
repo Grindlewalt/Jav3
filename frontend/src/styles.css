@@ -932,26 +932,22 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 .convo-list li:hover::after, .convo-list li.active::after,
 .convo-list li:hover + li::after, .convo-list li.active + li::after { opacity: 0; }
-/* rename / delete float over the row's right end on hover instead of
-   holding their width while invisible, which cut every title ~55px short.
-   The pad is the row's own hover wash, so the title fades under it. */
+/* the row's ⋯ (star, rename, folder, delete) sits at its right end. It used
+   to appear only on hover, and the operator found no way to delete a chat or a
+   project (2026-10-02), so it always shows, faint, and comes up fully on
+   hover, focus, an open menu or the open chat. One ⋯ is ~26px: the title
+   keeps that room and ellipsises before it instead of running under it. */
 .convo-actions {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
-  display: flex; gap: 2px; padding-left: 6px; border-radius: 8px;
-  background: var(--panel-2); opacity: 0; pointer-events: none;
-  transition: opacity 0.15s;
+  display: flex; gap: 2px; padding-left: 4px; border-radius: 8px;
+  background: transparent; opacity: 0.4; transition: opacity 0.15s;
 }
 .convo-list li:hover .convo-actions,
-.convo-list li:focus-within .convo-actions { opacity: 1; pointer-events: auto; }
-/* ...and the text fades out before it: the ⋯ used to sit square on the
-   title's last letters ("Protoc⋯"). Only where the actions overlay — on touch
-   they take their own place in the row (below). */
+.convo-list li:focus-within .convo-actions,
+.convo-list li.active .convo-actions { opacity: 1; background: var(--panel-2); }
 @media (hover: hover) {
-  .convo-list li:hover .convo-main,
-  .convo-list li:focus-within .convo-main,
-  .convo-list li.menu-open .convo-main {
-    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent calc(100% - 22px));
-    mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent calc(100% - 22px)); }
+  .convo-list li .convo-main { padding-right: 24px; }
+  .convo-list .proj-rows a { padding-right: 36px; }
 }
 /* an agent's thread: the agent's name leads the caption line */
 .convo-agent { color: var(--accent); margin-right: 6px; }

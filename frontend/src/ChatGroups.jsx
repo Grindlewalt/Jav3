@@ -7,6 +7,7 @@ import Menu, { MenuItem, MenuSep } from './components/Menu.jsx'
 import Input from './components/Input.jsx'
 import Button from './components/Button.jsx'
 import { activeFrom } from './chatActive.js'
+import { projectsChanged } from './projectsChanged.js'
 
 // The chat sidebar's list, grouped: Active (something running right now),
 // Projects (links to their workspace, ＋ for a new one), then Starred, then each folder, then
@@ -174,6 +175,32 @@ export default function ChatGroups({
     if (name?.trim()) await createFolder(name, c.id)
   }
 
+  // a project row's ⋯ (2026-10-02: the operator found no way to delete a
+  // project; Delete lived only on the Projects sheet's cards). Same calls as
+  // that sheet: delete moves it to Recently deleted, where it can be restored.
+  async function renameProject(p) {
+    setMenu(null)
+    const next = await ask.prompt('Rename project', p.name, { confirmLabel: 'Rename' })
+    if (!next?.trim()) return
+    try {
+      await api(`/api/projects/${encodeURIComponent(p.slug)}/name`, {
+        method: 'PUT', body: JSON.stringify({ name: next.trim() }) })
+      projectsChanged()
+    } catch (err) { notifyError(err) }
+  }
+
+  async function deleteProject(p) {
+    setMenu(null)
+    if (!await ask.confirm(`Move the project “${p.name}” to Recently deleted?`, {
+      body: 'Its files and chats stay until you delete it forever from the Projects sheet '
+        + '(＋ on Projects), where it can also be restored.',
+      confirmLabel: 'Move to bin', danger: true })) return
+    try {
+      await api(`/api/projects/${encodeURIComponent(p.slug)}`, { method: 'DELETE' })
+      projectsChanged()
+    } catch (err) { notifyError(err) }
+  }
+
   const known = new Set(folders.map((f) => f.id))
   // waiting on the operator first, then the list's own order (newest first)
   const activeRows = conversations.filter((c) => live.has(c.id))
@@ -193,7 +220,8 @@ export default function ChatGroups({
       <li key={c.id}
           className={[c.id === activeId ? 'active' : '', menu === key ? 'menu-open' : '']
             .filter(Boolean).join(' ') || undefined}
-          onClick={() => onOpen(c.id)}>
+          onClick={() => onOpen(c.id)}
+          onContextMenu={(e) => { e.preventDefault(); setMenu(key) }}>
         {/* title owns the row; the project slug sits under it so a long slug
             can never crush the title into two letters */}
         <div className="convo-main">
@@ -282,14 +310,32 @@ export default function ChatGroups({
         </GroupHead>
         {!folded.projects && (projects.length ? (
           <ul id="convo-group-projects" className="convo-rows proj-rows">
-            {projects.map((p) => (
-              <li key={p.slug}>
-                <Link to={projectHref(p)} title={p.slug}>
-                  <span className="proj-dot" aria-hidden="true" />
-                  <span className="convo-title ellipsis">{p.name}</span>
-                </Link>
-              </li>
-            ))}
+            {projects.map((p) => {
+              const key = `p:${p.slug}`
+              return (
+                <li key={p.slug} className={menu === key ? 'menu-open' : undefined}
+                    onContextMenu={(e) => { e.preventDefault(); setMenu(key) }}>
+                  <Link to={projectHref(p)} title={p.slug}>
+                    <span className="proj-dot" aria-hidden="true" />
+                    <span className="convo-title ellipsis">{p.name}</span>
+                  </Link>
+                  <span className="convo-actions" onClick={(e) => e.stopPropagation()}>
+                    <Menu open={menu === key} onClose={closeMenu} floating align="left"
+                          label="project actions" width={200}
+                          trigger={
+                            <button type="button" className="win-btn" title="project actions"
+                                    aria-label={`${p.name} actions`}
+                                    aria-haspopup="menu" aria-expanded={menu === key}
+                                    onClick={() => setMenu(menu === key ? null : key)}>⋯</button>
+                          }>
+                      <MenuItem onClick={() => renameProject(p)}>Rename</MenuItem>
+                      <MenuSep />
+                      <MenuItem danger onClick={() => deleteProject(p)}>Delete</MenuItem>
+                    </Menu>
+                  </span>
+                </li>
+              )
+            })}
           </ul>
         ) : (
           <p id="convo-group-projects" className="convo-group-empty">
