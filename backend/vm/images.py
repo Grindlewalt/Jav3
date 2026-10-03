@@ -678,7 +678,7 @@ class Builder:
         by_id = {r["id"]: r for r in rows}
         db = await get_db()
         try:
-            n = 0
+            n, seen = 0, set()
             for res in report.get("results") or []:
                 if not isinstance(res, dict) or res.get("id") not in by_id:
                     continue
@@ -686,7 +686,18 @@ class Builder:
                     db, res["id"], resolved_version=_s(res.get("version"), 80),
                     integrity=_s(res.get("integrity"), 300),
                     error=_s(res.get("error"), 200))
+                seen.add(res["id"])
                 n += 1
+            # a job that failed as a whole (the builder box did not boot, timed
+            # out, ...) says so on every row it left unresolved: 2026-10-01 a
+            # background resolve failed silently and the request sat at "not
+            # resolved yet" with nothing on its card saying why. The row stays
+            # unresolved (resolved_version NULL), so the next resolve retries it.
+            why = _s(report.get("error"), 200) or "the dry-run returned no result"
+            for pid in by_id:
+                if pid not in seen:
+                    await packages.set_resolution(db, pid, resolved_version=None,
+                                                  integrity=None, error=why)
         finally:
             await db.close()
         self._pub(phase="resolved", count=n, error=report.get("error"))

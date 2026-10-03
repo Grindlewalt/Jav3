@@ -3866,6 +3866,11 @@ a:has(> .nav-dot) { position: relative; }
 .bx-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .bx-strike { color: var(--dim); }
 .bx-reach { margin: var(--sp-3) 0; }
+/* the approve modal's "not resolved yet" notice and its Resolve now */
+.bx-unresolved { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3);
+  margin: var(--sp-3) 0; padding: var(--sp-3) var(--sp-4); border-radius: var(--radius-sm);
+  border: 1px solid var(--border); }
+.bx-unresolved p { margin: 0; flex: 1 1 260px; }
 .bx-svc-req { display: flex; flex-direction: column; gap: var(--sp-5); margin-bottom: var(--sp-5);
   border-left: 3px solid var(--amber); }
 .bx-d-add { color: var(--green); }

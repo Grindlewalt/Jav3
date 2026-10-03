@@ -9,7 +9,7 @@ import { Button, Modal, Select, Tag } from '../components/index.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { ago } from '../format.js'
-import { approvePackage, rejectPackage } from './api/packages.js'
+import { approvePackage, listPackages, rejectPackage, resolvePackages } from './api/packages.js'
 import { approveService, getService, rejectService } from './api/services.js'
 import {
   diffLines, EXPOSE_LABEL, exposeChoices, exposeDefault, exposePayload, packageReach, PLACEMENTS,
@@ -31,8 +31,9 @@ export function PackageSummary({ p }) {
       </div>
       <dl className="bx-kv small">
         {p.requested_command && <><dt>asked to run</dt><dd className="mono bx-strike">{p.requested_command}</dd></>}
-        <dt>will run</dt><dd className="mono">{p.canonical_command || '(resolved at approval)'}</dd>
-        {p.integrity && <><dt>integrity</dt><dd className="mono bx-hash">{p.integrity}</dd></>}
+        <dt>will run</dt><dd className="mono">{p.canonical_command || '(pinned once resolved)'}</dd>
+        {p.integrity && p.resolved_version && (
+          <><dt>integrity</dt><dd className="mono bx-hash">{p.integrity}</dd></>)}
         {p.reason && <><dt>reason</dt><dd>{p.reason}</dd></>}
         {p.conversation_id && <><dt>conversation</dt><dd className="mono">{p.conversation_id}</dd></>}
       </dl>
@@ -44,15 +45,37 @@ export function PackageSummary({ p }) {
 // variant reaches (operator decision 0.2) — directly, or through a variant
 // built from it. For the row's own target the server's `card` sentence and
 // `variant_used_by_detail` are shown as sent.
-export function PackageApprove({ p, variants, onClose, onDone }) {
-  const [target, setTarget] = useState(p?.target_variant || 'main')
+// Approval needs the dry-run's pinned version and integrity. That dry-run runs
+// in the background when the request is filed; when it has not succeeded the
+// modal says why and resolves on the spot, instead of an Approve that can only
+// answer "not resolved yet" (2026-10-02: a request stuck there for a day).
+export function PackageApprove({ p: given, variants, onClose, onDone }) {
+  const [p, setP] = useState(given)
+  const [target, setTarget] = useState(given?.target_variant || 'main')
   const [ack, setAck] = useState(false)
   const [build, setBuild] = useState(false)
   const [busy, setBusy] = useState(false)
-  useEffect(() => { setTarget(p?.target_variant || 'main'); setAck(false); setBuild(false) }, [p])
+  const [resolving, setResolving] = useState(false)
+  useEffect(() => {
+    setP(given); setTarget(given?.target_variant || 'main'); setAck(false); setBuild(false)
+  }, [given])
   if (!p) return null
   const reach = packageReach(p, target, { variants })
   const names = [...new Set([...(variants || []).map((x) => x.name), p.target_variant].filter(Boolean))]
+  const unresolved = !p.resolved_version
+  // integrity carries "unresolved: <why>" when a dry-run failed
+  const why = unresolved && /^unresolved: /.test(p.integrity || '')
+    ? p.integrity.replace(/^unresolved: /, '') : null
+  async function resolve() {
+    setResolving(true)
+    try {
+      const r = await resolvePackages()
+      const fresh = (await listPackages()).find((x) => x.id === p.id)
+      if (fresh) setP(fresh)
+      if (r?.error) notifyError(new Error(`resolve: ${r.error}`))
+    } catch (e) { notifyError(e) }
+    setResolving(false)
+  }
   async function go() {
     setBusy(true)
     try {
@@ -66,9 +89,20 @@ export function PackageApprove({ p, variants, onClose, onDone }) {
     <Modal open title={`Approve ${p.package}?`} onClose={onClose} onSubmit={go} width={560}
            footer={<>
              <Button variant="ghost" onClick={onClose}>Cancel</Button>
-             <Button type="submit" disabled={!ack || busy}>Approve</Button>
+             <Button type="submit" disabled={!ack || busy || unresolved}>Approve</Button>
            </>}>
       <PackageSummary p={p} />
+      {unresolved && (
+        <div className="bx-unresolved">
+          <p className="small">
+            <b>Not resolved yet.</b> Approval needs the exact version and its integrity,
+            which a dry-run in a builder box pins
+            {why ? <>. The last dry-run failed: <span className="mono">{why}</span></> : '. It has not run, or did not finish.'}
+          </p>
+          <Button variant="ghost" disabled={resolving} onClick={resolve}>
+            {resolving ? 'Resolving… (about a minute)' : 'Resolve now'}</Button>
+        </div>
+      )}
       <div className="row">
         <Select label="Installs into" value={target} onChange={(e) => setTarget(e.target.value)}
                 options={names.length ? names : [target]} />
