@@ -543,6 +543,10 @@ class Settings(BaseSettings):
     # research subagent reads a few pages and re-sends them each loop, so a
     # smaller slice cuts token throughput hard while keeping the useful content.
     web_max_chars: int = 6_000
+    # PDFs (backend/pdftext.py): a rule book or manual is often 2-15 MB and is
+    # read a slice at a time (#page=N-M / #search=word), each slice up to this
+    web_max_pdf_bytes: int = 30_000_000
+    web_pdf_max_chars: int = 12_000
     # short-TTL cache of fetched page text (and summaries keyed by focus), so a
     # re-read within a task skips the download AND the summarize model call.
     web_cache_ttl_seconds: int = 900

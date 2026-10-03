@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from . import pdftext
 from .config import settings
 from .db import get_db
 from .websec import UnsafeURL, html_to_text, is_safe_url
@@ -184,6 +185,15 @@ async def read(url: str, session: str) -> str:
     cached = _cache_get(_page_cache, url)
     if cached is not None:
         return cached + "\n\n(served from cache)"
+    # a PDF is read a slice at a time (#page=N-M, #search=word): a document
+    # already parsed answers those without another download
+    doc_url, frag, frag_value = pdftext.split_fragment(url)
+    doc = pdftext.cached(doc_url) if frag else None
+    if doc is not None:
+        out = _out(pdftext.render(doc_url, doc, frag, frag_value, settings.web_pdf_max_chars))
+        _cache_put(_page_cache, url, out)
+        return out
+    fetch_url = pdftext.split_fragment(fetch_url)[0]
     if not claimed:
         return (f"note: {url} was already claimed this session (by you or "
                 "another bot). Pick a different source to diversify — or say "
@@ -217,16 +227,37 @@ async def read(url: str, session: str) -> str:
                         continue
                     r.raise_for_status()
                     ctype = r.headers.get("content-type", "")
+                    limit = (settings.web_max_pdf_bytes
+                             if pdftext.looks_like_pdf(ctype, b"", current)
+                             else settings.web_max_bytes)
                     chunks, total = [], 0
                     async for chunk in r.aiter_bytes():
                         chunks.append(chunk)
                         total += len(chunk)
-                        if total > settings.web_max_bytes:
+                        if total > limit:
                             break
                     raw = b"".join(chunks)
                     break
             else:
                 return _out(f"error: too many redirects (>10) fetching {url}")
+        if pdftext.looks_like_pdf(ctype, raw[:5]):
+            if total > limit:
+                return _out(f"error: the PDF at {doc_url} is over {limit // 1_000_000} MB, "
+                            "too big to read here.")
+            try:
+                doc = await pdftext.load(doc_url, raw)
+            except pdftext.PdfError as e:
+                return _out(f"error: {e}")
+            out = _out(pdftext.render(doc_url, doc, frag, frag_value,
+                                      settings.web_pdf_max_chars))
+            ok = True
+            _cache_put(_page_cache, url, out)
+            return out
+        if b"\x00" in raw[:4096] and "html" not in ctype and "text" not in ctype:
+            # images, archives, office files: decoded as text they were pages
+            # of junk in the model's context
+            return _out(f"error: {url} is binary content ({ctype or 'unknown type'}), "
+                        "not a page or a PDF, so there is no text to read.")
         body = raw.decode("utf-8", errors="replace")
         if "html" in ctype or "<html" in body[:2000].lower():
             title, text = html_to_text(body)
