@@ -5869,6 +5869,24 @@ def build_tui(base: str, token: str, **kw):
                 f"[$text-muted]for {_esc(r.get('project_slug') or 'operator')} · "
                 f"{_esc(_short(_pkg_card(r), 70))}[/]")
 
+    def _row_envreq(e) -> str:
+        r, ts = e["raw"], row_ts(e.get("ts"))
+        n = len(_jlist(r.get("packages")))
+        return (f"[$warning b]ENV [/] [$text-muted]{ts}[/] image "
+                f"[b]{_esc(r.get('name') or '?')}[/] from {_esc(r.get('from_variant') or '?')} "
+                f"[$text-muted]· {n} package{'s' * (n != 1)} · for "
+                f"{_esc(r.get('project_slug') or 'operator')}"
+                + ("" if r.get("resolved") else " · not resolved yet") + "[/]")
+
+    def _row_skillreq(e) -> str:
+        r, ts = e["raw"], row_ts(e.get("ts"))
+        st = r.get("status") or "pending"
+        stc = f" [$success]{_esc(st)}[/]" if st == "fetched" else ""
+        return (f"[$warning b]SKILL [/] [$text-muted]{ts}[/] "
+                f"[b]{_esc(_short(r.get('skill_name') or r.get('source') or '?', 60))}[/]{stc} "
+                f"[$text-muted]for {_esc(r.get('project_slug') or 'operator')} · "
+                f"{_esc(_short(r.get('source') or '', 50))}[/]")
+
     def _slug_says(slug) -> str:
         if not slug or slug == "__general__":
             return "no project (shared box)"
@@ -5997,7 +6015,8 @@ def build_tui(base: str, token: str, **kw):
                 + (" · network off" if p.get("network_off") else "")
                 + f" · {len(projects)} project{'s' * (len(projects) != 1)}[/]")
 
-    _ROWS = {"service": _row_service, "package": _row_package, "policy": _row_policy,
+    _ROWS = {"service": _row_service, "package": _row_package, "envreq": _row_envreq,
+             "skillreq": _row_skillreq, "policy": _row_policy,
              "group": _row_group, "pbox": _row_pbox, "proc": _row_proc, "svc": _row_svc,
              "orphan": _row_orphan,
              "call": calls_row, "refusal": calls_row,
@@ -6228,6 +6247,12 @@ def build_tui(base: str, token: str, **kw):
                 self._get("queue", "services", "/api/services", "", quiet404=True),
                 self._get("queue", "packages", "/api/packages", "packages", quiet404=True,
                           params={"status": "pending"}))
+            envs, skills = await asyncio.gather(
+                self._get("queue", "environments", "/api/environments", "environments",
+                          quiet404=True, params={"status": "pending"}),
+                self._get("queue", "skill requests", "/api/skill-requests", "requests",
+                          quiet404=True))
+            self._queue_extra = (envs or [], skills or [])
             alerts = None
             if runs is None:                          # the flat list, as before the cards
                 alerts = await self._get("queue", "alerts", "/api/security/events", "events",
@@ -6249,8 +6274,9 @@ def build_tui(base: str, token: str, **kw):
             """The Queue from what was last loaded, with the cards opened or closed as
             they are now (no request)."""
             pending, git, alerts, services, packages, runs = self._queue_src
+            envs, skills = getattr(self, "_queue_extra", ((), ()))
             return self.queue_entries(pending, git, alerts, services, packages, runs=runs,
-                                      open_runs=self.open_runs)
+                                      open_runs=self.open_runs, envs=envs, skills=skills)
 
         def _lan(self, svcs) -> None:
             """GET /api/services' LAN fields: services_lan_ip is "" unless a
@@ -6272,7 +6298,7 @@ def build_tui(base: str, token: str, **kw):
 
         @staticmethod
         def queue_entries(pending, git: dict, alerts, services=(), packages=(), runs=None,
-                          open_runs=()) -> list[dict]:
+                          open_runs=(), envs=(), skills=()) -> list[dict]:
             asks = [{"type": "egress", "key": f"p{e.get('id')}", "raw": e,
                      "ts": e.get("last_seen") or ""} for e in pending]
             asks += [{"type": "service", "key": f"v{q.get('id')}", "raw": q,
@@ -6281,6 +6307,12 @@ def build_tui(base: str, token: str, **kw):
             asks += [{"type": "package", "key": f"pk{q.get('id')}", "raw": q,
                       "ts": q.get("created_at") or ""}
                      for q in packages if q.get("status", "pending") == "pending"]
+            asks += [{"type": "envreq", "key": f"ev{q.get('id')}", "raw": q,
+                      "ts": q.get("created_at") or ""}
+                     for q in envs if q.get("status", "pending") == "pending"]
+            asks += [{"type": "skillreq", "key": f"sk{q.get('id')}", "raw": q,
+                      "ts": q.get("created_at") or ""}
+                     for q in skills if q.get("status") in ("pending", "fetched")]
             for slug, reqs in git.items():
                 for q in reqs or []:
                     if q.get("status", "pending") == "pending":
@@ -6889,6 +6921,71 @@ def build_tui(base: str, token: str, **kw):
                  "approve[/]" if r.get("supersedes_id") else ""),
                 f"[$text-muted]{lan}[/]"])
 
+        def _detail_envreq(self, e) -> str:
+            r = e["raw"]
+            pk = [p for p in _jlist(r.get("packages")) if isinstance(p, dict)]
+            ok = bool(r.get("resolved"))
+            lines = [
+                "[$primary]y[/] approve and build   [$primary]n[/] reject", "",
+                f"[b]environment request #{_esc(str(r.get('id')))}: image "
+                f"{_esc(r.get('name') or '?')}[/] from {_esc(r.get('from_variant') or '?')}  "
+                f"[$text-muted]{_esc(r.get('project_slug') or 'operator')} · "
+                f"{_esc(full_ts(r.get('created_at')))}[/]"]
+            for p in pk:
+                v = p.get("resolved_version")
+                lines.append(
+                    f"  {_esc(p.get('manager') or '?')} [b]{_esc(p.get('package') or '?')}[/] "
+                    + (_esc(str(v)) if v else
+                       f"[$warning]not resolved ({_esc(p.get('version_req') or 'any')})[/]"))
+            lines += [
+                f"memory floor: {_esc(str(r.get('min_mem_mb') or '?'))} MB",
+                f"reason: {_esc(r.get('reason') or '')}",
+                f"[b]{_esc(r.get('plan') or '')}[/]",
+                "[$text-muted]other projects: unchanged[/]"]
+            if not ok:
+                lines.append("[$warning]not resolved yet: approve stays refused until every "
+                             "package has a version (the server resolves them; r reloads)[/]")
+            return "\n".join(lines)
+
+        def _detail_skillreq(self, e) -> str:
+            r = e["raw"]
+            st = r.get("status") or "pending"
+            lines = [
+                ("[$primary]y[/] fetch and read it   [$primary]n[/] reject" if st == "pending"
+                 else "[$primary]y[/] install and grant   [$primary]n[/] reject   "
+                      "[$primary]f[/] fetch again"), "",
+                f"[b]skill request #{_esc(str(r.get('id')))}[/] "
+                f"[$text-muted]{_esc(st)} · {_esc(r.get('project_slug') or 'operator')} · "
+                f"{_esc(full_ts(r.get('created_at')))}[/]",
+                f"source: {_esc(r.get('source') or '?')}",
+                f"reason: {_esc(r.get('reason') or '')}"]
+            if r.get("error"):
+                lines.append(f"[$error]{_esc(r['error'])}[/]")
+            if st == "pending":
+                lines.append("[$text-muted]nothing has been fetched yet: y contacts the "
+                             "source from the host[/]")
+                return "\n".join(lines)
+            files = r.get("files") or {}
+            lines += [f"name: [b]{_esc(r.get('skill_name') or '?')}[/]  ref: "
+                      f"{_esc(str(r.get('ref') or '?'))}",
+                      f"description: {_esc(r.get('description') or '')}",
+                      f"files: {_esc(', '.join(map(str, files)) if isinstance(files, dict) else '')}",
+                      f"SKILL.md sha256: {_esc(r.get('skill_sha256') or '?')}"]
+            for f in _jlist(r.get("flags")):
+                f = f if isinstance(f, dict) else {"file": str(f)}
+                lines.append(f"[$warning]flag {_esc(str(f.get('file') or ''))}: "
+                             f"{_esc(str(f.get('trigger') or ''))}[/]")
+            for q in _jlist(r.get("requirements")):
+                q = q if isinstance(q, dict) else {"reason": str(q), "met": True}
+                lines.append(f"requires: {_esc(str(q.get('reason') or ''))} "
+                             + ("[$success]met[/]" if q.get("met") else "[$error]UNMET[/]"))
+            if st == "installed":
+                lines.append("installed " + ("and granted" if r.get("granted")
+                                             else "[$warning]but not granted[/]"))
+            if r.get("skill_md"):
+                lines += ["", "[b]SKILL.md[/]", _esc(r["skill_md"])]
+            return "\n".join(lines)
+
         def _detail_package(self, e) -> str:
             r = e["raw"]
             pending = (r.get("status") or "pending") == "pending"
@@ -7109,6 +7206,11 @@ def build_tui(base: str, token: str, **kw):
                     return "[$primary]a[/] acknowledge"
                 if e is not None and e["type"] in ("run", "runev"):
                     return self._run_keys(e)
+                if e is not None and e["type"] == "skillreq":
+                    if (e["raw"].get("status") or "pending") == "pending":
+                        return "[$primary]y[/] fetch  [$primary]n[/] reject"
+                    return ("[$primary]y[/] install & grant  [$primary]f[/] fetch again  "
+                            "[$primary]n[/] reject")
                 if e is not None:
                     return "[$primary]y[/] approve  [$primary]n[/] deny"
             return self.FOOT[self.tab]
@@ -7179,6 +7281,11 @@ def build_tui(base: str, token: str, **kw):
                 if sv or pk:
                     extra = (f"{sv} service{'s' * (sv != 1)} · {pk} package"
                              f"{'s' * (pk != 1)} · ")
+                ne = sum(e["type"] == "envreq" for e in es)
+                nk = sum(e["type"] == "skillreq" for e in es)
+                if ne or nk:
+                    extra += (f"{ne} environment{'s' * (ne != 1)} · {nk} skill "
+                              f"request{'s' * (nk != 1)} · ")
                 if rn:
                     need = sum((r.get("counts") or {}).get("need", 0) for r in rn)
                     al = f"{need} alert{'s' * (need != 1)} in {len(rn)} run{'s' * (len(rn) != 1)}"
@@ -7502,6 +7609,11 @@ def build_tui(base: str, token: str, **kw):
         def action_filter(self) -> None:
             if self.tab == "logs" and not self.locked:
                 self._act(self._pick_kind())
+            elif self.tab == "queue" and not self.locked:
+                e = self.selected()
+                if e is not None and e["type"] == "skillreq" and \
+                        (e["raw"].get("status") or "pending") != "pending":
+                    self._act(self._fetch_skill(e["raw"]))
 
         async def _pick_kind(self) -> None:
             """f opens the kinds as a list (there are a dozen and more): type to find
@@ -7574,6 +7686,17 @@ def build_tui(base: str, token: str, **kw):
             if e is not None and e["type"] == "package":
                 await (self._approve_package(e["raw"]) if yes
                        else self._reject("package", e["raw"]))
+                return
+            if e is not None and e["type"] == "envreq":
+                await (self._approve_env(e["raw"]) if yes else self._reject("envreq", e["raw"]))
+                return
+            if e is not None and e["type"] == "skillreq":
+                if not yes:
+                    await self._reject("skillreq", e["raw"])
+                elif (e["raw"].get("status") or "pending") == "pending":
+                    await self._fetch_skill(e["raw"])
+                else:
+                    await self._approve_skill(e["raw"])
                 return
             if e is not None and e["type"] in ("run", "runev"):
                 if yes:
@@ -7989,9 +8112,55 @@ def build_tui(base: str, token: str, **kw):
                         "Images builds it)[/]")
                     self.render_chrome()
 
+        async def _approve_env(self, r: dict) -> None:
+            eid, name = r.get("id"), r.get("name") or "?"
+            if not r.get("resolved"):
+                self._fail(f"environment {name} is not resolved yet: every package needs a "
+                           "version before it can be approved (the server resolves them; "
+                           "r reloads)")
+                return
+            pk = ", ".join(f"{p.get('manager')} {p.get('package')} {p.get('resolved_version')}"
+                           for p in _jlist(r.get("packages")) if isinstance(p, dict))
+            detail = (f"Builds a new image `{name}` from `{r.get('from_variant') or '?'}` with "
+                      f"{pk or 'no packages'} (memory floor {r.get('min_mem_mb') or '?'} MB). "
+                      f"{r.get('plan') or ''} Other projects are unchanged.")
+            if await self._confirm(f"Approve environment {name} and build it?", detail):
+                await self._send("POST", f"/api/environments/{eid}/approve",
+                                 f"approved environment {name}",
+                                 json={"acknowledge": True, "build": True})
+
+        async def _fetch_skill(self, r: dict) -> None:
+            sid = r.get("id")
+            if await self._confirm(
+                    "Fetch this skill?",
+                    f"The host contacts {r.get('source') or '?'} (a source the agent chose) "
+                    "and stages it for you to read. Nothing is installed."):
+                await self._send("POST", f"/api/skill-requests/{sid}/fetch",
+                                 f"fetched skill request #{sid}: read it, then y installs")
+
+        async def _approve_skill(self, r: dict) -> None:
+            sid, name = r.get("id"), r.get("skill_name") or "?"
+            sha = r.get("skill_sha256")
+            if not sha:
+                self._fail("nothing fetched to approve: f fetches it first")
+                return
+            unmet = [q for q in _jlist(r.get("requirements"))
+                     if isinstance(q, dict) and not q.get("met")]
+            detail = (f"Installs the skill `{name}` exactly as fetched (SKILL.md sha256 "
+                      f"{sha}) and grants it to agents"
+                      + (", though some requirements are unmet, so it may stay ungranted"
+                         if unmet else "") + ".")
+            if await self._confirm(f"Install and grant skill {name}?", detail):
+                await self._send("POST", f"/api/skill-requests/{sid}/approve",
+                                 f"installed skill {name}",
+                                 json={"acknowledge": True, "skill_sha256": sha})
+
         async def _reject(self, kind: str, r: dict) -> None:
             rid = r.get("id")
             what = (f"service {r.get('name') or '?'}" if kind == "service"
+                    else f"environment {r.get('name') or '?'}" if kind == "envreq"
+                    else f"skill request {r.get('skill_name') or r.get('source') or '?'}"
+                    if kind == "skillreq"
                     else f"package {r.get('package') or '?'}")
             reason = await self.app.push_screen_wait(Ask(
                 f"Reject {what}: the reason (the agent sees it)"))
@@ -8001,7 +8170,8 @@ def build_tui(base: str, token: str, **kw):
             if await self._confirm(f"Reject {what} (#{rid})?",
                                    f"Marks the request rejected with: {reason}. Nothing "
                                    "is installed or started."):
-                base = "services" if kind == "service" else "packages"
+                base = {"service": "services", "envreq": "environments",
+                        "skillreq": "skill-requests"}.get(kind, "packages")
                 await self._send("POST", f"/api/{base}/{rid}/reject", f"rejected {what}",
                                  json={"reason": reason})
 
