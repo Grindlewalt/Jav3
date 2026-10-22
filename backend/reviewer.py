@@ -48,7 +48,8 @@ _NEVER_ACK_KINDS = {"egress_anomaly", "host_cut", "secret_leak",
                     "gateway_cap"}
 # service_* / svc_* (service boxes), package_* (catalogue), image_* (variant
 # builds), docker_* (weak isolation, refused hardening, socket refusal)
-_NEVER_ACK_PREFIXES = ("service_", "package_", "svc_", "image_", "docker_")
+_NEVER_ACK_PREFIXES = ("service_", "package_", "svc_", "image_", "docker_",
+                       "environment_", "skill_request", "skill_installed")
 
 
 def never_auto(kind: str | None) -> bool:

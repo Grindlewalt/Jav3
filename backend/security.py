@@ -107,6 +107,9 @@ KNOWN_KINDS = {
     "service_revoked": "warn", "svc_unreported": "warn", "box_cap_refused": "info",
     "package_requested": "info", "package_approved": "warn", "package_rejected": "warn",
     "image_variant_built": "info", "gateway_cap": "warn",
+    "environment_requested": "info", "environment_approved": "warn",
+    "environment_rejected": "info",
+    "skill_requested": "info", "skill_installed": "warn", "skill_request_rejected": "info",
     "docker_weak_isolation": "warn", "docker_isolation_note": "info",
     "docker_hardening_refused": "warn", "docker_socket_refused": "warn",
     "unexpected_process": "warn", "proc_report_mismatch": "warn",
@@ -132,8 +135,10 @@ KNOWN_KINDS = {
     "run_stopped": "info",
 }
 # requests that wait on an operator decision in their own queue (services,
-# packages): they ping at the default level whatever severity they carry
-APPROVAL_KINDS = frozenset({"service_requested", "package_requested"})
+# packages, environments, skill installs): they ping at the default level
+# whatever severity they carry
+APPROVAL_KINDS = frozenset({"service_requested", "package_requested",
+                            "environment_requested", "skill_requested"})
 # ping at every level even when raised below critical: an anomaly cut, a
 # refused secret leak, a guest connection no reported process owns
 ALWAYS_KINDS = frozenset({"egress_anomaly", "host_cut", "secret_leak",

@@ -463,6 +463,57 @@ CREATE TABLE IF NOT EXISTS package_catalogue (
 );
 CREATE INDEX IF NOT EXISTS idx_package_catalogue_status
     ON package_catalogue(status, created_at);
+-- An agent's proposal for a whole new image variant for its project
+-- (backend/environments.py, docs/agent-requests-contract.md). Its packages are
+-- package_catalogue rows carrying environment_id; approving builds the variant
+-- and moves only this project onto it through a copy of its profile.
+CREATE TABLE IF NOT EXISTS environment_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_slug TEXT NOT NULL,
+    conversation_id INTEGER,
+    name TEXT NOT NULL,                  -- the proposed image variant
+    from_variant TEXT NOT NULL DEFAULT 'main',
+    min_mem_mb INTEGER,
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'approved', 'rejected')),
+    profile_id INTEGER,                  -- the profile the project moved to
+    profile_copied_from INTEGER,         -- NULL when an own profile was updated in place
+    decided_by TEXT,
+    decided_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_environment_requests_status
+    ON environment_requests(status, created_at);
+-- An agent's request to install an existing skill (backend/skillrequests.py).
+-- Never fetched until the operator presses Fetch; the fetched copy waits in
+-- <data_dir>/skill_staging/<id>/ and approval vendors exactly those bytes.
+CREATE TABLE IF NOT EXISTS skill_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_slug TEXT,
+    conversation_id INTEGER,
+    source TEXT NOT NULL,                -- https git URL[#sub/dir] or clawhub:<slug>[@ver]
+    name TEXT,                           -- optional registry name override
+    reason TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'fetched', 'installed', 'rejected')),
+    fetched_at TEXT,
+    ref TEXT,                            -- commit id / ClawHub version the fetch pinned
+    skill_name TEXT,
+    description TEXT,
+    skill_sha256 TEXT,                   -- of the staged SKILL.md; approval must quote it
+    files TEXT,                          -- JSON {relpath: sha256}
+    flags TEXT,                          -- JSON diff-gate flags
+    requirements TEXT,                   -- JSON [{reason, met}]
+    error TEXT,
+    installed_slug TEXT,
+    granted INTEGER NOT NULL DEFAULT 0,
+    decided_by TEXT,
+    decided_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_skill_requests_status
+    ON skill_requests(status, created_at);
 -- (e) Image variants (frozen layers over base-vN) and their built versions.
 -- Builtin recipes live in vm/images/<name>.recipe; `recipe` here is the
 -- effective recipe JSON (builtin + approved catalogue packages) and its hash.
@@ -612,6 +663,11 @@ async def init_db() -> None:
                          ("pr_url", "TEXT"), ("summary", "TEXT")):
             if col not in gcols:
                 await db.execute(f"ALTER TABLE git_requests ADD COLUMN {col} {typ}")
+        # package rows filed as part of an environment request (environments.py)
+        async with db.execute("PRAGMA table_info(package_catalogue)") as cur:
+            kcols = [r["name"] for r in await cur.fetchall()]
+        if kcols and "environment_id" not in kcols:
+            await db.execute("ALTER TABLE package_catalogue ADD COLUMN environment_id INTEGER")
         # triage reviewer verdict columns on the two queue tables
         for table in ("egress_pending", "security_events"):
             async with db.execute(f"PRAGMA table_info({table})") as cur:

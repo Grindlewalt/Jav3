@@ -207,6 +207,9 @@ app.include_router(procview_api.router)   # WP4
 from . import packages_api  # noqa: E402  # WP5
 app.include_router(packages_api.router)  # WP5
 app.include_router(packages_api.images_router)  # WP5
+from . import environments_api, skillrequests_api  # noqa: E402  # agent requests
+app.include_router(environments_api.router)
+app.include_router(skillrequests_api.router)
 from . import profiles_api  # noqa: E402  # WP2
 app.include_router(profiles_api.router)  # WP2
 app.include_router(profiles_api.project_router)  # WP2

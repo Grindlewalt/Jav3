@@ -41,7 +41,8 @@ DEFAULT_MODE = "yolo"
 
 IN_GUEST_GATED = frozenset({"write_file", "edit_file", "run_code"})
 GATED_TOOLS = IN_GUEST_GATED | {"git_commit_request", "git_remote_request", "git_push_request",
-                                "service_request", "package_request"}
+                                "service_request", "package_request",
+                                "environment_request", "skill_request"}
 GATE_OP = "permission_gate"          # the guest's "may this run?" broker call
 
 YES = "Yes"
@@ -149,9 +150,12 @@ def rule_prefix(tool: str, args: dict) -> str | None:
         if isinstance(mgr, str) and isinstance(pkg, str) and pkg.strip():
             return f"{mgr.strip()} {pkg.strip()}"
         return None
-    if tool == "service_request":
+    if tool in ("service_request", "environment_request"):
         name = args.get("name")
         return name.strip() if isinstance(name, str) and name.strip() else None
+    if tool == "skill_request":
+        src = args.get("source")
+        return src.strip() if isinstance(src, str) and src.strip() else None
     return None      # git commit/remote: never "always"
 
 
