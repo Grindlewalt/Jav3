@@ -882,6 +882,18 @@ async def acknowledge(db: aiosqlite.Connection, event_id: int) -> dict:
     return {"ok": True}
 
 
+async def settle(db: aiosqlite.Connection, kind: str, key: str, value) -> int:
+    """Acknowledge the open `kind` events whose detail[key] == value: the
+    request a queue card just decided, so the same request does not stay in
+    the alerts as "needs you" after the operator answered it."""
+    cur = await db.execute(
+        "UPDATE security_events SET acknowledged=1, acknowledged_at=datetime('now') "
+        "WHERE acknowledged=0 AND kind = ? AND json_extract(detail, '$.' || ?) = ?",
+        (kind, key, value))
+    await db.commit()
+    return cur.rowcount
+
+
 async def acknowledge_all(db: aiosqlite.Connection, *, only: str | None = None,
                           exclude: str | None = None) -> dict:
     """Operator bulk-clear — the queue reached hundreds in practice. `only` /

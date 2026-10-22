@@ -357,3 +357,25 @@ def test_tool_frontmatter():
     assert meta["section"] == "skills" and meta["enabled"] is True
     assert "action" not in meta and "requires_settings" not in meta
     assert meta["parameters"]["required"] == ["source", "reason"]
+
+
+async def _open(db, kind):
+    async with db.execute("SELECT COUNT(*) FROM security_events WHERE kind = ? "
+                          "AND acknowledged = 0", (kind,)) as cur:
+        return (await cur.fetchone())[0]
+
+
+async def test_deciding_settles_the_request_and_flag_alerts(db, fake_fetch):
+    """The operator answered on the card: the request's own "needs you" event
+    and the importer's "read it before granting" flags (shown on that card)
+    stop counting; another request's event stays open."""
+    other = await _file(db, source="clawhub:other")
+    row = await _fetched(db, fake_fetch)               # weather: diff-gate flags
+    assert row["flags"]
+    await skillrequests.approve(db, row["id"], skill_sha256=row["skill_sha256"],
+                                decided_by="op", by_operator=True)
+    assert await _open(db, "skill_requested") == 1     # only `other` left
+    assert await _open(db, "skill_import_flag") == 0
+    await skillrequests.reject(db, other["id"], reason="", decided_by="op",
+                               by_operator=True)
+    assert await _open(db, "skill_requested") == 0

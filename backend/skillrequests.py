@@ -275,6 +275,10 @@ async def approve(db, req_id: int, *, skill_sha256: str, decided_by: str,
         "WHERE id = ?", (info["slug"], granted, error, decided_by, req_id))
     await db.commit()
     _rmstaging(req_id)
+    await security.settle(db, "skill_requested", "request_id", req_id)
+    # vendor() raised "read it before granting" for any diff-gate flags; the
+    # operator read exactly those flags on the card they approved
+    await security.settle(db, "skill_import_flag", "skill", info["slug"])
     await security.raise_event(
         db, kind="skill_installed", severity="warn", project=row["project_slug"],
         summary=f"skill {info['name']} installed from {row['source']}"
@@ -299,6 +303,7 @@ async def reject(db, req_id: int, *, reason: str, decided_by: str,
         ((reason or "")[:500] or None, decided_by, req_id))
     await db.commit()
     _rmstaging(req_id)
+    await security.settle(db, "skill_requested", "request_id", req_id)
     await security.raise_event(
         db, kind="skill_request_rejected", severity="info", project=row["project_slug"],
         summary=f"skill request {row['source']} rejected",

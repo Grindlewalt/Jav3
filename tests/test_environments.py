@@ -356,3 +356,20 @@ async def test_tool_handler(db, monkeypatch):
                    "packages — pending. Nothing is built until the operator approves "
                    "it; this project's boxes then boot on it (a later box boot, not "
                    "this turn).")
+
+
+async def _open(db, kind):
+    async with db.execute("SELECT COUNT(*) FROM security_events WHERE kind = ? "
+                          "AND acknowledged = 0", (kind,)) as cur:
+        return (await cur.fetchone())[0]
+
+
+async def test_deciding_settles_only_that_request(db):
+    one = await _file(db, name="one")
+    two = await _file(db, name="two")
+    assert await _open(db, "environment_requested") == 2
+    await _resolve(db, one)
+    await environments.approve(db, one["id"], decided_by="op", by_operator=True)
+    assert await _open(db, "environment_requested") == 1
+    await environments.reject(db, two["id"], decided_by="op", by_operator=True)
+    assert await _open(db, "environment_requested") == 0

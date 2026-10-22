@@ -275,6 +275,7 @@ async def approve(db, env_id: int, *, decided_by: str, by_operator: bool) -> dic
                               by_operator=by_operator)
     await _set_status(db, env_id, "approved", decided_by, profile_id=prof["id"],
                       profile_copied_from=copied_from)
+    await security.settle(db, "environment_requested", "environment_id", env_id)
     await security.raise_event(
         db, kind="environment_approved", severity="warn", project=slug,
         summary=f"approved image `{name}` from `{r['from_variant']}`; {slug} now "
@@ -296,6 +297,7 @@ async def reject(db, env_id: int, *, reason: str = "", decided_by: str,
         await packages.reject(db, pid, reason=reason, decided_by=decided_by,
                               via_environment=True, quiet=True)
     await _set_status(db, env_id, "rejected", decided_by)
+    await security.settle(db, "environment_requested", "environment_id", env_id)
     await security.raise_event(
         db, kind="environment_rejected", severity="info", project=r["project_slug"],
         summary=f"rejected image request `{r['name']}`",
