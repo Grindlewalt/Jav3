@@ -82,6 +82,30 @@ const S = {
       reason: 'search', status: 'built', target_variant: 'main', built_version: 'v7',
       decided_by: 'operator', decided_at: '2026-09-20 09:00:00', created_at: '2026-09-20 08:59:00' },
   ],
+  environments: [
+    { id: 4, project_slug: 'alpha', conversation_id: 'c-81', name: 'sim-gl', from_variant: 'dev',
+      min_mem_mb: 1536, reason: 'WebGL needs software GL; pygame for the tests', status: 'pending',
+      created_at: '2026-09-26 08:30:00', decided_by: null, decided_at: null,
+      packages: [
+        { id: 31, manager: 'apt', package: 'mesa-utils', version_req: null, resolved_version: '9.0.0-2',
+          integrity: 'apt:Pin 500', status: 'pending' },
+        { id: 32, manager: 'pip', package: 'pygame', version_req: '==2.6.1', resolved_version: '2.6.1',
+          integrity: 'sha256:' + 'cd'.repeat(32), status: 'pending' }],
+      resolved: true, profile_now: { id: 1, name: 'Default' },
+      plan: 'builds image `sim-gl` from `dev`, then alpha boots on it (a copy of profile Default); other projects unchanged',
+      profile: null, build: null },
+  ],
+  skillRequests: [
+    { id: 2, project_slug: 'alpha', conversation_id: 'c-81', source: 'https://github.com/anthropics/skills#skills/pdf',
+      name: null, reason: 'the operator keeps sending PDFs to fill in', status: 'fetched',
+      created_at: '2026-09-26 08:40:00', fetched_at: '2026-09-26 08:41:00', ref: '3f9c2e1a7b',
+      skill_name: 'pdf', description: 'Fill in and extract PDF forms', skill_sha256: 'ab12'.repeat(16),
+      files: { 'SKILL.md': 'ab12'.repeat(16), 'forms.md': 'ef34'.repeat(16) },
+      flags: [{ file: 'SKILL.md#block2.sh', trigger: 'runs a shell block', detail: {} }],
+      requirements: [{ reason: 'needs the pdftk binary', met: false }, { reason: 'python3', met: true }],
+      skill_md: '---\nname: pdf\ndescription: Fill in and extract PDF forms\n---\n\nUse pdftk to fill forms.\n',
+      error: null, installed_slug: null, granted: false, decided_by: null, decided_at: null },
+  ],
   services: [
     { id: 7, project_slug: 'alpha', name: 'site', description: 'the static site dev server',
       command: ['python3', '-m', 'http.server', '8080'], workdir: 'site', files: ['site/**'],
@@ -428,6 +452,35 @@ const routes = [
   }],
   ['POST', /^\/api\/packages\/(\d+)\/reject$/, ([id], b) =>
     pkgRow(Object.assign(pkg(id), { status: 'rejected', decided_at: now(), reason: b.reason || pkg(id).reason }))],
+  ['GET', /^\/api\/environments$/, (_, __, q) => ({
+    environments: S.environments.filter((x) => !q.get('status') || x.status === q.get('status')) })],
+  ['POST', /^\/api\/environments\/(\d+)\/approve$/, ([id], b) => {
+    if (!b.acknowledge) fail(400, 'approval needs acknowledge: true')
+    const e = S.environments.find((x) => x.id === Number(id)) || fail(404, 'no such environment request')
+    if (e.status !== 'pending') fail(409, `cannot approve a ${e.status} request`)
+    return Object.assign(e, { status: 'approved', decided_by: 'operator', decided_at: now(),
+      profile: { id: 9, name: `${e.project_slug} · ${e.name}` },
+      build: { version: 'v1', status: 'building', error: null }, build_started: true })
+  }],
+  ['POST', /^\/api\/environments\/(\d+)\/reject$/, ([id]) => {
+    const e = S.environments.find((x) => x.id === Number(id)) || fail(404, 'no such environment request')
+    return Object.assign(e, { status: 'rejected', decided_at: now() })
+  }],
+  ['GET', /^\/api\/skill-requests$/, (_, __, q) => ({
+    requests: S.skillRequests.filter((x) => !q.get('status') || x.status === q.get('status')) })],
+  ['POST', /^\/api\/skill-requests\/(\d+)\/fetch$/, ([id]) =>
+    Object.assign(S.skillRequests.find((x) => x.id === Number(id)) || fail(404, 'no such skill request'),
+      { status: 'fetched', fetched_at: now() })],
+  ['POST', /^\/api\/skill-requests\/(\d+)\/approve$/, ([id], b) => {
+    const r = S.skillRequests.find((x) => x.id === Number(id)) || fail(404, 'no such skill request')
+    if (!b.acknowledge) fail(400, 'approval needs acknowledge: true')
+    if (b.skill_sha256 !== r.skill_sha256) fail(409, 'the skill changed since you read it')
+    return Object.assign(r, { status: 'installed', installed_slug: r.skill_name, granted: false,
+      error: 'a requirement is not met', skill_md: null })
+  }],
+  ['POST', /^\/api\/skill-requests\/(\d+)\/reject$/, ([id]) =>
+    Object.assign(S.skillRequests.find((x) => x.id === Number(id)) || fail(404, 'no such skill request'),
+      { status: 'rejected' })],
   ['POST', /^\/api\/packages\/(\d+)\/remove$/, ([id]) => {
     const p = pkg(id)
     if (!['approved', 'built', 'failed'].includes(p.status)) fail(409, `cannot remove a ${p.status} request`)
