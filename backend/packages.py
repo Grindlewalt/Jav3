@@ -279,12 +279,20 @@ async def get(db, pkg_id: int) -> dict | None:
         return _row(await cur.fetchone())
 
 
-async def list_rows(db, status: str | None = None) -> list[dict]:
-    q, args = "SELECT * FROM package_catalogue", ()
+async def list_rows(db, status: str | None = None, *,
+                    include_environment: bool = False) -> list[dict]:
+    """Catalogue rows, newest first. Rows filed as part of an environment
+    request are left out unless asked: they show on its card, not as their own."""
+    q, args, where = "SELECT * FROM package_catalogue", (), []
     if status:
         if status not in STATUSES:
             raise PackageError(f"unknown status {status!r}")
-        q, args = q + " WHERE status = ?", (status,)
+        where.append("status = ?")
+        args = (status,)
+    if not include_environment:
+        where.append("environment_id IS NULL")
+    if where:
+        q += " WHERE " + " AND ".join(where)
     async with db.execute(q + " ORDER BY id DESC LIMIT 500", args) as cur:
         rows = [dict(r) for r in await cur.fetchall()]
     cache: dict[str, dict] = {}
@@ -302,8 +310,12 @@ async def file_request(db, *, manager: str, package: str, version: str | None,
                        install_command: str | None, reason: str,
                        project: str | None, conversation_id: int | None,
                        source: str = "agent",
-                       target_variant: str | None = None) -> dict:
-    """Validate and store a request (status pending). Raises PackageError."""
+                       target_variant: str | None = None,
+                       environment_id: int | None = None) -> dict:
+    """Validate and store a request (status pending). Raises PackageError.
+    With `environment_id` the row belongs to an environment request: the given
+    target_variant is kept and no package_requested event is raised (the
+    caller raises one environment_requested for the lot)."""
     fields = validate_request(manager, package, version, install_command, reason)
     if source not in ("agent", "operator"):
         raise PackageError("bad source")
@@ -312,7 +324,8 @@ async def file_request(db, *, manager: str, package: str, version: str | None,
         if allowed is False:
             raise PackageError("this project's security profile does not allow "
                                "package requests")
-        target_variant = await project_variant(db, project)
+        if environment_id is None or not target_variant:
+            target_variant = await project_variant(db, project)
     else:
         from .vm import images
         target_variant = images.check_variant_name(target_variant or "main")
@@ -329,12 +342,14 @@ async def file_request(db, *, manager: str, package: str, version: str | None,
     cur = await db.execute(
         "INSERT INTO package_catalogue(project_slug, source, manager, package, "
         "version_req, requested_command, canonical_command, reason, conversation_id, "
-        "status, target_variant) VALUES (?,?,?,?,?,?,?,?,?, 'pending', ?)",
+        "status, target_variant, environment_id) VALUES (?,?,?,?,?,?,?,?,?, 'pending', ?, ?)",
         (project, source, fields["manager"], fields["package"], fields["version_req"],
          fields["requested_command"], fields["canonical_command"], fields["reason"],
-         conversation_id, target_variant))
+         conversation_id, target_variant, environment_id))
     await db.commit()
     row = await get(db, cur.lastrowid)
+    if environment_id is not None:
+        return row
     used = await variant_used_by(db, target_variant)
     await security.raise_event(
         db, kind="package_requested", severity="info", project=project,
@@ -375,13 +390,26 @@ async def set_resolution(db, pkg_id: int, *, resolved_version: str | None,
     await db.commit()
 
 
+async def _check_not_in_environment(db, row: dict, via_environment: bool) -> None:
+    env_id = row.get("environment_id")
+    if env_id is None or via_environment:
+        return
+    async with db.execute("SELECT status FROM environment_requests WHERE id = ?",
+                          (env_id,)) as cur:
+        e = await cur.fetchone()
+    if e is not None and e[0] == "pending":
+        raise PackageError(f"part of environment request #{env_id}: decide it there")
+
+
 async def approve(db, pkg_id: int, *, target_variant: str | None,
-                  decided_by: str = "unmarked", by_operator: bool = False) -> dict:
+                  decided_by: str = "unmarked", by_operator: bool = False,
+                  via_environment: bool = False) -> dict:
     """pending -> approved. Needs a successful dry-run. Does NOT build; the
     caller (packages_api) asks images for a new variant version."""
     row = await get(db, pkg_id)
     if row is None:
         raise LookupError("no such package request")
+    await _check_not_in_environment(db, row, via_environment)
     check_transition(row["status"], "approved")
     if not row.get("resolved_version"):
         raise PackageError("not resolved yet: the dry-run must pin a version and "
@@ -409,15 +437,19 @@ async def approve(db, pkg_id: int, *, target_variant: str | None,
 
 
 async def reject(db, pkg_id: int, *, reason: str = "",
-                 decided_by: str = "unmarked", by_operator: bool = False) -> dict:
+                 decided_by: str = "unmarked", by_operator: bool = False,
+                 via_environment: bool = False, quiet: bool = False) -> dict:
     row = await get(db, pkg_id)
     if row is None:
         raise LookupError("no such package request")
+    await _check_not_in_environment(db, row, via_environment)
     check_transition(row["status"], "rejected")
     await db.execute(
         "UPDATE package_catalogue SET status = 'rejected', decided_by = ?, "
         "decided_at = datetime('now') WHERE id = ?", (decided_by, pkg_id))
     await db.commit()
+    if quiet:
+        return await get(db, pkg_id)
     await security.raise_event(
         db, kind="package_rejected", severity="warn", project=row["project_slug"],
         summary=f"rejected {row['manager']} package {row['package']}",

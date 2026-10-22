@@ -381,9 +381,11 @@ async def descendants(db, name: str) -> set[str]:
 
 
 async def create_variant(db, name: str, from_variant: str | None,
-                         packages_in: list[dict]) -> dict:
+                         packages_in: list[dict], *,
+                         min_mem_mb: int | None = None) -> dict:
     """An operator variant (POST /api/vm/images). Its own recipe is stored on
-    its row; it is not built until the operator asks."""
+    its row; it is not built until the operator asks. `min_mem_mb` is the
+    box-memory floor the variant asks for (environment requests)."""
     name = check_variant_name(name)
     if name in builtin_recipes():
         raise RecipeError(f"`{name}` is a builtin variant")
@@ -397,7 +399,10 @@ async def create_variant(db, name: str, from_variant: str | None,
         raise RecipeError("packages must be a list of at most 100")
     pkgs = _dedupe([package_entry(str(p.get("manager")), p.get("package"),
                                   p.get("version")) for p in packages_in])
-    own = {"name": name, "from": from_variant, "min_mem_mb": None, "packages": pkgs}
+    if min_mem_mb is not None and not (128 <= int(min_mem_mb) <= 16384):
+        raise RecipeError("min_mem_mb takes one integer (128..16384)")
+    own = {"name": name, "from": from_variant,
+           "min_mem_mb": int(min_mem_mb) if min_mem_mb else None, "packages": pkgs}
     await db.execute("INSERT INTO image_variants(name, from_variant, builtin, recipe) "
                      "VALUES (?,?,0,?)", (name, from_variant, json.dumps({"own": own})))
     await db.commit()
