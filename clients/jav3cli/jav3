@@ -5878,6 +5878,12 @@ def build_tui(base: str, token: str, **kw):
                 f"{_esc(r.get('project_slug') or 'operator')}"
                 + ("" if r.get("resolved") else " · not resolved yet") + "[/]")
 
+    def _mem_floor(r) -> str:
+        """An environment request's own floor, or the one its parent image gives."""
+        if r.get("min_mem_mb"):
+            return f"{_esc(str(r['min_mem_mb']))} MB"
+        return f"as `{_esc(r.get('from_variant') or 'main')}`"
+
     def _row_skillreq(e) -> str:
         r, ts = e["raw"], row_ts(e.get("ts"))
         st = r.get("status") or "pending"
@@ -5885,7 +5891,8 @@ def build_tui(base: str, token: str, **kw):
         return (f"[$warning b]SKILL [/] [$text-muted]{ts}[/] "
                 f"[b]{_esc(_short(r.get('skill_name') or r.get('source') or '?', 60))}[/]{stc} "
                 f"[$text-muted]for {_esc(r.get('project_slug') or 'operator')} · "
-                f"{_esc(_short(r.get('source') or '', 50))}[/]")
+                + (_esc(_short(r.get('source') or '', 50)) if r.get("skill_name")
+                   else "not fetched yet") + "[/]")
 
     def _slug_says(slug) -> str:
         if not slug or slug == "__general__":
@@ -6938,7 +6945,7 @@ def build_tui(base: str, token: str, **kw):
                     + (_esc(str(v)) if v else
                        f"[$warning]not resolved ({_esc(p.get('version_req') or 'any')})[/]"))
             lines += [
-                f"memory floor: {_esc(str(r.get('min_mem_mb') or '?'))} MB",
+                f"memory floor: {_mem_floor(r)}",
                 f"reason: {_esc(r.get('reason') or '')}",
                 f"[b]{_esc(r.get('plan') or '')}[/]",
                 "[$text-muted]other projects: unchanged[/]"]
@@ -8122,7 +8129,7 @@ def build_tui(base: str, token: str, **kw):
             pk = ", ".join(f"{p.get('manager')} {p.get('package')} {p.get('resolved_version')}"
                            for p in _jlist(r.get("packages")) if isinstance(p, dict))
             detail = (f"Builds a new image `{name}` from `{r.get('from_variant') or '?'}` with "
-                      f"{pk or 'no packages'} (memory floor {r.get('min_mem_mb') or '?'} MB). "
+                      f"{pk or 'no packages'} (memory floor {_mem_floor(r)}). "
                       f"{r.get('plan') or ''} Other projects are unchanged.")
             if await self._confirm(f"Approve environment {name} and build it?", detail):
                 await self._send("POST", f"/api/environments/{eid}/approve",
