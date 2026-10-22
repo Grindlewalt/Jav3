@@ -23,11 +23,13 @@ import Tabs from '../components/Tabs.jsx'
 import Button from '../components/Button.jsx'
 import { SERVICES_POLL_MS, followServices, listServices } from '../boxes/api/services.js'
 import { listPackages } from '../boxes/api/packages.js'
+import { listEnvironments } from '../boxes/api/environments.js'
+import { listSkillRequests } from '../boxes/api/skillRequests.js'
 import { listProfiles } from '../boxes/api/profiles.js'
 import { listImages } from '../boxes/api/images.js'
 import { needsProject } from '../boxes/logic.js'
 import {
-  PackageApprove, PackageSummary, ServiceRequest, usePackageReject,
+  EnvironmentCard, PackageApprove, PackageSummary, ServiceRequest, SkillRequestCard, usePackageReject,
 } from '../boxes/RequestCards.jsx'
 
 // One cross-project queue of everything awaiting the operator: git commit
@@ -61,6 +63,8 @@ export function ReviewQueue({ slug }) {
   const [svcReqs, setSvcReqs] = useState([])
   const [lan, setLan] = useState(null)       // {ip, configured, error}
   const [pkgReqs, setPkgReqs] = useState([])
+  const [envReqs, setEnvReqs] = useState([])
+  const [skillReqs, setSkillReqs] = useState([])
   const [profiles, setProfiles] = useState([])
   const [variants, setVariants] = useState(null)
   const [approvingPkg, setApprovingPkg] = useState(null)
@@ -118,6 +122,18 @@ export function ReviewQueue({ slug }) {
   function loadBoxReqs() {
     loadSvcReqs()
     loadPkgReqs()
+    loadAgentReqs()
+  }
+  // environment and skill-install requests (older servers: the sections never show)
+  function loadAgentReqs() {
+    listEnvironments('pending', slug || undefined).then((rows) =>
+      setEnvReqs(slug ? rows.filter((r) => r.project_slug === slug) : rows))
+      .catch(() => setEnvReqs([]))
+    Promise.all([listSkillRequests('pending', slug || undefined), listSkillRequests('fetched', slug || undefined)])
+      .then(([a, b]) => {
+        const rows = [...a, ...b].sort((x, y) => x.id - y.id)
+        setSkillReqs(slug ? rows.filter((r) => r.project_slug === slug) : rows)
+      }).catch(() => setSkillReqs([]))
   }
   function loadPkgReqs() {
     listPackages('pending').then((rows) =>
@@ -141,7 +157,7 @@ export function ReviewQueue({ slug }) {
     // service requests ride topic `services` (below) with a slow fallback
     // poll; everything else keeps the 12 s refresh
     const refresh = () => {
-      slugs.forEach(loadProject); loadEgress(); loadAlerts(); loadPkgReqs(); loadAsks()
+      slugs.forEach(loadProject); loadEgress(); loadAlerts(); loadPkgReqs(); loadAgentReqs(); loadAsks()
     }
     refresh()
     loadSvcReqs()
@@ -240,7 +256,7 @@ export function ReviewQueue({ slug }) {
   const projLabel = (s) => names[s] || s
   const gitTotal = (slugs || []).reduce((n, s) => n + (gitReqs[s]?.length || 0), 0)
   const total = totals.need + totals.reports + gitTotal + pending.length + svcReqs.length + pkgReqs.length
-    + asks.length
+    + envReqs.length + skillReqs.length + asks.length
 
   if (!slugs) return <div className="dim center-pad">…</div>
 
@@ -334,6 +350,26 @@ export function ReviewQueue({ slug }) {
           <PackageApprove p={approvingPkg} variants={variants}
                           onClose={() => setApprovingPkg(null)}
                           onDone={() => { setApprovingPkg(null); loadBoxReqs() }} />
+        </section>
+      )}
+
+      {envReqs.length > 0 && (
+        <section className="sbx-sec">
+          <div className="sbx-sec-head">
+            <h3>Environment requests</h3>
+            <span className="sec-count">{envReqs.length}</span>
+          </div>
+          {envReqs.map((e) => <EnvironmentCard key={e.id} e={e} onDone={loadBoxReqs} />)}
+        </section>
+      )}
+
+      {skillReqs.length > 0 && (
+        <section className="sbx-sec">
+          <div className="sbx-sec-head">
+            <h3>Skill requests</h3>
+            <span className="sec-count">{skillReqs.length}</span>
+          </div>
+          {skillReqs.map((r) => <SkillRequestCard key={r.id} r={r} onDone={loadBoxReqs} />)}
         </section>
       )}
 

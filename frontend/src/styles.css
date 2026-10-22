@@ -4577,3 +4577,7 @@ a:has(> .nav-dot) { position: relative; }
 .desk-bar.you button { background: var(--accent-ink); color: var(--text); border-color: var(--accent-ink); }
 .desk-status.agent { color: var(--amber); }
 .desk-status.you { color: var(--accent); font-weight: 600; }
+
+/* agent requests: the fetched SKILL.md, read in full before install */
+.bx-skill-md { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  margin: var(--sp-3) 0; padding: var(--sp-3); border: 1px solid var(--border); border-radius: 6px; }
