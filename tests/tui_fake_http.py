@@ -655,6 +655,10 @@ class SeededServer(FakeServer):
                  "project_slug": "website", "status": "approved", "state": "running",
                  "placement": "per_service", "box_id": "svc-metrics", "created_at": utc(-86400),
                  "ports": [{"port": 9100, "protocol": "tcp", "expose": "none"}]}]}))
+        if path == "/api/environments" and method == "GET":
+            return logged(J({"environments": []}))
+        if path == "/api/skill-requests" and method == "GET":
+            return logged(J({"requests": []}))
         if path == "/api/packages" and method == "GET":
             pk = packages()
             if q.get("status"):
