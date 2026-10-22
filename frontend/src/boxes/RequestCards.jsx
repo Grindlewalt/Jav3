@@ -327,7 +327,8 @@ export function EnvironmentCard({ e, onDone }) {
               </div>))}</dd>
           </Fragment>
         ))}
-        <dt>memory floor</dt><dd>{e.min_mem_mb} MB</dd>
+        <dt>memory floor</dt>
+        <dd>{e.min_mem_mb ? `${e.min_mem_mb} MB` : <span className="dim">as {e.from_variant || 'main'}</span>}</dd>
         {e.reason && <><dt>why</dt><dd>{e.reason}</dd></>}
         {e.conversation_id && <><dt>conversation</dt><dd className="mono">{e.conversation_id}</dd></>}
         {pending && e.plan && <><dt>on approve</dt><dd>{e.plan}</dd></>}
