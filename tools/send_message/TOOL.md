@@ -9,8 +9,10 @@ parameters:
   type: object
   properties:
     to:
-      type: string
-      description: An agent slug (e.g. "builder"), a conversation id (e.g. "42"), or a plan item (e.g. "item:i3"). Pass "?" to list the turns running right now (a message sent with "?" is not sent but kept, so call again with the address and an empty message).
+      type: array
+      items:
+        type: string
+      description: Who gets it. One address as a plain string, or a list to send the same message to several. An address is an agent slug (e.g. "builder"), a conversation id (e.g. "42") or a plan item (e.g. "item:i3"). "items" stands for every item of your plan that is running or has not started. Pass "?" to list the turns running right now (a message sent with "?" is not sent but kept, so call again with the address and an empty message).
     message:
       type: string
       description: What to say. Self-contained — the recipient has NOT seen your conversation.
@@ -25,6 +27,10 @@ conversation id reaches one exact thread, and every message you receive carries
 its sender's id, so that is how you reply; item:<id> reaches the agent working
 that checklist item of the current plan (if it has not started, or is blocked or
 failed, the message is kept as a note in its brief for its next run). Send to "?" to see who is live.
+
+Several at once: to=["item:i1", "builder"], or to="items" for the whole plan —
+one call, one message stored per recipient (not one call per item). The result
+lists who got it and who could not be reached.
 
 This does not block and there is no way to wait for a reply inside this turn.
 If the recipient is idle the message waits in its inbox and is delivered when

@@ -2,6 +2,7 @@
 guest; here we simulate guest conditions (in_guest flag + task-local slug) and
 verify execution, capture, caps, and the host-side guards."""
 import asyncio
+import os
 import time
 
 from backend.agent.tools import registry, toolctx
@@ -226,3 +227,110 @@ async def test_network_hint_does_not_need_a_failing_exit_code(tmp_env, monkeypat
     # and a failing run keeps the wider set
     out = await registry.dispatch("run_code", {"command": "echo 'connection refused' >&2; exit 1"})
     assert "network blocked" in out
+
+
+# --- benchmark game 2026-10-01: SIGXFSZ on package installs, lost output on a kill ---
+
+def test_file_size_limit_fits_a_package_install():
+    """64 MiB killed `apt-get install chromium` (its .deb is bigger): the per-file
+    limit must clear any package."""
+    from tools.run_code import handler
+    assert handler.FSIZE_LIMIT >= 1024 * 1024 * 1024
+
+
+def test_limits_sets_the_file_size_limit_to_the_constant(monkeypatch):
+    import resource
+    from backend import memguard
+    from tools.run_code import handler
+    seen = {}
+    monkeypatch.setattr(resource, "setrlimit", lambda lim, v: seen.__setitem__(lim, v))
+    monkeypatch.setattr(memguard, "confine", lambda: None)
+    monkeypatch.setattr(os, "setsid", lambda: None)
+    handler._limits(10)
+    assert seen[resource.RLIMIT_FSIZE] == (handler.FSIZE_LIMIT, handler.FSIZE_LIMIT)
+
+
+async def test_run_that_hits_the_file_size_limit_names_it(tmp_env, monkeypatch, tmp_path):
+    """A write past RLIMIT_FSIZE is SIGXFSZ: the result says "file-size limit (N MB)"
+    instead of leaving the bare signal to be guessed at."""
+    from tools.run_code import handler
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    monkeypatch.setattr(handler, "FSIZE_LIMIT", 1024 * 1024)       # 1 MB for the test
+    _guest(monkeypatch, tmp_path)
+    big = str(tmp_path / "rc-big.bin")
+    out = await handler.run(code=f"open({big!r}, 'wb').write(b'x' * (4 * 1024 * 1024))")
+    assert "file-size limit (1 MB)" in out, out
+
+
+async def test_normal_run_has_no_file_size_or_timeout_note(tmp_env, monkeypatch, tmp_path):
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    _guest(monkeypatch, tmp_path)
+    out = await registry.dispatch("run_code", {"command": "echo fine; echo 'file too large' >&2"})
+    assert "file-size limit" not in out and "timed out" not in out
+
+
+async def test_timeout_kill_says_the_limit_and_that_piped_output_is_lost(
+        tmp_env, monkeypatch, tmp_path):
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    _guest(monkeypatch, tmp_path)
+    out = await asyncio.wait_for(registry.dispatch("run_code", {
+        "command": "(echo before; sleep 30) | tail -25", "timeout_seconds": 1}), 15)
+    assert "KILLED after 1s timeout" in out
+    assert "this call's limit is 1s" in out
+    assert "piped into tail/head/grep is lost" in out and "write long output to a file" in out
+    assert "your `timeout" not in out          # the command asked for no timeout of its own
+
+
+async def test_inner_timeout_longer_than_the_call_limit_is_named(
+        tmp_env, monkeypatch, tmp_path):
+    """The benchmark-game call wrapped `timeout 280` but passed no timeout_seconds
+    and died at the 60 s default (here: a 1 s call limit, to keep the test short)."""
+    await init_db()
+    monkeypatch.setattr(settings, "projects_dir", tmp_path)
+    _guest(monkeypatch, tmp_path)
+    out = await asyncio.wait_for(registry.dispatch("run_code", {
+        # a function stands in for coreutils timeout, which a Mac does not have
+        "command": 'timeout() { shift; "$@"; }; timeout 280 sleep 30 | tail -25',
+        "timeout_seconds": 1}), 15)
+    assert "KILLED after 1s timeout" in out
+    assert "your `timeout 280` is longer than this call's timeout_seconds (1)" in out
+    assert "pass timeout_seconds: 290" in out
+
+
+def test_inner_timeout_parse():
+    from tools.run_code.handler import _inner_timeout
+    assert _inner_timeout("timeout 280 make") == 280
+    assert _inner_timeout("timeout -s KILL 5m make") == 300
+    assert _inner_timeout("timeout -k 10 90 make; timeout 20 x") == 90
+    assert _inner_timeout("timeout --foreground 45 cmd") == 45
+    assert _inner_timeout("curl --timeout 5 url") is None       # a flag, not the command
+    assert _inner_timeout("echo timeout_seconds 99") is None
+    assert _inner_timeout("make") is None
+
+
+async def test_spec_says_which_route_installs_packages(tmp_env):
+    """The benchmark-game agent kept running apt-get in run_code while package_request
+    was refused by the profile: the spec names both routes, and the call's own limit."""
+    await init_db()
+    registry.compile_registry()
+    spec = next(s["function"] for s in registry.openai_tool_specs()
+                if s["function"]["name"] == "run_code")
+    desc = spec["description"]
+    assert "deb.debian.org" in desc and "package_request" in desc and "per-run" in desc
+    assert "…" not in desc                       # the body fits the spec cap uncut
+    limit = spec["parameters"]["properties"]["timeout_seconds"]["description"]
+    assert "does not raise it" in limit and "tail/head/grep" in limit
+
+
+async def test_edit_file_spec_describes_every_argument(tmp_env):
+    await init_db()
+    registry.compile_registry()
+    spec = next(s["function"] for s in registry.openai_tool_specs()
+                if s["function"]["name"] == "edit_file")
+    props = spec["parameters"]["properties"]
+    assert all(props[k].get("description") for k in ("path", "find", "replace", "all"))
+    assert "replace" in props["replace"]["description"] and "empty string" in props["replace"]["description"]
+    assert "run_code" in spec["description"]     # a cat/sed there counts as the read

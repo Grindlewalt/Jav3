@@ -39,6 +39,7 @@ class ItemIn(BaseModel):
     title: str | None = None
     brief: str | None = None
     depends_on: list[str] | None = None
+    soft_deps: list[str] | None = None     # the subset of depends_on that only has to settle
     assignee: str | None = None
     status: str | None = None
     position: int | None = None

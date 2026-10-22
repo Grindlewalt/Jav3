@@ -9,7 +9,9 @@ is what M3+ tools plug into. Yields SSE-ready events:
 import asyncio
 import base64
 import json
+import posixpath
 import re
+import shlex
 from collections import OrderedDict
 from typing import AsyncIterator
 
@@ -42,9 +44,10 @@ _TRUST_NOTE = ("\n\n[system note: this is a delegated result — trust it and "
 # dozens of one-page web_reads where one research call was the right move).
 WEB_HANDROLLED = frozenset({"web_search", "web_read", "read_and_summarize"})
 
-# conversation_id -> project paths the model has read (read_file) or written
-# (write_file) there — the read-before-edit guard. In-memory and bounded; a
-# restart just costs one extra read per file.
+# conversation_id -> project paths the model has read (read_file, or a plain
+# cat/sed -n/head/tail/nl in run_code) or written (write_file) there — the
+# read-before-edit guard. In-memory and bounded; a restart just costs one extra
+# read per file.
 _files_seen: OrderedDict[int, set[str]] = OrderedDict()
 _FILES_SEEN_MAX_CONVOS = 256
 
@@ -52,6 +55,7 @@ _FILES_SEEN_MAX_CONVOS = 256
 def _note_seen(conversation_id: int, path: str) -> None:
     paths = _files_seen.setdefault(conversation_id, set())
     paths.add(path)
+    paths.add(posixpath.normpath(path))     # ./a.py, a//b.py and a.py are one file
     _files_seen.move_to_end(conversation_id)
     while len(_files_seen) > _FILES_SEEN_MAX_CONVOS:
         _files_seen.popitem(last=False)
@@ -107,20 +111,109 @@ async def _drain_inbox() -> str:
     return "" if note.startswith("error:") else note
 
 
-def _guard_blind_edit(conversation_id: int, name: str, args: dict) -> str | None:
+# What counts as reading a file in run_code: the command visibly prints it.
+_READERS = frozenset({"cat", "head", "tail", "less", "more", "nl", "sed"})
+_SHOWS_INPUT = frozenset({"cat", "head", "tail", "less", "more", "nl", "sed", "tee"})
+_SEPARATORS = frozenset(";&|()")
+_REDIRECT = frozenset("<>&")
+_MIN_FIND_SEEN = 30      # a `find` this long that a tool already returned is a read
+
+
+def _rel_project_path(arg: str) -> str:
+    """A path argument as the project-relative path edit_file would be given."""
+    root = str(settings.projects_dir).rstrip("/") + "/"
+    if arg.startswith(root):
+        arg = arg[len(root):].partition("/")[2]        # drop the slug directory
+    return posixpath.normpath(arg) if arg else arg
+
+
+def _paths_read_by(command: str) -> set[str]:
+    """Project paths a shell command visibly reads, by a conservative parse: a
+    segment of `cat`, `head`, `tail`, `less`, `more`, `nl` or `sed -n` that names
+    the file and whose output is not redirected into a file or piped into
+    something that hides it (`| wc -l`). Benchmark game 2026-10-01: the agent had
+    `cat`/`sed`-read a file in run_code and edit_file refused it as unread. Globs,
+    variables and anything the parse cannot follow count as no read."""
+    found: set[str] = set()
+    for line in (command or "").splitlines():
+        try:
+            lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+            lex.whitespace_split = True
+            toks = list(lex)
+        except ValueError:                  # an unclosed quote, or a heredoc body
+            continue
+        segs: list[tuple[list[str], str]] = []
+        cur: list[str] = []
+        for t in toks:
+            if t and set(t) <= _SEPARATORS:
+                segs.append((cur, t))
+                cur = []
+            else:
+                cur.append(t)
+        segs.append((cur, ""))
+        moved = False                       # after a `cd`, a relative path is another file
+        for k, (seg, sep) in enumerate(segs):
+            if seg and seg[0] in ("cd", "pushd", "popd"):
+                moved = True
+            if moved or not seg or posixpath.basename(seg[0]) not in _READERS:
+                continue
+            cmd, args = posixpath.basename(seg[0]), seg[1:]
+            if cmd == "sed":
+                flags = [a for a in args if a.startswith("-") and not a.startswith("--")]
+                quiet = any("n" in a for a in flags) or "--quiet" in args or "--silent" in args
+                in_place = any("i" in a for a in flags) or any(
+                    a.startswith("--in-place") for a in args)
+                if not quiet or in_place:
+                    continue
+            if sep in ("|", "|&"):          # piped on: only into something that shows it
+                nxt = segs[k + 1][0] if k + 1 < len(segs) else []
+                if not nxt or posixpath.basename(nxt[0]) not in _SHOWS_INPUT:
+                    continue
+            paths: list[str] = []
+            hidden = False
+            i = 0
+            while i < len(args):
+                a = args[i]
+                if a and set(a) <= _REDIRECT:
+                    # a redirect: `> f` hides the output, `2> f`, `2>&1` and `<<EOF`
+                    # do not, and a target is never a path being read (`< f` is)
+                    if ">" in a and a != ">&" and (i == 0 or args[i - 1] != "2"):
+                        hidden = True
+                    i += 1 if a == "<" else 2
+                    continue
+                if not a.startswith("-"):
+                    paths.append(a)
+                i += 1
+            if not hidden:
+                found.update(_rel_project_path(a) for a in paths)
+    return found
+
+
+def _guard_blind_edit(conversation_id: int, name: str, args: dict,
+                      messages: list[dict] | None = None) -> str | None:
     """An instructional error instead of dispatching an edit of a file the
     model never read here — prevents whole-class bad edits (stale find text,
-    wrong file). write_file is exempt: a full overwrite needs no prior read."""
+    wrong file). write_file is exempt: a full overwrite needs no prior read.
+    A read is read_file, a run_code that cat/sed -n/head/tail'd the exact path
+    (see _paths_read_by), or a `find` text a tool already returned this turn
+    (edit_file itself still demands it match the file exactly)."""
     if name != "edit_file":
         return None
     path = args.get("path")
     if not isinstance(path, str) or not path:
         return None
-    if path in _files_seen.get(conversation_id, set()):
+    seen = _files_seen.get(conversation_id, set())
+    if path in seen or posixpath.normpath(path) in seen:
+        return None
+    find = args.get("find")
+    if (messages and isinstance(find, str) and len(find.strip()) >= _MIN_FIND_SEEN
+            and any(m.get("role") == "tool" and isinstance(m.get("content"), str)
+                    and find in m["content"] for m in messages)):
         return None
     return (f"error: you haven't read '{path}' in this conversation. Call "
             "read_file on it first so 'find' matches the current text, then "
-            "retry the edit.")
+            "retry the edit. (A cat, sed -n, head or tail of that exact path in "
+            "run_code counts as a read too.)")
 
 
 _LEADING_SLEEP = re.compile(
@@ -353,6 +446,36 @@ def _steer(messages: list[dict], i: int, n_iter: int, err_streak: int,
     return force
 
 
+# The one "rounds left" note: a run with a round cap is told once, when it has used
+# this share of the cap, that it must write down where it is and report. Benchmark
+# game 2026-10-01: three attempts ran into the cap with the work done and never
+# reported (16M input tokens wasted); the only earlier note, at two thirds, was
+# generic and every run read it as "keep going".
+ROUNDS_LOW_AT = 0.8
+
+
+def _rounds_low_round(n_iter: int) -> int | None:
+    """How many rounds must have been used before the rounds-left note rides the
+    next tool result: ROUNDS_LOW_AT of the cap, but never the round of the
+    two-thirds note (they would stack), and never the last round (it has no tools,
+    so no tool result carries a note). None: a cap too small to fit both."""
+    at = max(int(n_iter * ROUNDS_LOW_AT), (n_iter * 2) // 3 + 1)
+    return at if at <= n_iter - 1 else None
+
+
+def _rounds_low_note(left: int, plan_item: bool) -> str:
+    """The note itself. A plan item (it holds plan_report) writes its progress to
+    reports/notes/<item id>.md, the file the retry brief reads (plan.py) when the
+    attempt does not finish; any other run is told to wrap up."""
+    if plan_item:
+        return (f"\n\n[system note: {left} rounds left: write your progress and next "
+                "steps to reports/notes/<item id>.md now (<item id> is your plan "
+                "item's id) and call plan_report before the cap, status failed with "
+                "the next step if the item is unfinished.]")
+    return (f"\n\n[system note: {left} rounds left: finish and report what you "
+            "have, and say plainly what you could not determine.]")
+
+
 def new_stats() -> dict:
     """What one turn did that the operator cannot otherwise see (RUNS-08): the
     loop's own recoveries and cut-offs, counted per turn."""
@@ -431,6 +554,8 @@ async def _run_turn(
     carry: list[str] = []        # the cut-off text of the answer being continued
     truncated = False            # the answer is still cut off after the continues
     edited: dict[str, int] = {}  # project path -> round of its last edit/write
+    low_at = _rounds_low_round(n_iter)
+    rounds_nudged = False        # the one rounds-left note has ridden a result
     evicted_spans: list[tuple] = []   # (path, first line, last line) of dropped reads
     for i in range(n_iter):
         # mail check. i == 0 was drained into `history` above; from here a
@@ -609,7 +734,7 @@ async def _run_turn(
             return result + note if note and isinstance(result, str) else result
 
         async def _dispatch_one(name: str, args: dict, call_id=None) -> str:
-            blocked = (_guard_blind_edit(conversation_id, name, args)
+            blocked = (_guard_blind_edit(conversation_id, name, args, messages)
                        or _guard_orchestrator_sleep(name, args, offered))
             if blocked is not None:
                 return blocked
@@ -642,6 +767,12 @@ async def _run_turn(
             if (name in ("read_file", "write_file") and isinstance(path, str)
                     and not result.startswith("error:")):
                 _note_seen(conversation_id, path)
+            elif (name == "run_code" and isinstance(args.get("command"), str)
+                    and result.startswith("exit 0")):
+                # `cat src/a.py`, `sed -n 1,80p src/a.py`: the text came back,
+                # which is all the guard wants from a read
+                for seen_path in _paths_read_by(args["command"]):
+                    _note_seen(conversation_id, seen_path)
             return result
 
         # a round whose calls are ALL flagged read-only runs them concurrently
@@ -727,6 +858,10 @@ async def _run_turn(
         # appended to the last tool result so they sit adjacent to the failure
         if _steer(messages, i, n_iter, err_streak, can_delegate, has_todo):
             force_conclude = True
+        if (not rounds_nudged and not force_conclude
+                and low_at is not None and i + 1 >= low_at):
+            rounds_nudged = True
+            _note(messages, _rounds_low_note(n_iter - (i + 1), "plan_report" in offered))
         if (has_research and not web_nudged
                 and web_calls >= settings.web_handroll_nudge > 0):
             web_nudged = True

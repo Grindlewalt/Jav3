@@ -23,6 +23,9 @@ parameters:
     model:
       type: string
       description: provider/model to run this agent on. ONLY when the operator explicitly said which model to use for this task — otherwise omit it and the default model is used. Never choose one yourself.
+    max_rounds:
+      type: integer
+      description: The most tool rounds the agent gets. Default 30, maximum 60. A build or a multi-file investigation needs 40-60; a lookup needs 10. When it runs out it stops mid-job and you get its partial work.
   required: [task, prompt]
 ---
 Brief it like a smart colleague who just walked into the room — it has NOT
@@ -34,3 +37,7 @@ builds anything it records a memory note (untrusted until the operator
 promotes it, like all agent notes) and its final report returns as this
 tool's result — relay the useful parts to the operator. Temp agents nest like
 spawn_agent: two levels deep on one shared token budget.
+
+The agent gets 30 tool rounds by default and 60 at most (max_rounds). When it
+runs out you are told so with its partial work, not a finished report: size the
+job to the rounds, split a big one across agents, or raise max_rounds up front.

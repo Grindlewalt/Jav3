@@ -21,4 +21,7 @@ parameters:
 on a plan they launch; chat.py grants it to orchestrator conversations only.
 It returns early when a message (the operator's or an agent's) is waiting for
 you, so you read it on the next round instead of after the whole wait. When
-the run has finished the result carries the head's closing rollup.
+the run has finished the result carries the head's closing rollup. For items
+that have not run yet it also lists plan warnings: an item with many hard
+dependencies, or a verify/integrate/ship item with several, and an item whose
+words need a capability the host lacks. plan_fix with soft_deps fixes the first.

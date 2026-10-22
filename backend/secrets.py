@@ -53,10 +53,26 @@ def load() -> dict[str, str]:
     return out
 
 
+def norm_host(h: str) -> str:
+    """A bound host as the operator typed it, reduced to the hostname a request
+    is matched on: 'https://api.x.com/v1', 'api.x.com:443' and 'API.x.com' all
+    mean api.x.com. 2026-10-02: TBA_KEY was saved as
+    'https://www.thebluealliance.com/', which no request host can equal, so
+    web_read refused to send it to www.thebluealliance.com itself."""
+    h = str(h).strip().lower()
+    if not h:
+        return ""
+    try:
+        return (urlsplit(h if "://" in h else "//" + h).hostname or "").strip(".")
+    except ValueError:
+        return ""
+
+
 def hosts_for(name: str) -> list[str]:
     entry = _load_raw().get(name)
     if isinstance(entry, dict):
-        return [h.lower() for h in entry.get("hosts") or []]
+        # normalised on read too, so a binding saved before norm_host existed works
+        return [n for n in (norm_host(h) for h in entry.get("hosts") or []) if n]
     return []
 
 
@@ -189,7 +205,7 @@ async def set_secret(name: str, body: SetSecret):
             raise HTTPException(status_code=400, detail="value is empty")
         value = load()[name]     # hosts-only edit keeps the stored value
     hosts = body.hosts if body.hosts is not None else hosts_for(name)
-    hosts = [h.strip().lower() for h in hosts if h.strip()]
+    hosts = list(dict.fromkeys(n for n in (norm_host(h) for h in hosts) if n))
     raw[name] = {"value": value, "hosts": hosts} if hosts else value
     save(raw)
     return {"ok": True, "name": name, "hosts": hosts}

@@ -260,6 +260,11 @@ class Settings(BaseSettings):
     # tokens re-sending the pile each iteration.
     max_react_iterations: int = 60
     subagent_max_iterations: int = 12
+    # a spawn_temp_agent child is a one-off worker given a whole job (a build, an
+    # investigation), not a lookup: at 12 rounds three of three big delegations
+    # died unfinished (2026-09-30 benchmark run). The caller may pass max_rounds,
+    # up to plan_item_max_iterations.
+    temp_agent_default_rounds: int = 30
     # a plan item builds a whole slice of a project; 12 rounds went entirely on
     # recon in the 2026-09-27 Voxelcraft run (every item "ran out of budget")
     plan_item_max_iterations: int = 60
@@ -538,6 +543,10 @@ class Settings(BaseSettings):
     # research subagent reads a few pages and re-sends them each loop, so a
     # smaller slice cuts token throughput hard while keeping the useful content.
     web_max_chars: int = 6_000
+    # PDFs (backend/pdftext.py): a rule book or manual is often 2-15 MB and is
+    # read a slice at a time (#page=N-M / #search=word), each slice up to this
+    web_max_pdf_bytes: int = 30_000_000
+    web_pdf_max_chars: int = 12_000
     # short-TTL cache of fetched page text (and summaries keyed by focus), so a
     # re-read within a task skips the download AND the summarize model call.
     web_cache_ttl_seconds: int = 900

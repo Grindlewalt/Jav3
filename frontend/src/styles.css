@@ -934,26 +934,22 @@ input:focus, textarea:focus { border-color: var(--accent);
 }
 .convo-list li:hover::after, .convo-list li.active::after,
 .convo-list li:hover + li::after, .convo-list li.active + li::after { opacity: 0; }
-/* rename / delete float over the row's right end on hover instead of
-   holding their width while invisible, which cut every title ~55px short.
-   The pad is the row's own hover wash, so the title fades under it. */
+/* the row's ⋯ (star, rename, folder, delete) sits at its right end. It used
+   to appear only on hover, and the operator found no way to delete a chat or a
+   project (2026-10-02), so it always shows, faint, and comes up fully on
+   hover, focus, an open menu or the open chat. One ⋯ is ~26px: the title
+   keeps that room and ellipsises before it instead of running under it. */
 .convo-actions {
   position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
-  display: flex; gap: 2px; padding-left: 6px; border-radius: 8px;
-  background: var(--panel-2); opacity: 0; pointer-events: none;
-  transition: opacity 0.15s;
+  display: flex; gap: 2px; padding-left: 4px; border-radius: 8px;
+  background: transparent; opacity: 0.4; transition: opacity 0.15s;
 }
 .convo-list li:hover .convo-actions,
-.convo-list li:focus-within .convo-actions { opacity: 1; pointer-events: auto; }
-/* ...and the text fades out before it: the ⋯ used to sit square on the
-   title's last letters ("Protoc⋯"). Only where the actions overlay — on touch
-   they take their own place in the row (below). */
+.convo-list li:focus-within .convo-actions,
+.convo-list li.active .convo-actions { opacity: 1; background: var(--panel-2); }
 @media (hover: hover) {
-  .convo-list li:hover .convo-main,
-  .convo-list li:focus-within .convo-main,
-  .convo-list li.menu-open .convo-main {
-    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent calc(100% - 22px));
-    mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent calc(100% - 22px)); }
+  .convo-list li .convo-main { padding-right: 24px; }
+  .convo-list .proj-rows a { padding-right: 36px; }
 }
 /* an agent's thread: the agent's name leads the caption line */
 .convo-agent { color: var(--accent); margin-right: 6px; }
@@ -980,6 +976,8 @@ input:focus, textarea:focus { border-color: var(--accent);
 .convo-group-count { margin-left: auto; letter-spacing: 0; opacity: 0.7;
   font-variant-numeric: tabular-nums; }
 .convo-group-menu { opacity: 0; transition: opacity 0.15s; }
+/* Projects' ＋ stays visible: it is the only obvious way to make a project */
+.convo-group-add { text-decoration: none; }
 .convo-group-head:hover .convo-group-menu,
 .convo-group-head:focus-within .convo-group-menu { opacity: 1; }
 .convo-group-empty { margin: 0; padding: var(--sp-2) var(--sp-6);
@@ -3125,11 +3123,14 @@ body.nav-locked .notice-pill { display: none; }
 .notice-x:hover { color: var(--text); background: none; }
 
 /* --- in-page confirm / prompt (ask.jsx) -------------------------------------
-   Same layer as the security board's modal (4000), which is deliberately above
-   .notices (3000): a toast must never be clickable through an open dialog,
-   because tapping one navigates away mid-question. */
+   Above every other layer: .notices (3000), so a toast is never clickable
+   through an open dialog (tapping one navigates away mid-question); the sheets
+   and modals (4000), because a confirm is often asked FROM one (the Projects
+   sheet's Delete): at an equal z-index the sheet, portaled to <body> after the
+   app root, painted over the dialog, the click landed on the sheet, and the
+   dialog read it as "outside" and cancelled; and floating menus (5000). */
 .ask-scrim {
-  position: fixed; inset: 0; z-index: 4000; background: var(--overlay);
+  position: fixed; inset: 0; z-index: 6000; background: var(--overlay);
   display: flex; align-items: center; justify-content: center;
   padding: max(24px, var(--sat)) 20px max(24px, var(--sab));
   animation: scrim-in 0.14s ease both;
@@ -3864,6 +3865,11 @@ a:has(> .nav-dot) { position: relative; }
 .bx-kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .bx-strike { color: var(--dim); }
 .bx-reach { margin: var(--sp-3) 0; }
+/* the approve modal's "not resolved yet" notice and its Resolve now */
+.bx-unresolved { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sp-3);
+  margin: var(--sp-3) 0; padding: var(--sp-3) var(--sp-4); border-radius: var(--radius-sm);
+  border: 1px solid var(--border); }
+.bx-unresolved p { margin: 0; flex: 1 1 260px; }
 .bx-svc-req { display: flex; flex-direction: column; gap: var(--sp-5); margin-bottom: var(--sp-5);
   border-left: 3px solid var(--amber); }
 .bx-d-add { color: var(--green); }
@@ -4574,3 +4580,7 @@ a:has(> .nav-dot) { position: relative; }
 .desk-bar.you button { background: var(--accent-ink); color: var(--text); border-color: var(--accent-ink); }
 .desk-status.agent { color: var(--amber); }
 .desk-status.you { color: var(--accent); font-weight: 600; }
+
+/* agent requests: the fetched SKILL.md, read in full before install */
+.bx-skill-md { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  margin: var(--sp-3) 0; padding: var(--sp-3); border: 1px solid var(--border); border-radius: 6px; }

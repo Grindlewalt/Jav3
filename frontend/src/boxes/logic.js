@@ -656,3 +656,31 @@ export function deleteBlock(p) {
   if (used) return `used by ${used} project${used === 1 ? '' : 's'}: move ${used === 1 ? 'it' : 'them'} to another profile first`
   return null
 }
+
+// ---- agent requests: environments and skill installs ----------------------------
+
+// An environment's packages as [[manager, [pkg, ...]], ...] in first-seen order.
+export function packagesByManager(packages) {
+  const out = new Map()
+  for (const p of packages || []) {
+    if (!out.has(p.manager)) out.set(p.manager, [])
+    out.get(p.manager).push(p)
+  }
+  return [...out.entries()]
+}
+
+// What the skill card offers for a row. fetched: the read text is on screen.
+export function skillCardState(r) {
+  const status = r?.status || 'pending'
+  const unmet = (r?.requirements || []).filter((x) => !x.met)
+  return {
+    status,
+    canFetch: status === 'pending',
+    canInstall: status === 'fetched' && !!r.skill_sha256,
+    canRefetch: status === 'fetched',
+    canReject: status === 'pending' || status === 'fetched',
+    unmet,
+    files: Object.keys(r?.files || {}),
+    notGranted: status === 'installed' && !r.granted,
+  }
+}

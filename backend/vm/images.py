@@ -381,9 +381,11 @@ async def descendants(db, name: str) -> set[str]:
 
 
 async def create_variant(db, name: str, from_variant: str | None,
-                         packages_in: list[dict]) -> dict:
+                         packages_in: list[dict], *,
+                         min_mem_mb: int | None = None) -> dict:
     """An operator variant (POST /api/vm/images). Its own recipe is stored on
-    its row; it is not built until the operator asks."""
+    its row; it is not built until the operator asks. `min_mem_mb` is the
+    box-memory floor the variant asks for (environment requests)."""
     name = check_variant_name(name)
     if name in builtin_recipes():
         raise RecipeError(f"`{name}` is a builtin variant")
@@ -397,7 +399,10 @@ async def create_variant(db, name: str, from_variant: str | None,
         raise RecipeError("packages must be a list of at most 100")
     pkgs = _dedupe([package_entry(str(p.get("manager")), p.get("package"),
                                   p.get("version")) for p in packages_in])
-    own = {"name": name, "from": from_variant, "min_mem_mb": None, "packages": pkgs}
+    if min_mem_mb is not None and not (128 <= int(min_mem_mb) <= 16384):
+        raise RecipeError("min_mem_mb takes one integer (128..16384)")
+    own = {"name": name, "from": from_variant,
+           "min_mem_mb": int(min_mem_mb) if min_mem_mb else None, "packages": pkgs}
     await db.execute("INSERT INTO image_variants(name, from_variant, builtin, recipe) "
                      "VALUES (?,?,0,?)", (name, from_variant, json.dumps({"own": own})))
     await db.commit()
@@ -678,7 +683,7 @@ class Builder:
         by_id = {r["id"]: r for r in rows}
         db = await get_db()
         try:
-            n = 0
+            n, seen = 0, set()
             for res in report.get("results") or []:
                 if not isinstance(res, dict) or res.get("id") not in by_id:
                     continue
@@ -686,7 +691,18 @@ class Builder:
                     db, res["id"], resolved_version=_s(res.get("version"), 80),
                     integrity=_s(res.get("integrity"), 300),
                     error=_s(res.get("error"), 200))
+                seen.add(res["id"])
                 n += 1
+            # a job that failed as a whole (the builder box did not boot, timed
+            # out, ...) says so on every row it left unresolved: 2026-10-01 a
+            # background resolve failed silently and the request sat at "not
+            # resolved yet" with nothing on its card saying why. The row stays
+            # unresolved (resolved_version NULL), so the next resolve retries it.
+            why = _s(report.get("error"), 200) or "the dry-run returned no result"
+            for pid in by_id:
+                if pid not in seen:
+                    await packages.set_resolution(db, pid, resolved_version=None,
+                                                  integrity=None, error=why)
         finally:
             await db.close()
         self._pub(phase="resolved", count=n, error=report.get("error"))

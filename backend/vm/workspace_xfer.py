@@ -35,15 +35,25 @@ from ..fsutil import list_tree
 
 log = logging.getLogger("jav3.workspace_xfer")
 
-SKIP = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache", "dist",
+SKIP = {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache",
         ".workspace.json", ".context.json", ".staging"}
 
+# `dist` is build output the agent made on purpose: it comes OUT of the guest
+# (a build was dropped here while run_code told it "kept", dist/voxelcraft.html,
+# 2026-09-27) and, because it was skipped going IN, every later turn saw a
+# project with no dist/ (benchmark-game, 2026-10-01). It goes in now, unless it
+# is bigger than this: then it stays out and the turn is told (workspace_note).
+DIST_MAX_BYTES = 16 * 1024 * 1024
 
-# what a turn's writes may NOT bring back. `dist` is skipped going IN (build
-# output is regenerated) but kept coming OUT: a build the agent made on purpose
-# was dropped here while run_code told it "kept" (dist/voxelcraft.html,
-# 2026-09-27). run_code's per-file and per-run caps still bound its size.
-SKIP_OUT = SKIP - {"dist"}
+# what a turn's writes may NOT bring back (run_code's per-file and per-run caps
+# still bound the size of a build)
+SKIP_OUT = set(SKIP)
+
+# Dot dirs a tool run writes under HOME (run_code sets HOME to the project): a
+# Chromium, pip or npm run leaves .config, .local, .pki and .cache there. They
+# are dropped coming out, unless the project has such a dir of its own (a file
+# of it tracked in git, or shipped into the guest): see _owned_home_dirs.
+HOME_DOT_DIRS = {".config", ".local", ".pki", ".cache"}
 
 # ...of which these are the harness's own: a write to one is REFUSED and said so.
 # The rest (.venv, node_modules, __pycache__, .pytest_cache) is generated junk
@@ -70,6 +80,10 @@ MAX_MEMBERS = 20000
 # host still match. Applied writes update it (host and guest then agree on that
 # content), so a file flushed mid-turn and deleted later still goes.
 _shipped: dict[str, dict[str, str]] = {}
+
+# slug -> what the last workspace build left out that the turn should be told
+# (a dist/ over DIST_MAX_BYTES); "" when it left nothing out
+_notes: dict[str, str] = {}
 
 # Dotfiles that ship into the guest are only those with no credentials in them.
 _SECRET_DIRS = {".ssh", ".aws", ".gnupg", ".kube", ".docker"}
@@ -102,24 +116,57 @@ def _is_dot(rel: str) -> bool:
     return any(part.startswith(".") for part in Path(rel).parts)
 
 
+def _in_dist(rel: str) -> bool:
+    return "dist" in Path(rel).parts[:-1]
+
+
+def _home_dir(rel: str) -> str | None:
+    """The HOME-style dot dir a path sits under (".config", "app/.local"), or None."""
+    parts = Path(rel).parts
+    for i, part in enumerate(parts[:-1]):
+        if part in HOME_DOT_DIRS:
+            return "/".join(parts[:i + 1])
+    return None
+
+
 def build_merged_tar(slug: str) -> bytes:
     """The project's current files, minus SKIP. Records what it shipped (and each
     file's digest) so the guest's deletions can be checked when they come home."""
+    return build_workspace(slug)[0]
+
+
+def workspace_note(slug: str) -> str:
+    """What the last workspace build for `slug` left out that the turn must be
+    told, or "" (a dist/ over DIST_MAX_BYTES)."""
+    return _notes.get(slug, "")
+
+
+def build_workspace(slug: str) -> tuple[bytes, str]:
+    """(the tarball build_merged_tar describes, a note for the turn or "")."""
     proj = settings.projects_dir / slug
     buf = io.BytesIO()
     shipped: dict[str, str] = {}
+    entries = [e for e in sorted(list_tree(proj, dotfiles=True), key=lambda e: e["path"])
+               if not (_skip(e["path"]) or _withheld(e["path"]))]
+    note = ""
+    dist_bytes = sum(e["size"] for e in entries if _in_dist(e["path"]))
+    if dist_bytes > DIST_MAX_BYTES:
+        entries = [e for e in entries if not _in_dist(e["path"])]
+        note = (f"[Workspace note: the project's dist/ build output is {_mb(dist_bytes)}, "
+                f"over the {_mb(DIST_MAX_BYTES)} the copy of the project in this box carries, "
+                "so it was not copied in. It is still in the project; a build you make here "
+                "comes back as usual.]")
+        log.info("not shipping dist/ of %s into the guest: %s", slug, _mb(dist_bytes))
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for entry in sorted(list_tree(proj, dotfiles=True), key=lambda e: e["path"]):
+        for entry in entries:
             rel = entry["path"]
-            if _skip(rel) or _withheld(rel):
-                continue
             p = writes.resolve(slug, rel)
             if p is None or not p.is_file():
                 continue
             data = p.read_bytes()
-            if _is_dot(rel) and secrets_mod.find_in_bytes(data):
-                # a dotfile holding a stored secret's value must not reach the
-                # guest (the guest holds no secrets); it was never shipped before
+            if (_is_dot(rel) or _in_dist(rel)) and secrets_mod.find_in_bytes(data):
+                # a dotfile (or built file) holding a stored secret's value must
+                # not reach the guest (the guest holds no secrets)
                 log.warning("not shipping %s/%s into the guest: it contains a stored secret",
                             slug, rel)
                 continue
@@ -133,7 +180,14 @@ def build_merged_tar(slug: str) -> bytes:
             tar.addfile(ti, io.BytesIO(data))
             shipped[rel] = _sha(data)
     _shipped[slug] = shipped
-    return buf.getvalue()
+    _notes[slug] = note
+    return buf.getvalue(), note
+
+
+def note_shipped(slug: str, rel: str, data: bytes) -> None:
+    """The host put `rel` into the live guest copy mid-turn (guest_turn.push_files):
+    it counts as shipped, so the guest's later deletion of it is honoured."""
+    _shipped.setdefault(slug, {})[rel] = _sha(data)
 
 
 def _mb(n: int) -> str:
@@ -242,6 +296,9 @@ async def apply_guest_writes(slug: str, tar_bytes: bytes, op_id: str | None = No
                     slug, stopped or f"{len(too_big)} file(s)")
         await writes._raise_flag(slug, next(iter(too_big), "(guest write buffer)"), "oversize",
                                  {"files": list(too_big)[:20], "stopped": stopped})
+    homes = {h for rel, _ in items if (h := _home_dir(rel))}
+    owned = await _owned_home_dirs(slug, homes, known) if homes else set()
+    dropped_homes = 0
     for rel, data in items:
         if rel == DELETED_MEMBER:
             try:
@@ -258,6 +315,10 @@ async def apply_guest_writes(slug: str, tar_bytes: bytes, op_id: str | None = No
             continue
         if _skip(rel, SKIP_OUT):
             continue                       # generated junk, dropped quietly as ever
+        home = _home_dir(rel)
+        if home and home not in owned:
+            dropped_homes += 1             # a tool run's HOME droppings, dropped the same way
+            continue
         if rel == ".gitignore":
             data = _keep_harness_ignores(data)
         try:
@@ -283,6 +344,9 @@ async def apply_guest_writes(slug: str, tar_bytes: bytes, op_id: str | None = No
             flagged[rel] = triggers
         applied.append(rel)
         applied_sha[rel] = known[rel] = _sha(data)
+    if dropped_homes:
+        log.info("dropped %d file(s) under HOME-style dot dirs (%s) from %s's buffer: not "
+                 "the project's own", dropped_homes, ", ".join(sorted(homes - owned)), slug)
     old_sha: dict[str, str] = {}
     if wanted_deleted:
         if leaks or failed or refused:
@@ -306,6 +370,31 @@ async def apply_guest_writes(slug: str, tar_bytes: bytes, op_id: str | None = No
         taintpaths.record(slug, deleted, False)
         taintpaths.record(slug, [r for r, h in applied_sha.items() if h in moved], True)
     return res
+
+
+async def _owned_home_dirs(slug: str, homes: set[str], known: dict[str, str]) -> set[str]:
+    """Which of these HOME-style dot dirs are the project's own: one a file of
+    which went into the guest this turn, or is tracked in the project's git.
+    Writes under any other are a tool run's droppings (a browser profile, pip's
+    user dir) and stay out of the project."""
+    from .. import gitgate
+    owned: set[str] = set()
+    has_git = (settings.projects_dir / slug / ".git").exists()
+    for home in sorted(homes)[:50]:
+        if any(k.startswith(home + "/") for k in known):
+            owned.add(home)
+            continue
+        if not has_git:
+            continue
+        try:
+            rc, out, _ = await gitgate.run_git(slug, "ls-files", "-z", "--", home)
+        except Exception as e:  # noqa: BLE001 — cannot tell: keep the dir, as before
+            log.warning("could not ask git about %s/%s: %s", slug, home, e)
+            owned.add(home)
+            continue
+        if rc == 0 and out.strip("\0"):
+            owned.add(home)
+    return owned
 
 
 async def _apply_deletions(slug: str, wanted: list, tainted: bool, known: dict,

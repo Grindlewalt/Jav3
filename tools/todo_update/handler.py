@@ -1,6 +1,9 @@
+import time
+
 from backend import writes
-from backend.agent.tools.todostore import (LEGACY_FILE, TODO_FILE, parse_todo_text,
-                                           render_todos)
+from backend.agent.tools.todostore import (ARCHIVE_FILE, LEGACY_FILE, OPEN_VIEW_CAP,
+                                           TODO_FILE, archive_text, parse_todo_text,
+                                           prune, render_todos)
 from backend.agent.tools.toolctx import require_project
 
 # no project loaded: a plan for THIS turn only, instead of an error that cost a
@@ -19,10 +22,25 @@ def _turn_key():
 
 
 def _render(todos) -> str:
+    """The list as the model sees it: every finished item, the first
+    OPEN_VIEW_CAP open ones, and a count of the rest. Positions are the real
+    ones, so `index` and a later `text` match still land on the right item."""
     if not todos:
         return "todo list is empty"
-    return "\n".join(
-        f"{i}. [{'x' if t['done'] else ' '}] {t['text']}" for i, t in enumerate(todos))
+    shown, hidden, seen = [], 0, 0
+    for i, t in enumerate(todos):
+        if not t["done"]:
+            seen += 1
+            if seen > OPEN_VIEW_CAP:
+                hidden += 1
+                continue
+        shown.append(i)
+    lines = [f"{i}. [{'x' if todos[i]['done'] else ' '}] {todos[i]['text']}"
+             for i in shown]
+    if hidden:
+        lines.append(f"... {hidden} more open item(s) not shown ({_counts(todos)}); "
+                     "they come into view as the ones above are checked off or deleted")
+    return "\n".join(lines)
 
 
 def _pick(todos, index, text):
@@ -100,13 +118,25 @@ async def run(action: str, text: str | None = None, index: int | None = None,
     # it and is never written (BUILD-07)
     src = writes.resolve(slug, TODO_FILE) or writes.resolve(slug, LEGACY_FILE)
     todos = parse_todo_text(src.read_text()) if src else []
+    # a long list sheds its finished items to the archive file first, so the
+    # call below (and its reply) works on the list as it now is
+    todos, gone = prune(todos)
     out = _apply(todos, action, text, index, items)
-    if out.startswith("error") or action == "list":
+    changed = not (out.startswith("error") or action == "list")
+    if not (gone or changed):
         return out
     try:
+        if gone:
+            old = writes.resolve(slug, ARCHIVE_FILE)
+            await writes.apply_write(slug, ARCHIVE_FILE, archive_text(
+                old.read_text() if old else "", gone,
+                time.strftime("%Y-%m-%d", time.gmtime())).encode())
         await writes.apply_write(slug, TODO_FILE, render_todos(todos).encode())
     except writes.SecretLeakError as e:
         return f"error: todo update refused — {e}"
+    if gone:
+        out += (f"\n(the list was long: {len(gone)} finished item(s) moved to "
+                f"{ARCHIVE_FILE}, so positions moved up)")
     return out
 
 

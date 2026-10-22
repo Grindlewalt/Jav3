@@ -4,7 +4,8 @@ from backend.db import get_db
 
 
 async def run(task: str, prompt: str, duplicate: bool = False,
-              label: str = "", model: str | None = None) -> str:
+              label: str = "", model: str | None = None,
+              max_rounds: int | None = None) -> str:
     if not (task or "").strip() or not (prompt or "").strip():
         return ("error: spawn_temp_agent needs both a task and a role prompt "
                 "for the agent.")
@@ -23,7 +24,8 @@ async def run(task: str, prompt: str, duplicate: bool = False,
     try:
         result = await agents_run.run_temp_agent_headless(
             prompt, task, duplicate=bool(duplicate), label=label or "",
-            **({"model": model} if model else {}))
+            **({"model": model} if model else {}),
+            **({"max_rounds": max_rounds} if max_rounds else {}))
     finally:
         runtime.spawn_depth.reset(depth_token)
     db = await get_db()
@@ -46,4 +48,6 @@ async def run(task: str, prompt: str, duplicate: bool = False,
         trailer = f"\n(usage: ~{used:,} tokens, {n} tool calls)"
     else:
         trailer = f"\n(usage: {n} tool calls)"
-    return f"[{result['agent']} reports]\n{final}{trailer}"
+    # a spent round cap (or a loop cut short) is said first and plainly, not
+    # left for the parent to guess from a half-finished report
+    return agents_run.spawn_report(result, final) + trailer

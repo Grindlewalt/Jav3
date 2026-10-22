@@ -304,6 +304,23 @@ async def test_resolve_job(db, monkeypatch):
     assert b["resolved_version"] is None and b["integrity"].startswith("unresolved")
 
 
+async def test_resolve_job_failing_whole_says_why_on_each_row(db, monkeypatch):
+    # 2026-10-01: a background resolve failed silently; the request sat at
+    # "not resolved yet" and its card never said why
+    (settings.vm_dir / "base-v1.qcow2").write_bytes(b"q")
+    state = await _mk_box_env(monkeypatch)
+    r = await packages.file_request(db, manager="apt", package="glslang-tools", version=None,
+                                    install_command="", reason="r", project="p1",
+                                    conversation_id=None)
+    out, _ = await asyncio.gather(images.builder.resolve_pending(),
+                                  _guest(state, lambda job: {"ok": False, "error": "apt: boom"}))
+    assert out["error"] == "apt: boom"
+    row = await packages.get(db, r["id"])
+    assert row["resolved_version"] is None and row["integrity"] == "unresolved: apt: boom"
+    # still unresolved, so the next resolve picks it up again
+    assert [x["id"] for x in await packages.unresolved(db)] == [r["id"]]
+
+
 def test_registration_hooks():
     assert images.resolve_image in boxes._image_resolvers
 

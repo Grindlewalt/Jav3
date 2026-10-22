@@ -3,8 +3,10 @@ from backend import runtime
 from backend.agent.tools.toolctx import require_project
 
 
-async def run(status: str, summary: str, item: str | None = None) -> str:
+async def run(status: str, summary: str, item: str | None = None,
+              blocked_on: str | None = None) -> str:
     slug = await require_project()
     return await plan_mod.report(slug, cid=runtime.conversation_id.get(),
                                  item_id=(item or "").strip() or None,
-                                 status=(status or "").strip().lower(), summary=summary)
+                                 status=(status or "").strip().lower(), summary=summary,
+                                 blocked_on=blocked_on)

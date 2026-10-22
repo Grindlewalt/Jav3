@@ -18,6 +18,10 @@ parameters:
     item:
       type: string
       description: Your item id (e.g. i3), for the record. Optional — you can only ever report your own item.
+    blocked_on:
+      type: string
+      enum: [operator, capability]
+      description: Only with status blocked. capability = the HOST cannot do what the item needs (no services, no desktop, no browser, a package it cannot install), and the summary says which. The plan shows it apart from a failure and the orchestrator reshapes the item instead of retrying. operator (the default) = a credential, an account or a decision only the operator can make.
   required: [status, summary]
 ---
 `enabled: false` keeps this out of every ordinary turn: the plan runner
@@ -26,4 +30,5 @@ nobody else. The item is resolved host-side from the turn's conversation — an
 item can only report itself, whatever `item` says.
 
 Call it once, when the item is finished or cannot be finished, then end your
-reply. A final reply without it counts as a failed attempt.
+reply. A final reply without it counts as a failed attempt (the plan records how the
+attempt really ended: ran out of rounds, tools withdrawn, or no report).

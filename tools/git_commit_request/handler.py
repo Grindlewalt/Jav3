@@ -17,6 +17,7 @@ async def run(message: str, paths: list[str] | None = None) -> str:
     if replaced:
         scope += "; replaces pending " + ", ".join(
             f"request #{r['id']} ({r['message'][:60]!r})" for r in replaced)
+    note = "".join(f"\nnote: {n}" for n in row.get("harness_notice") or [])
     return (f"commit request #{row['id']} filed{scope} — status pending. "
             "Nothing is committed or pushed until the operator approves it "
-            "in the dashboard.")
+            "in the dashboard." + note)

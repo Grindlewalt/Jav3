@@ -3,7 +3,8 @@ from backend.agent.budget import current as current_budget
 from backend.db import get_db
 
 
-async def run(agent: str, task: str, model: str | None = None) -> str:
+async def run(agent: str, task: str, model: str | None = None,
+              max_rounds: int | None = None) -> str:
     from fastapi import HTTPException
     from backend import providers
     if model:
@@ -20,6 +21,8 @@ async def run(agent: str, task: str, model: str | None = None) -> str:
     depth_token = runtime.spawn_depth.set(runtime.spawn_depth.get() + 1)
     try:
         extra = {"model": model} if model else {}
+        if max_rounds:
+            extra["max_rounds"] = max_rounds
         result = await agents_run.run_agent_headless(agent, task, **extra)
     except HTTPException as e:
         if e.status_code == 404 and e.detail == "no such agent":
@@ -48,4 +51,6 @@ async def run(agent: str, task: str, model: str | None = None) -> str:
         trailer = f"\n(usage: ~{used:,} tokens, {n} tool calls)"
     else:
         trailer = f"\n(usage: {n} tool calls)"
-    return f"[{result['agent']} reports]\n{final}{trailer}"
+    # a spent round cap (or a loop cut short) is said first and plainly, not
+    # left for the parent to guess from a half-finished report
+    return agents_run.spawn_report(result, final) + trailer

@@ -33,7 +33,12 @@ parameters:
       type: array
       items:
         type: string
-      description: For add or edit — ids of items whose results this one needs.
+      description: For add or edit — ids of items whose results this one needs (hard dependencies, so when one fails or never runs this one is blocked).
+    soft_deps:
+      type: array
+      items:
+        type: string
+      description: For add or edit — ids of items this one only follows. It runs once they have settled however they ended, with a brief naming the ones that did not finish. Use it for an item that integrates, verifies or ships other items' work. On edit it replaces the soft set (an empty list makes every dependency hard); an id not yet in depends_on is added.
     run:
       type: boolean
       description: Relaunch the run if it is not running (default true).

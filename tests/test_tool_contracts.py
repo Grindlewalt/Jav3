@@ -41,6 +41,7 @@ SCHEMA_REQUIRES_MORE = {
     "projector_show": {"surface"},      # '' -> "which surface?"
     "service_logs": {"name"},           # '' -> "no approved service named ''"
     "service_request": {"command", "files", "name", "reason"},               # the backend explains each
+    "skill_request": {"source", "reason"},                                   # the backend explains each
     "workspace_panel": {"action"},      # '' -> the actions
 }
 

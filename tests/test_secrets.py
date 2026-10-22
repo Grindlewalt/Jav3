@@ -113,6 +113,29 @@ def test_v2_file_format_and_hosts_roundtrip(tmp_env):
     assert secrets.scrub("leak val-abcdef here") == "leak {{secret:A}} here"
 
 
+def test_host_typed_as_url_still_binds(tmp_env):
+    # 2026-10-02: TBA_KEY was saved as 'https://www.thebluealliance.com/' and
+    # web_read refused to send it to www.thebluealliance.com itself
+    secrets.save({"TBA": {"value": "t-123456789",
+                          "hosts": ["https://www.thebluealliance.com/"]},
+                  "P": {"value": "p-123456789", "hosts": ["API.x.com:443/v1", "https://"]}})
+    assert secrets.hosts_for("TBA") == ["www.thebluealliance.com"]
+    assert secrets.hosts_for("P") == ["api.x.com"]
+    ok = secrets.substitute_url(
+        "https://www.thebluealliance.com/api/v3/status?X-TBA-Auth-Key={{secret:TBA}}")
+    assert ok.endswith("=t-123456789")
+    # still exact: the bare apex is not the bound www host
+    with pytest.raises(ValueError, match="refusing"):
+        secrets.substitute_url("https://thebluealliance.com/?k={{secret:TBA}}")
+
+
+async def test_secrets_api_saves_hostnames_not_urls(client):
+    r = await client.put("/api/secrets/TBA", json={
+        "value": "t-123456789",
+        "hosts": ["https://www.thebluealliance.com/", "www.thebluealliance.com"]})
+    assert r.json()["hosts"] == ["www.thebluealliance.com"]
+
+
 async def test_web_read_refuses_unbound_secret_before_any_network(tmp_env):
     from backend import webtools
     from backend.db import init_db

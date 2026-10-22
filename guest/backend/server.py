@@ -19,6 +19,7 @@ from . import boxinfo
 from . import config as guest_config
 from . import persist, turnctx
 from .agent.loop import run_turn
+from .fsutil import safe_join
 
 PORT = 5556                                 # guest run-turn server (host dials this)
 
@@ -43,6 +44,36 @@ def _unpack_workspace(slug: str, tar_b64: str) -> None:
     with tarfile.open(fileobj=io.BytesIO(base64.b64decode(tar_b64)), mode="r:gz") as t:
         t.extractall(dest, filter="data")
         _known[slug] = {m.name for m in t.getmembers() if m.isfile()}
+
+
+def _put_files(slug, files) -> dict:
+    """Write host-sent files (rel -> base64) into the workspace copy, beside what
+    is there. The turn's own pending copy of a path is dropped: the host's text
+    was written after it and is canonical. Never creates the workspace, and
+    never writes into .staging or .git."""
+    root = guest_config.settings.projects_dir / slug if isinstance(slug, str) and slug else None
+    if root is None or not root.is_dir() or not isinstance(files, dict):
+        return {"type": "put", "ok": False, "error": "no workspace for that project here"}
+    done, refused = [], {}
+    for rel, b64 in files.items():
+        try:
+            if not isinstance(rel, str) or not isinstance(b64, str):
+                raise ValueError("not a path and bytes")
+            data = base64.b64decode(b64)
+            dest = safe_join(root, rel)
+            if dest.relative_to(root.resolve()).parts[0] in (".staging", ".git"):
+                raise ValueError("a protected path")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
+            dest.chmod(0o644)
+            pending = safe_join(root / ".staging", rel)
+            if pending.is_file():
+                pending.unlink()
+            _known.setdefault(slug, set()).add(rel)
+            done.append(rel)
+        except Exception as e:  # noqa: BLE001 — one bad path must not drop the rest
+            refused[str(rel)[:120]] = f"{type(e).__name__}: {e}"[:120]
+    return {"type": "put", "ok": not refused, "written": done, "refused": refused}
 
 
 def _pack_staging(slug: str) -> str:
@@ -131,6 +162,11 @@ async def _handle(loop, conn) -> None:
             except Exception as e:  # noqa: BLE001 — answer, never kill the server
                 await send({"type": "kill", "ok": False, "why": "error",
                             "error": f"{type(e).__name__}: {e}"[:300]})
+            return
+        # put_files: the host wrote a file mid-turn (research's document) and told
+        # the model to read it; the copy was built at turn start, so it lands here.
+        if mode == "put_files":
+            await send(_put_files(spec.get("active_slug"), spec.get("files")))
             return
         if mode == "pull":
             slug = spec.get("active_slug")

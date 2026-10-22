@@ -5,7 +5,7 @@ frontmatter and `backend/agent/tools/toolsections.py`; do not edit by hand
 (tests/test_toolcatalog.py fails when it is stale). The Tools page shows the same
 list, and searching it by an old name finds the action.
 
-The model can be offered **26 tools with 81 actions** (1 of the actions is switched off in its folder).
+The model can be offered **27 tools with 83 actions** (1 of the actions is switched off in its folder).
 2 more tools with 4 more actions are internal (`plan_status`, `plan_fix`, `plan_report`, `inbox_fetch`): the harness grants or calls them, and the model is not offered them on a normal turn. A TOOL.md marks one with `internal: true`; nothing else reads the key, so it changes what the Tools page lists and nothing about what is granted.
 
 A turn lists only the core tools (at most 11 names, with `tools`) until the model loads a section with `tools(section=...)`. Every old name still works when called directly, and a transcript's tool call keeps its old name.
@@ -27,7 +27,7 @@ Project files and the sandbox: read, write, edit, search, run code.
 
 ## project
 
-Switch project, index the code, dashboards, workspace panels, sandbox packages and screenshots, the journal.
+Switch project, index the code, dashboards, workspace panels, sandbox packages, environments and screenshots, the journal.
 
 | Old name | The model calls | Core | Gating |
 | --- | --- | --- | --- |
@@ -35,6 +35,7 @@ Switch project, index the code, dashboards, workspace panels, sandbox packages a
 | `journal_update` | `project(action="journal")` |  | needs project |
 | `crawl_codebase` | `project(action="crawl")` |  | in-guest, needs project |
 | `dashboard` | `project(action="dashboard")` |  | in-guest, needs project |
+| `environment_request` | `project(action="environment")` |  | needs setup |
 | `package_request` | `project(action="packages")` |  | needs setup |
 | `screenshot` | `project(action="screenshot")` |  | in-guest, needs setup |
 | `workspace_panel` | `project(action="panel")` |  |  |
@@ -201,3 +202,11 @@ Your own manual, reporting a harness fault.
 | `inbox_fetch` | `inbox_fetch` |  | harness only, internal |
 | `report_harness_fault` | `system(action="report_fault")` |  |  |
 | `self_docs` | `system(action="docs")` |  |  |
+
+## skills
+
+Installed skills (calling one loads its instructions), and asking the operator to install another.
+
+| Old name | The model calls | Core | Gating |
+| --- | --- | --- | --- |
+| `skill_request` | `skill_request` |  |  |
