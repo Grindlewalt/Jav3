@@ -17,8 +17,20 @@ parameters:
       description: The existing image to build from (default `main`; `desktop` adds a screen and a browser).
     packages:
       type: array
-      description: The packages. Each is an object {manager, package, version?} or a string like `apt ffmpeg`, `pip pygame==2.6.1`, `npm typescript@5.6.3`. At most 30; plain names from the default registry only.
-      items: {}
+      description: The packages, at most 30; plain names from the default registry only. A string like `apt ffmpeg`, `pip pygame==2.6.1` or `npm typescript@5.6.3` also works.
+      items:
+        type: object
+        properties:
+          manager:
+            type: string
+            enum: [apt, pip, npm]
+          package:
+            type: string
+            description: The plain package name (e.g. `ffmpeg`, `requests`, `@scope/name`).
+          version:
+            type: string
+            description: One exact version (optional).
+        required: [manager, package]
     min_mem_mb:
       type: integer
       description: Optional memory floor for boxes on this image, 256 to 16384.
