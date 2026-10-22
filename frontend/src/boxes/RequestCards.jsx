@@ -4,15 +4,18 @@
 //
 // Everything in a request — package names, commands, reasons, argv, env,
 // diffs — was written by the agent. All of it renders as text nodes.
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { Button, Modal, Select, Tag } from '../components/index.js'
 import { notify, notifyError } from '../notify.js'
 import { useAsk } from '../ask.jsx'
 import { ago } from '../format.js'
 import { approvePackage, listPackages, rejectPackage, resolvePackages } from './api/packages.js'
 import { approveService, getService, rejectService } from './api/services.js'
+import { approveEnvironment, rejectEnvironment } from './api/environments.js'
+import { approveSkillRequest, fetchSkillRequest, rejectSkillRequest } from './api/skillRequests.js'
 import {
   diffLines, EXPOSE_LABEL, exposeChoices, exposeDefault, exposePayload, packageReach, PLACEMENTS,
+  packagesByManager, skillCardState,
 } from './logic.js'
 import { ProjectList } from './ui.jsx'
 
@@ -257,6 +260,176 @@ export function ServiceRequest({ s, lan, profilePlacement, onDone }) {
         <Button variant="ghost" danger onClick={reject}>Reject</Button>
         <Button disabled={!ack || !placement || busy} onClick={approve}>Approve service</Button>
       </div>
+    </div>
+  )
+}
+
+// ---- environment requests ---------------------------------------------------------
+
+// A new image variant plus the packages it adds, filed by an agent for its project.
+// Approve builds the image and moves the project onto it; nothing else changes.
+export function EnvironmentCard({ e, onDone }) {
+  const [busy, setBusy] = useState(false)
+  const [resolving, setResolving] = useState(false)
+  const ask = useAsk()
+  const pending = e.status === 'pending'
+  async function resolve() {
+    setResolving(true)
+    try {
+      const r = await resolvePackages()
+      if (r?.error) notifyError(new Error(`resolve: ${r.error}`))
+      onDone()
+    } catch (err) { notifyError(err) }
+    setResolving(false)
+  }
+  async function approve() {
+    const ok = await ask.confirm(
+      `Approve environment ${e.name}? The host builds the image from ${e.from_variant} with the `
+      + `pinned packages shown, then ${e.project_slug} boots on it.`, { confirmLabel: 'Approve & build' })
+    if (!ok) return
+    setBusy(true)
+    try {
+      const r = await approveEnvironment(e.id, { build: true })
+      notify(r?.build_started ? `building ${e.name}` : `approved — the build of ${e.name} did not start (busy?)`)
+      onDone()
+    } catch (err) { notifyError(err) }
+    setBusy(false)
+  }
+  async function reject() {
+    const reason = await ask.prompt(`Reject environment ${e.name}? Reason (optional)`, '',
+                                    { confirmLabel: 'Reject' })
+    if (reason === null) return
+    try { await rejectEnvironment(e.id, reason); onDone() } catch (err) { notifyError(err) }
+  }
+  return (
+    <div className="sbx-card bx-svc-req">
+      <div className="bx-pkg-top">
+        <Tag tone="pending">environment</Tag>
+        <b className="mono">{e.name}</b>
+        {e.project_slug && <Tag>{e.project_slug}</Tag>}
+        <Tag>agent</Tag>
+        <span className="dim small">{ago(e.created_at)}</span>
+      </div>
+      <dl className="bx-kv small">
+        <dt>new image</dt><dd><span className="mono">{e.name}</span> (from <span className="mono">{e.from_variant}</span>)</dd>
+        {packagesByManager(e.packages).map(([m, list]) => (
+          <Fragment key={m}>
+            <dt>adds {m}</dt>
+            <dd>{list.map((p) => (
+              <div key={p.id ?? p.package} className="bx-pkg">
+                <b className="mono">{p.package}</b>
+                {p.version_req && <span className="mono dim"> {p.version_req}</span>}
+                {p.resolved_version
+                  ? <span> → <span className="mono">{p.resolved_version}</span></span>
+                  : <span className="warn"> not resolved yet</span>}
+                {p.integrity && p.resolved_version && (
+                  <div className="mono dim bx-hash">{p.integrity}</div>)}
+              </div>))}</dd>
+          </Fragment>
+        ))}
+        <dt>memory floor</dt><dd>{e.min_mem_mb} MB</dd>
+        {e.reason && <><dt>why</dt><dd>{e.reason}</dd></>}
+        {e.conversation_id && <><dt>conversation</dt><dd className="mono">{e.conversation_id}</dd></>}
+        {pending && e.plan && <><dt>on approve</dt><dd>{e.plan}</dd></>}
+        {pending && <><dt>other projects</dt><dd>unchanged</dd></>}
+        {!pending && <><dt>status</dt><dd>{e.status}{e.decided_by ? ` by ${e.decided_by}` : ''}</dd></>}
+        {e.profile && <><dt>profile</dt><dd>{e.project_slug} now uses profile <span className="mono">{e.profile.name}</span></dd></>}
+        {e.build && <><dt>build</dt><dd>{e.build.version} · {e.build.status}
+          {e.build.error ? <span className="warn"> {e.build.error}</span> : null}</dd></>}
+      </dl>
+      {pending && !e.resolved && (
+        <div className="bx-unresolved">
+          <p className="small"><b>Not resolved yet.</b> Approval needs every package's exact version and
+            integrity, which a dry-run in a builder box pins.</p>
+          <Button variant="ghost" disabled={resolving} onClick={resolve}>
+            {resolving ? 'Resolving… (about a minute)' : 'Resolve now'}</Button>
+        </div>
+      )}
+      {pending && (
+        <div className="row">
+          <span className="grow" />
+          <Button variant="ghost" danger onClick={reject}>Reject</Button>
+          <Button disabled={!e.resolved || busy} onClick={approve}>Approve &amp; build</Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ---- skill install requests -------------------------------------------------------
+
+// The source, reason and every fetched word are agent- or internet-written.
+// Pending: only the source is shown and nothing has been contacted. Fetch makes the
+// host download and vet it; Install & grant sends the hash of the text read here.
+export function SkillRequestCard({ r, onDone }) {
+  const [busy, setBusy] = useState(false)
+  const ask = useAsk()
+  const st = skillCardState(r)
+  async function fetchIt() {
+    setBusy(true)
+    try { await fetchSkillRequest(r.id) } catch (err) { notifyError(err) }
+    setBusy(false)
+    onDone()
+  }
+  async function install() {
+    const ok = await ask.confirm(
+      `Install skill ${r.skill_name || r.source}? You have read SKILL.md (sha256 ${String(r.skill_sha256).slice(0, 12)}). `
+      + 'It is installed exactly as read and granted to agents if its requirements are met.',
+      { confirmLabel: 'Install & grant' })
+    if (!ok) return
+    setBusy(true)
+    try {
+      const done = await approveSkillRequest(r.id, r.skill_sha256)
+      notify(done?.granted ? 'skill installed and granted' : `skill installed, not granted${done?.error ? `: ${done.error}` : ''}`)
+      onDone()
+    } catch (err) { notifyError(err) }
+    setBusy(false)
+  }
+  async function reject() {
+    const reason = await ask.prompt(`Reject skill request ${r.source}? Reason (optional)`, '',
+                                    { confirmLabel: 'Reject' })
+    if (reason === null) return
+    try { await rejectSkillRequest(r.id, reason); onDone() } catch (err) { notifyError(err) }
+  }
+  return (
+    <div className="sbx-card bx-svc-req">
+      <div className="bx-pkg-top">
+        <Tag tone="pending">skill</Tag>
+        <b className="mono">{r.skill_name || r.name || 'skill request'}</b>
+        {r.project_slug && <Tag>{r.project_slug}</Tag>}
+        <Tag>{r.status}</Tag>
+        <span className="dim small">{ago(r.created_at)}</span>
+      </div>
+      <dl className="bx-kv small">
+        <dt>source</dt><dd className="mono">{r.source}</dd>
+        {r.reason && <><dt>why</dt><dd>{r.reason}</dd></>}
+        {r.conversation_id && <><dt>conversation</dt><dd className="mono">{r.conversation_id}</dd></>}
+        {st.status === 'pending' && <><dt>fetched</dt><dd>not yet: nothing has been downloaded</dd></>}
+        {r.ref && <><dt>ref</dt><dd className="mono bx-hash">{r.ref}</dd></>}
+        {r.description && <><dt>description</dt><dd>{r.description}</dd></>}
+        {st.files.length > 0 && <><dt>files</dt><dd className="mono">{st.files.join('  ')}</dd></>}
+        {(r.flags || []).length > 0 && <><dt>diff gates</dt>
+          <dd>{r.flags.map((f, i) => (
+            <div key={i} className="warn"><span className="mono">{f.file}</span>: {f.trigger}</div>))}</dd></>}
+        {(r.requirements || []).length > 0 && <><dt>requires</dt>
+          <dd>{r.requirements.map((q, i) => (
+            <div key={i} className={q.met ? '' : 'warn'}>{q.met ? 'met' : 'NOT met'}: {q.reason}</div>))}</dd></>}
+        {st.status === 'installed' && <><dt>installed</dt>
+          <dd>{r.granted ? 'granted to agents' : 'installed, not granted'}
+            {st.notGranted && r.error ? <span className="warn"> — {r.error}</span> : null}</dd></>}
+      </dl>
+      {r.error && st.status !== 'installed' && <div className="warn small">{r.error}</div>}
+      {r.skill_md && st.status === 'fetched' && (
+        <pre className="mono small bx-skill-md">{r.skill_md}</pre>)}
+      {(st.canFetch || st.canRefetch || st.canReject) && (
+        <div className="row">
+          <span className="grow" />
+          {st.canReject && <Button variant="ghost" danger onClick={reject}>Reject</Button>}
+          {st.canRefetch && <Button variant="ghost" disabled={busy} onClick={fetchIt}>Fetch again</Button>}
+          {st.canFetch && <Button disabled={busy} onClick={fetchIt}>Fetch &amp; read</Button>}
+          {st.canInstall && <Button disabled={busy} onClick={install}>Install &amp; grant</Button>}
+        </div>
+      )}
     </div>
   )
 }
