@@ -99,6 +99,7 @@ Row shape (API and `list_rows`):
  "build": null}
 ```
 
+`plan` (what approving would do) is set only while the row is pending.
 After approval `profile` is `{"id", "name"}` of the profile the project moved
 to and `build` is the variant's newest version `{"version", "status",
 "error"}` from image_versions (or null before the first build row exists).

@@ -102,7 +102,8 @@ async def _shape(db, r: dict) -> dict:
                                           "canonical_command", "status")} for p in pk]
     out["resolved"] = bool(pk) and all(p["resolved_version"] for p in pk)
     out["profile_now"] = {"id": now["id"], "name": now["name"]}
-    out["plan"] = await _plan(db, r, now)
+    # what approving WOULD do; once decided, `profile` says what it did
+    out["plan"] = await _plan(db, r, now) if r["status"] == "pending" else None
     out["profile"] = None
     out["build"] = None
     if r["status"] == "approved":
