@@ -36,7 +36,7 @@ CAPS = ("services", "desktop", "packages", "browser", "desk", "internet")
 LABELS = {
     "services": "services (service_request)",
     "desktop": "the desktop image: screenshots, headless chromium, GUI apps (screenshot)",
-    "packages": "package requests (package_request)",
+    "packages": "package and environment requests (package_request, environment_request)",
     "browser": "the operator's browser (browser_* tools)",
     "desk": "computer use (desk_* tools)",
     "internet": "internet",
@@ -218,7 +218,7 @@ _SERVICE_WORDS = re.compile(
     r"\bservice[_ ]request\b|\b(?:long[- ]running|persistent|background) service\b"
     r"|\bsystemd\b|\bdocker[- ]compose\b", re.I)
 _DESK_WORDS = re.compile(r"\bdesk_\w+|\bcomputer[- ]use\b", re.I)
-_PACKAGE_WORDS = re.compile(r"\bpackage_request\b", re.I)
+_PACKAGE_WORDS = re.compile(r"\b(?:package|environment)_request\b", re.I)
 _NET_WORDS = re.compile(
     r"\b(?:pip3?|npm|yarn|pnpm|cargo|gem) (?:install|i|add)\b|\bapt(?:-get)? install\b"
     r"|\bgit clone\b|\bcurl\b|\bwget\b|\bdownload\w*\b", re.I)
